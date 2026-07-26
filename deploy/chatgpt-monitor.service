@@ -1,0 +1,48 @@
+[Unit]
+Description=ChatGPT Monitor API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=chatgpt-monitor
+Group=chatgpt-monitor
+WorkingDirectory=/opt/chatgpt-monitor/current
+EnvironmentFile=/etc/chatgpt-monitor/server.env
+ExecStartPre=/opt/chatgpt-monitor/current/scripts/pre-migrate-backup.sh /var/lib/chatgpt-monitor/chatgpt-monitor.db /var/backups/chatgpt-monitor /etc/chatgpt-monitor/backup.pass
+ExecStart=/opt/chatgpt-monitor/current/bin/chatgpt-monitor
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=20s
+UMask=0077
+
+StateDirectory=chatgpt-monitor
+StateDirectoryMode=0700
+RuntimeDirectory=chatgpt-monitor
+RuntimeDirectoryMode=0700
+ReadWritePaths=/var/lib/chatgpt-monitor /var/backups/chatgpt-monitor
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RemoveIPC=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+MemoryMax=512M
+CPUQuota=100%
+TasksMax=128
+LimitNOFILE=4096
+
+[Install]
+WantedBy=multi-user.target

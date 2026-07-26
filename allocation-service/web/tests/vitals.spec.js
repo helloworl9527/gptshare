@@ -1,0 +1,128 @@
+import { expect, test } from '@playwright/test'
+import path from 'node:path'
+
+const screenshots = path.resolve('..', '..', '.workflow', 'screenshots')
+
+async function scenario(request, name, reset = false) {
+  const response = await request.post('http://127.0.0.1:4174/__test/scenario', { data: { name, reset } })
+  expect(response.ok()).toBeTruthy()
+}
+
+async function login(page) {
+  await page.goto('/admin/login')
+  await page.getByLabel('管理员账号').fill('admin')
+  await page.getByLabel('密码').fill('controlled-test-password')
+  await page.getByRole('button', { name: '验证密码' }).click()
+  await expect(page.getByRole('heading', { name: '二次验证' })).toBeVisible()
+  await page.getByLabel('动态验证码').fill('123456')
+  await page.getByRole('button', { name: '完成登录' }).click()
+  await expect(page.getByRole('heading', { name: '管理员后台' })).toBeVisible()
+}
+
+test.beforeEach(async ({ request }) => {
+  await scenario(request, 'default', true)
+})
+
+test('desktop dashboard and four-page navigation have no console errors', async ({ page }) => {
+  const consoleErrors = []
+  page.on('console', (msg) => { if (msg.type() === 'error') consoleErrors.push(msg.text()) })
+  await login(page)
+  await expect(page.locator('.kpi-card strong')).toHaveText(['注意', '2', '0.1', '0'])
+  await expect(page.getByRole('link', { name: 'Dashboard' })).toHaveAttribute('aria-current', 'page')
+  await page.screenshot({ path: path.join(screenshots, 'p2-step09-dashboard-desktop.png'), fullPage: true })
+
+  await page.getByRole('link', { name: 'Accounts' }).click()
+  await expect(page.getByRole('heading', { name: '账号池' })).toBeVisible()
+  await page.getByLabel('默认容量').fill('6')
+  await page.getByRole('button', { name: '保存默认' }).click()
+  await expect(page.getByText('默认容量已保存。')).toBeVisible()
+  await page.locator('.compact-action', { hasText: '从一期同步账号' }).click()
+  await expect(page.getByText('已从一期同步 1 个新账号，更新 0 个账号。')).toBeVisible()
+  await page.getByLabel('搜索账号').fill('pulled-sync@example.test')
+  await expect(page.locator('tbody tr')).toContainText('pending_credentials')
+  await expect(page.locator('tbody tr')).toContainText('0/6')
+  await page.screenshot({ path: path.join(screenshots, 'sync-pull-pending-desktop.png'), fullPage: true })
+  page.once('dialog', async (dialog) => {
+    expect(dialog.message()).toContain('已有分配不会被删除')
+    await dialog.accept()
+  })
+  await page.getByRole('button', { name: '应用到全部账号' }).click()
+  await expect(page.getByText('已应用到')).toBeVisible()
+  await expect(page.locator('tbody tr')).toContainText('0/6')
+  await page.getByLabel('搜索账号').fill('amber-allocation@example.test')
+  await expect(page.locator('tbody tr')).toHaveCount(1)
+  await page.locator('tbody tr').first().getByRole('button', { name: '编辑' }).click()
+  await expect(page.getByRole('dialog', { name: '编辑账号' })).toBeVisible()
+  await expect(page.getByPlaceholder('留空不修改').first()).toBeEmpty()
+  await expect(page.getByLabel('邮箱')).toHaveValue('amber-allocation@example.test')
+  await page.getByLabel('新密码').fill('edited-password')
+  await page.getByLabel('新 2FA Secret').fill('JBSWY3DPEHPK3PXR')
+  await page.getByRole('button', { name: '保存修改' }).click()
+  await expect(page.getByText('账号已更新。')).toBeVisible()
+  await page.getByLabel('搜索账号').fill('amber-allocation@example.test')
+  await expect(page.getByText('amber-allocation@example.test')).toBeVisible()
+  await expect(page.getByText('edited-password')).toHaveCount(0)
+  await expect(page.getByText('JBSWY3DPEHPK3PXR')).toHaveCount(0)
+  await page.screenshot({ path: path.join(screenshots, 'p2-step09-accounts-desktop.png'), fullPage: true })
+
+  await page.getByRole('link', { name: 'Cards' }).click()
+  await expect(page.getByRole('heading', { name: '卡密管理' })).toBeVisible()
+  await expect(page.getByText('**** ABCD')).toBeVisible()
+  await expect(page.getByText('2345-6789-ABCD')).toHaveCount(0)
+  await page.getByRole('button', { name: '查看尾号 ABCD 的卡密明文' }).click()
+  await expect(page.getByText('2345-6789-ABCD')).toBeVisible()
+  await page.screenshot({ path: path.join(screenshots, 'uir-3-card-reveal-desktop.png'), fullPage: true })
+  await page.getByRole('button', { name: '隐藏' }).click()
+  await expect(page.getByText('2345-6789-ABCD')).toHaveCount(0)
+  await page.getByRole('button', { name: '批量生成' }).click()
+  await expect(page.getByRole('dialog')).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+  await page.screenshot({ path: path.join(screenshots, 'p2-step09-cards-desktop.png'), fullPage: true })
+
+  await page.getByRole('link', { name: 'Allocations' }).click()
+  await expect(page.getByRole('heading', { name: '分配记录' })).toBeVisible()
+  await expect(page.getByText('**** EFGH')).toBeVisible()
+  expect(consoleErrors).toEqual([])
+})
+
+test('loading empty error recovery and focus trap are accessible', async ({ page, request }) => {
+  await scenario(request, 'empty', true)
+  await login(page)
+  await expect(page.getByRole('heading', { name: '暂无兑换记录' })).toBeVisible()
+
+  await page.getByRole('link', { name: 'Accounts' }).click()
+  await scenario(request, 'default')
+  await page.locator('.compact-action', { hasText: '从一期同步账号' }).click()
+  await expect(page.getByText('已从一期同步 1 个新账号，更新 0 个账号。')).toBeVisible()
+  await page.locator('tbody tr').first().getByRole('button', { name: '编辑' }).click()
+  await expect(page.getByRole('dialog', { name: '编辑账号' })).toBeVisible()
+  await page.keyboard.press('Tab')
+  await expect(page.getByLabel('邮箱')).toBeFocused()
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+
+  await scenario(request, 'error')
+  await page.getByRole('button', { name: '刷新' }).click()
+  await expect(page.getByRole('heading', { name: '账号池读取失败' })).toBeVisible()
+  await scenario(request, 'default')
+  await page.getByRole('button', { name: '重新连接' }).click()
+  await expect(page.getByText('north@example.test')).toBeVisible()
+})
+
+test('mobile layout, keyboard, reduced motion, and a11y assertions', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await login(page)
+  await expect(page.getByRole('navigation', { name: '管理员后台导航' })).toBeVisible()
+  await page.getByRole('link', { name: 'Cards' }).focus()
+  await expect(page.getByRole('link', { name: 'Cards' })).toBeFocused()
+  await page.keyboard.press('Enter')
+  await expect(page.getByRole('heading', { name: '卡密管理' })).toBeVisible()
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+  await page.emulateMedia({ reducedMotion: 'reduce' })
+  const duration = await page.locator('.wordmark-pulse').evaluate((node) => getComputedStyle(node).transitionDuration)
+  expect(Number.parseFloat(duration)).toBeLessThan(0.001)
+  const unlabeledControls = await page.locator('input:not([aria-label]):not([id]), select:not([aria-label]):not([id]), button:empty').count()
+  expect(unlabeledControls).toBe(0)
+  await page.screenshot({ path: path.join(screenshots, 'p2-step09-admin-mobile.png'), fullPage: true })
+})

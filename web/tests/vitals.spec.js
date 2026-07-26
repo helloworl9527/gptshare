@@ -1,0 +1,77 @@
+import { expect, test } from '@playwright/test'
+import path from 'node:path'
+
+const screenshots = path.resolve('..', '.workflow', 'screenshots')
+
+async function scenario(request, name, reset = false) {
+  const response = await request.post('http://127.0.0.1:4174/__test/scenario', { data: { name, reset } })
+  expect(response.ok()).toBeTruthy()
+}
+
+async function login(page) {
+  await page.goto('/admin/login')
+  await page.waitForLoadState('networkidle')
+  await page.getByLabel('管理员账号').fill('admin')
+  await page.getByLabel('密码').fill('controlled-test-password')
+  await page.getByRole('button', { name: '验证密码' }).click()
+  await page.getByLabel('动态验证码').fill('123456')
+  await page.getByRole('button', { name: '完成登录' }).click()
+  await expect(page.getByRole('heading', { name: '运营总览' })).toBeVisible()
+}
+
+test.beforeEach(async ({ request }) => { await scenario(request, 'default', true) })
+
+test('unified admin covers both domains, credential completion and reveal', async ({ page }, testInfo) => {
+  const consoleErrors = []
+  page.on('console', (message) => { if (message.type() === 'error') consoleErrors.push(message.text()) })
+  await login(page)
+  await expect(page.locator('.domain-panel')).toHaveCount(2)
+  for (const name of ['运营总览', '账号体征', '账号池', '卡密', '分配记录', '配置']) await expect(page.getByRole('navigation', { name: '主导航' }).getByRole('link', { name, exact: true })).toBeVisible()
+  await page.screenshot({ path: path.join(screenshots, `mstep04-unified-${testInfo.project.name}.png`), fullPage: true })
+
+  await page.getByRole('link', { name: '账号池', exact: true }).click()
+  await expect(page.getByRole('heading', { name: '账号池' })).toBeVisible()
+  await page.getByRole('button', { name: '从一期同步账号' }).click()
+  await expect(page.getByText('pulled-sync@example.test')).toBeVisible()
+  await expect(page.getByText('pending_credentials')).toBeVisible()
+  await page.getByRole('row', { name: /pulled-sync@example.test/ }).getByRole('button', { name: '编辑' }).click()
+  await page.getByLabel('新密码').fill('completed-password')
+  await page.getByLabel('新 2FA Secret').fill('JBSWY3DPEHPK3PXP')
+  await page.getByRole('dialog').getByRole('button', { name: '保存修改' }).click()
+  await expect(page.getByText('账号已更新')).toBeVisible()
+  await page.screenshot({ path: path.join(screenshots, `mstep04-accounts-${testInfo.project.name}.png`), fullPage: true })
+
+  await page.getByRole('link', { name: '卡密', exact: true }).click()
+  await expect(page.getByRole('heading', { name: '卡密管理' })).toBeVisible()
+  await page.getByRole('row', { name: /ABCD/ }).getByRole('button', { name: '查看' }).click()
+  await expect(page.getByText('2345-6789-ABCD')).toBeVisible()
+  await expect(page.getByText(/查看明文会写入.*审计/)).toBeVisible()
+  await page.screenshot({ path: path.join(screenshots, `mstep04-cards-${testInfo.project.name}.png`), fullPage: true })
+
+  await page.getByRole('link', { name: '配置' }).click()
+  await expect(page.getByRole('heading', { name: '密钥用途边界' })).toBeVisible()
+  await expect(page.getByText('统一管理员认证')).toBeVisible()
+  await expect(page.getByText('监控数据加密')).toBeVisible()
+  await expect(page.getByText('分配数据加密')).toBeVisible()
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+  await page.emulateMedia({ reducedMotion: 'reduce' })
+  const duration = await page.locator('.wordmark-pulse').evaluate((node) => getComputedStyle(node).transitionDuration)
+  expect(Number.parseFloat(duration)).toBeLessThan(0.001)
+  expect(consoleErrors).toEqual([])
+})
+
+test('public card flow remains unauthenticated and clipboard-only', async ({ page }) => {
+  const consoleErrors = []
+  page.on('console', (message) => { if (message.type() === 'error') consoleErrors.push(message.text()) })
+  await page.goto('/admin/user.html')
+  await page.waitForLoadState('networkidle')
+  await expect(page.getByRole('heading', { name: '卡密查询', exact: true })).toBeVisible()
+  await page.getByLabel('卡密').fill('2345-6789-ABCD')
+  await page.getByRole('button', { name: '查询或兑换卡密' }).click()
+  await expect(page.getByText('public@example.test')).toBeVisible()
+  await expect(page.locator('#totp-code')).not.toHaveText('------')
+  await page.getByRole('button', { name: '复制账号' }).click()
+  await expect(page.locator('#copy-status')).toHaveText(/已复制|无法复制/)
+  expect(await page.evaluate(() => [localStorage.length, sessionStorage.length])).toEqual([0, 0])
+  expect(consoleErrors).toEqual([])
+})

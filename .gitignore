@@ -1,0 +1,70 @@
+# ── OS ─────────────────────────────────────────
+.DS_Store
+
+# ── Agent / tooling local dirs ────────────────────
+.claude/
+.aionrs/
+.gemini/
+.codex/
+
+# ── Delivery-workflow internals, dev runtime, backups, artifacts ──
+# (contains dev secrets, seed data, self-signed certs, DBs, build artifacts)
+.workflow/
+.dev-run/
+
+# ── Secrets & environment ─────────────────────────
+*.env
+!*.env.example
+.env
+.env.local
+.env.*.local
+
+# ── Databases ─────────────────────────────────────
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+data/
+
+# ── TLS material / private keys ───────────────────
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# ── Build artifacts / compiled binaries ───────────
+/vitals
+/server-bin
+artifacts/
+**/artifacts/
+*.tar.gz
+*.tgz
+dist/
+build/
+
+# ── Go ────────────────────────────────────────────
+*.test
+*.out
+coverage.*
+vendor/
+
+# ── Node / frontend ───────────────────────────────
+node_modules/
+web/dist/
+web/test-results/
+web/playwright-report/
+web/coverage/
+npm-debug.log*
+yarn-error.log*
+
+# ── Logs / pids ───────────────────────────────────
+*.log
+*.pid
+
+# ── Dev-only local acceptance tooling (not part of product; embeds local dev creds) ──
+cmd/vitals-dev-seed/
+scripts/vitals-dev-run.sh
+scripts/vitals-dev-stop.sh
+allocation-service/scripts/dev-run.sh

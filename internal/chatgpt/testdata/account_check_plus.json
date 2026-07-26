@@ -1,0 +1,13 @@
+{
+  "accounts": {
+    "acct-placeholder": {
+      "account": {
+        "account_id": "acct-placeholder"
+      },
+      "entitlement": {
+        "subscription_plan": "chatgptplusplan",
+        "expires_at": "2030-01-02T03:04:05Z"
+      }
+    }
+  }
+}

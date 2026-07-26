@@ -1,0 +1,37 @@
+[Unit]
+Description=Vitals Unified Monitor and Allocation Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=vitals
+Group=vitals
+WorkingDirectory=/opt/vitals/current
+EnvironmentFile=/etc/vitals/server.env
+ExecStartPre=/opt/vitals/current/scripts/vitals-preflight.sh /etc/vitals/server.env
+ExecStartPre=/opt/vitals/current/scripts/vitals-backup.sh /var/lib/vitals/monitor.db /var/lib/vitals/allocation.db /var/backups/vitals /etc/vitals/backup.pass
+ExecStartPre=/opt/vitals/current/bin/vitals-migrate
+ExecStart=/opt/vitals/current/bin/vitals
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+UMask=0077
+StateDirectory=vitals
+StateDirectoryMode=0700
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/vitals /var/backups/vitals
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+MemoryMax=2560M
+CPUQuota=200%
+TasksMax=256
+LimitNOFILE=4096
+
+[Install]
+WantedBy=multi-user.target

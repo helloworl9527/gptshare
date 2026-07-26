@@ -1,0 +1,688 @@
+# 账号分配与卡密服务实施计划（二期）
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** 构建对外提供的 ChatGPT 账号共享服务，基于卡密兑换模式，实现账号自动分配、库存管理、智能预警。
+
+**Architecture:** 
+- 一期扩展：新增 3 个 API 端点供二期调用（API Key 认证）
+- 二期独立服务：Go 后端 + Vue3 前端，SQLite 独立数据库
+- 核心算法：最小化账号时间浪费的分配策略 + 自动替换机制
+
+**Tech Stack:**
+- Backend: Go 1.22+, Gin, SQLite, GORM
+- Frontend: Vue 3, Vite, 复用一期 Vitals CSS
+- Integration: HTTP REST API（一期 ↔ 二期）
+- Deployment: Ubuntu 2核/2.5G（与一期相同环境）
+
+## Global Constraints
+
+- Go 版本：≥ 1.22
+- 前端构建工具：Vite 5.x
+- 数据库：SQLite 3（二期独立库文件）
+- 响应式断点：640px / 980px（与一期一致）
+- 字体：Space Grotesk（标题）、IBM Plex Mono（数据）、Noto Sans SC（正文）
+- 色彩：ChatGPT 绿 #10a37f + 浅绿灰 #eef2f0（Vitals 风格）
+- 文案：简体中文，简洁直接，无冗余
+- 提交消息：遵循 Conventional Commits（feat/fix/docs/test）
+- 先本地开发验证，完成后上传服务器部署
+
+---
+
+## 批次 1：核心兑换流程（MVP）
+
+**目标**：用户能够兑换卡密并查看账号信息
+
+---
+
+### Task 1: 一期 API 扩展 - API Key 认证中间件
+
+**Files:**
+- Modify: `server/middleware/auth.go` (新增 API Key 认证函数)
+- Modify: `server/config/config.go` (新增配置项)
+- Test: `server/middleware/auth_test.go`
+
+**Interfaces:**
+- Consumes: 无（基础设施）
+- Produces: `func APIKeyAuth() gin.HandlerFunc` - 返回 API Key 认证中间件
+
+- [ ] **Step 1: 写测试 - API Key 认证成功**
+
+在 `server/middleware/auth_test.go` 新增：
+
+```go
+func TestAPIKeyAuth_ValidKey(t *testing.T) {
+    cfg := &config.Config{
+        AllocationServiceAPIKey: "test-api-key-12345",
+    }
+    
+    w := httptest.NewRecorder()
+    c, _ := gin.CreateTestContext(w)
+    c.Request = httptest.NewRequest("GET", "/test", nil)
+    c.Request.Header.Set("Authorization", "Bearer test-api-key-12345")
+    
+    middleware := APIKeyAuth(cfg)
+    middleware(c)
+    
+    assert.Equal(t, 200, w.Code)
+}
+
+func TestAPIKeyAuth_InvalidKey(t *testing.T) {
+    cfg := &config.Config{
+        AllocationServiceAPIKey: "test-api-key-12345",
+    }
+    
+    w := httptest.NewRecorder()
+    c, _ := gin.CreateTestContext(w)
+    c.Request = httptest.NewRequest("GET", "/test", nil)
+    c.Request.Header.Set("Authorization", "Bearer wrong-key")
+    
+    middleware := APIKeyAuth(cfg)
+    middleware(c)
+    
+    assert.Equal(t, 401, w.Code)
+}
+```
+
+- [ ] **Step 2: 运行测试验证失败**
+
+```bash
+cd server
+go test ./middleware -run TestAPIKeyAuth -v
+```
+
+预期输出：`FAIL: undefined: APIKeyAuth`
+
+- [ ] **Step 3: 实现 API Key 认证中间件**
+
+在 `server/middleware/auth.go` 新增：
+
+```go
+func APIKeyAuth(cfg *config.Config) gin.HandlerFunc {
+    return func(c *gin.Context) {
+        authHeader := c.GetHeader("Authorization")
+        
+        if authHeader == "" {
+            c.JSON(401, gin.H{"error": "Missing Authorization header"})
+            c.Abort()
+            return
+        }
+        
+        // 格式：Bearer <api_key>
+        parts := strings.SplitN(authHeader, " ", 2)
+        if len(parts) != 2 || parts[0] != "Bearer" {
+            c.JSON(401, gin.H{"error": "Invalid Authorization format"})
+            c.Abort()
+            return
+        }
+        
+        apiKey := parts[1]
+        if apiKey != cfg.AllocationServiceAPIKey {
+            c.JSON(401, gin.H{"error": "Invalid API key"})
+            c.Abort()
+            return
+        }
+        
+        c.Next()
+    }
+}
+```
+
+在 `server/config/config.go` 的 `Config` 结构体新增字段：
+
+```go
+type Config struct {
+    // ... 现有字段
+    AllocationServiceAPIKey string `env:"ALLOCATION_SERVICE_API_KEY" envDefault:""`
+}
+```
+
+- [ ] **Step 4: 运行测试验证通过**
+
+```bash
+cd server
+go test ./middleware -run TestAPIKeyAuth -v
+```
+
+预期输出：`PASS`
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add server/middleware/auth.go server/middleware/auth_test.go server/config/config.go
+git commit -m "feat(phase2): add API key authentication middleware for allocation service
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 2: 一期 API 扩展 - 批量状态查询端点
+
+**Files:**
+- Create: `server/handlers/allocation_api.go`
+- Modify: `server/main.go` (注册新路由)
+- Test: `server/handlers/allocation_api_test.go`
+
+**Interfaces:**
+- Consumes: `APIKeyAuth()` 中间件（Task 1）
+- Produces: `POST /api/v1/monitor/accounts/batch-status` - 批量查询账号状态
+
+- [ ] **Step 1: 写测试 - 批量查询成功**
+
+创建 `server/handlers/allocation_api_test.go`:
+
+```go
+package handlers
+
+import (
+    "bytes"
+    "encoding/json"
+    "net/http/httptest"
+    "testing"
+    "github.com/gin-gonic/gin"
+    "github.com/stretchr/testify/assert"
+)
+
+func TestBatchAccountStatus_Success(t *testing.T) {
+    // Setup mock database with test accounts
+    db := setupTestDB(t)
+    defer db.Close()
+    
+    // Insert test account
+    db.Exec(`INSERT INTO accounts (provider_account_id, status, plan) 
+             VALUES ('user-123', 'alive', 'plus')`)
+    
+    w := httptest.NewRecorder()
+    c, _ := gin.CreateTestContext(w)
+    
+    reqBody := map[string]interface{}{
+        "provider_account_ids": []string{"user-123"},
+    }
+    bodyBytes, _ := json.Marshal(reqBody)
+    c.Request = httptest.NewRequest("POST", "/batch-status", bytes.NewReader(bodyBytes))
+    c.Request.Header.Set("Content-Type", "application/json")
+    
+    handler := &AllocationAPIHandler{DB: db}
+    handler.BatchAccountStatus(c)
+    
+    assert.Equal(t, 200, w.Code)
+    
+    var resp []map[string]interface{}
+    json.Unmarshal(w.Body.Bytes(), &resp)
+    assert.Len(t, resp, 1)
+    assert.Equal(t, "user-123", resp[0]["provider_account_id"])
+    assert.Equal(t, "alive", resp[0]["status"])
+}
+```
+
+- [ ] **Step 2: 运行测试验证失败**
+
+```bash
+cd server
+go test ./handlers -run TestBatchAccountStatus -v
+```
+
+预期输出：`FAIL: undefined: AllocationAPIHandler`
+
+- [ ] **Step 3: 实现批量状态查询**
+
+创建 `server/handlers/allocation_api.go`:
+
+```go
+package handlers
+
+import (
+    "database/sql"
+    "github.com/gin-gonic/gin"
+)
+
+type AllocationAPIHandler struct {
+    DB *sql.DB
+}
+
+type BatchStatusRequest struct {
+    ProviderAccountIDs []string `json:"provider_account_ids" binding:"required"`
+}
+
+type AccountStatusResponse struct {
+    ProviderAccountID string  `json:"provider_account_id"`
+    Status            string  `json:"status"`
+    Plan              string  `json:"plan"`
+    AuthExpiry        *string `json:"auth_expiry"`
+    LastCheckAt       *string `json:"last_check_at"`
+}
+
+func (h *AllocationAPIHandler) BatchAccountStatus(c *gin.Context) {
+    var req BatchStatusRequest
+    if err := c.ShouldBindJSON(&req); err != nil {
+        c.JSON(400, gin.H{"error": "Invalid request body"})
+        return
+    }
+    
+    if len(req.ProviderAccountIDs) == 0 {
+        c.JSON(400, gin.H{"error": "provider_account_ids cannot be empty"})
+        return
+    }
+    
+    if len(req.ProviderAccountIDs) > 100 {
+        c.JSON(400, gin.H{"error": "Maximum 100 accounts per request"})
+        return
+    }
+    
+    query := `SELECT provider_account_id, status, plan, auth_expiry, last_check_at 
+              FROM accounts WHERE provider_account_id IN (?` + 
+              strings.Repeat(",?", len(req.ProviderAccountIDs)-1) + `)`
+    
+    args := make([]interface{}, len(req.ProviderAccountIDs))
+    for i, id := range req.ProviderAccountIDs {
+        args[i] = id
+    }
+    
+    rows, err := h.DB.Query(query, args...)
+    if err != nil {
+        c.JSON(500, gin.H{"error": "Database query failed"})
+        return
+    }
+    defer rows.Close()
+    
+    results := []AccountStatusResponse{}
+    for rows.Next() {
+        var r AccountStatusResponse
+        err := rows.Scan(&r.ProviderAccountID, &r.Status, &r.Plan, &r.AuthExpiry, &r.LastCheckAt)
+        if err != nil {
+            continue
+        }
+        results = append(results, r)
+    }
+    
+    c.JSON(200, results)
+}
+```
+
+- [ ] **Step 4: 注册路由**
+
+在 `server/main.go` 新增（在 `setupRoutes` 函数中）:
+
+```go
+// Allocation Service API (requires API Key)
+v1 := r.Group("/api/v1/monitor")
+{
+    allocationAPI := handlers.AllocationAPIHandler{DB: db}
+    v1.POST("/accounts/batch-status", middleware.APIKeyAuth(cfg), allocationAPI.BatchAccountStatus)
+}
+```
+
+- [ ] **Step 5: 运行测试验证通过**
+
+```bash
+cd server
+go test ./handlers -run TestBatchAccountStatus -v
+```
+
+预期输出：`PASS`
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add server/handlers/allocation_api.go server/handlers/allocation_api_test.go server/main.go
+git commit -m "feat(phase2): add batch account status API endpoint
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 3: 二期项目初始化
+
+**Files:**
+- Create: `allocation-service/go.mod`
+- Create: `allocation-service/main.go`
+- Create: `allocation-service/.env.example`
+- Create: `allocation-service/README.md`
+
+**Interfaces:**
+- Consumes: 无（项目初始化）
+- Produces: 可运行的 Go 项目骨架
+
+- [ ] **Step 1: 创建项目目录和 go.mod**
+
+```bash
+mkdir -p allocation-service
+cd allocation-service
+go mod init github.com/yourusername/allocation-service
+go get github.com/gin-gonic/gin@latest
+go get gorm.io/gorm@latest
+go get gorm.io/driver/sqlite@latest
+go get github.com/joho/godotenv@latest
+```
+
+- [ ] **Step 2: 创建主入口文件**
+
+创建 `allocation-service/main.go`:
+
+```go
+package main
+
+import (
+    "log"
+    "os"
+    
+    "github.com/gin-gonic/gin"
+    "github.com/joho/godotenv"
+)
+
+func main() {
+    // Load .env
+    if err := godotenv.Load(); err != nil {
+        log.Println("No .env file found")
+    }
+    
+    port := os.Getenv("PORT")
+    if port == "" {
+        port = "8081"
+    }
+    
+    r := gin.Default()
+    
+    r.GET("/health", func(c *gin.Context) {
+        c.JSON(200, gin.H{"status": "ok"})
+    })
+    
+    log.Printf("Starting allocation service on port %s", port)
+    r.Run(":" + port)
+}
+```
+
+- [ ] **Step 3: 创建环境变量模板**
+
+创建 `allocation-service/.env.example`:
+
+```env
+PORT=8081
+DATABASE_PATH=./allocation.db
+MONITOR_SERVICE_URL=http://localhost:8080
+MONITOR_SERVICE_API_KEY=your-api-key-here
+ADMIN_PASSWORD=your-admin-password
+ADMIN_TOTP_SECRET=your-totp-secret
+```
+
+- [ ] **Step 4: 创建 README**
+
+创建 `allocation-service/README.md`:
+
+```markdown
+# ChatGPT 账号分配服务（二期）
+
+对外提供 ChatGPT 账号共享服务，基于卡密兑换模式。
+
+## 功能
+
+- 卡密生成与管理
+- 账号池管理
+- 智能分配算法（最小化时间浪费）
+- 自动替换机制
+- 库存健康度预警
+
+## 技术栈
+
+- Go 1.22+
+- Gin Web Framework
+- GORM + SQLite
+- Vue 3 + Vite（前端）
+
+## 本地开发
+
+\`\`\`bash
+# 安装依赖
+go mod download
+
+# 复制环境变量
+cp .env.example .env
+
+# 运行
+go run main.go
+\`\`\`
+
+## 与一期集成
+
+本服务调用一期监控服务的 API 获取账号状态。
+
+## 部署
+
+先本地开发验证，完成后上传服务器。
+```
+
+- [ ] **Step 5: 验证项目可运行**
+
+```bash
+cd allocation-service
+go run main.go
+```
+
+在另一个终端测试：
+```bash
+curl http://localhost:8081/health
+```
+
+预期输出：`{"status":"ok"}`
+
+按 Ctrl+C 停止服务
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add allocation-service/
+git commit -m "feat(phase2): initialize allocation service project
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 4: 二期数据库模型与迁移
+
+**Files:**
+- Create: `allocation-service/models/models.go`
+- Create: `allocation-service/database/database.go`
+- Create: `allocation-service/database/migrations.go`
+- Test: `allocation-service/database/database_test.go`
+
+**Interfaces:**
+- Consumes: GORM, SQLite driver
+- Produces: 
+  - `type Account struct` - 账号模型
+  - `type Card struct` - 卡密模型
+  - `type Allocation struct` - 分配记录模型
+  - `func InitDB(path string) (*gorm.DB, error)` - 初始化数据库
+
+- [ ] **Step 1: 写测试 - 数据库初始化**
+
+创建 `allocation-service/database/database_test.go`:
+
+```go
+package database
+
+import (
+    "os"
+    "testing"
+    "github.com/stretchr/testify/assert"
+)
+
+func TestInitDB_Success(t *testing.T) {
+    tmpFile := "test_allocation.db"
+    defer os.Remove(tmpFile)
+    
+    db, err := InitDB(tmpFile)
+    assert.NoError(t, err)
+    assert.NotNil(t, db)
+    
+    // Verify tables exist
+    assert.True(t, db.Migrator().HasTable(&models.Account{}))
+    assert.True(t, db.Migrator().HasTable(&models.Card{}))
+    assert.True(t, db.Migrator().HasTable(&models.Allocation{}))
+}
+```
+
+- [ ] **Step 2: 运行测试验证失败**
+
+```bash
+cd allocation-service
+go test ./database -v
+```
+
+预期输出：`FAIL: undefined: InitDB`
+
+- [ ] **Step 3: 定义数据模型**
+
+创建 `allocation-service/models/models.go`:
+
+```go
+package models
+
+import (
+    "time"
+    "gorm.io/gorm"
+)
+
+// Account 账号池
+type Account struct {
+    ID                  uint      `gorm:"primaryKey"`
+    DisplayUsername     string    `gorm:"not null;index"`
+    DisplayPassword     string    `gorm:"not null"`
+    Display2FA          string    `gorm:"column:display_2fa"`
+    DisplayTemplate     string    `gorm:"default:basic"`
+    AccountExpiry       time.Time `gorm:"not null;index"`
+    MaxConcurrentUsers  int       `gorm:"default:5"`
+    CurrentAllocations  int       `gorm:"default:0"`
+    MonitorEnabled      bool      `gorm:"default:false"`
+    MonitorAccountID    string    `gorm:"index"`
+    MonitorToken        string    // 加密存储
+    Status              string    `gorm:"default:available;index"` // available/full/expired/banned
+    CreatedAt           time.Time
+    UpdatedAt           time.Time
+}
+
+// Card 卡密
+type Card struct {
+    ID           uint      `gorm:"primaryKey"`
+    Code         string    `gorm:"uniqueIndex;not null"`
+    DurationDays int       `gorm:"not null"`
+    Status       string    `gorm:"default:unused;index"` // unused/redeemed/expired/revoked
+    RedeemedAt   *time.Time
+    ExpiresAt    time.Time `gorm:"not null;index"`
+    CreatedAt    time.Time
+}
+
+// Allocation 分配记录
+type Allocation struct {
+    ID           uint      `gorm:"primaryKey"`
+    CardID       uint      `gorm:"not null;index"`
+    Card         Card      `gorm:"foreignKey:CardID"`
+    AccountID    uint      `gorm:"not null;index"`
+    Account      Account   `gorm:"foreignKey:AccountID"`
+    AllocatedAt  time.Time `gorm:"not null"`
+    ValidUntil   time.Time `gorm:"not null;index"`
+    LastViewedAt *time.Time
+    IsReplaced   bool      `gorm:"default:false"`
+    ReplacedAt   *time.Time
+}
+
+// ReplacementHistory 替换历史
+type ReplacementHistory struct {
+    ID              uint      `gorm:"primaryKey"`
+    AllocationID    uint      `gorm:"not null"`
+    OldAccountID    uint      `gorm:"not null"`
+    NewAccountID    uint      `gorm:"not null"`
+    Reason          string    `gorm:"not null"` // banned/expired
+    ReplacedAt      time.Time `gorm:"not null"`
+    MigrationPeriod int       `gorm:"default:0"` // 保留小时数（0=立即替换，24=保留24h）
+}
+```
+
+- [ ] **Step 4: 实现数据库初始化**
+
+创建 `allocation-service/database/database.go`:
+
+```go
+package database
+
+import (
+    "gorm.io/driver/sqlite"
+    "gorm.io/gorm"
+    "allocation-service/models"
+)
+
+func InitDB(path string) (*gorm.DB, error) {
+    db, err := gorm.Open(sqlite.Open(path), &gorm.Config{})
+    if err != nil {
+        return nil, err
+    }
+    
+    // Auto migrate
+    err = db.AutoMigrate(
+        &models.Account{},
+        &models.Card{},
+        &models.Allocation{},
+        &models.ReplacementHistory{},
+    )
+    if err != nil {
+        return nil, err
+    }
+    
+    return db, nil
+}
+```
+
+- [ ] **Step 5: 运行测试验证通过**
+
+```bash
+cd allocation-service
+go get github.com/stretchr/testify/assert
+go test ./database -v
+```
+
+预期输出：`PASS`
+
+- [ ] **Step 6: 更新 main.go 集成数据库**
+
+在 `allocation-service/main.go` 中：
+
+```go
+import (
+    // ... 现有 imports
+    "allocation-service/database"
+)
+
+func main() {
+    // ... 现有代码
+    
+    dbPath := os.Getenv("DATABASE_PATH")
+    if dbPath == "" {
+        dbPath = "./allocation.db"
+    }
+    
+    db, err := database.InitDB(dbPath)
+    if err != nil {
+        log.Fatalf("Failed to initialize database: %v", err)
+    }
+    log.Println("Database initialized")
+    
+    // ... 现有路由代码
+}
+```
+
+- [ ] **Step 7: 提交**
+
+```bash
+git add allocation-service/models/ allocation-service/database/ allocation-service/main.go
+git commit -m "feat(phase2): add database models and initialization
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
+```
+
+---
+
+由于计划很长，这是批次 1 的前 4 个任务。完整计划将包含约 30-40 个任务，覆盖所有三个批次。
+
+是否需要我继续生成剩余任务？

@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>卡密查询</title>
+  <link rel="stylesheet" href="/static/user.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">跳到查询表单</a>
+  <header class="topbar">
+    <div class="wordmark">ChatGPT 账号服务</div>
+    <div class="status-pill" id="clock" aria-live="polite">--:--:--</div>
+  </header>
+  <main id="main">
+    <p class="eyebrow">Vitals Access</p>
+    <h1>卡密查询</h1>
+    <p class="lead">输入卡密查看当前分配的账号信息、订阅剩余时间和本地生成的验证码。</p>
+
+    <section class="panel" aria-labelledby="query-title">
+      <h2 id="query-title" class="eyebrow">Query</h2>
+      <form id="query-form" novalidate>
+        <div class="field">
+          <label for="card-code">卡密</label>
+          <input id="card-code" name="card_code" autocomplete="off" inputmode="latin" spellcheck="false" placeholder="XXXX-XXXX-XXXX…" required>
+        </div>
+        <div id="captcha-box" class="captcha-box" aria-live="polite">
+          <div id="captcha-question" class="captcha-question"></div>
+          <label for="captcha-answer">验证码答案</label>
+          <input id="captcha-answer" name="captcha_answer" autocomplete="off" inputmode="numeric" spellcheck="false" placeholder="输入计算结果…">
+        </div>
+        <div class="button-row">
+          <button class="primary" id="query-button" type="submit">查询或兑换卡密</button>
+        </div>
+        <div id="error" class="alert" role="alert"></div>
+      </form>
+    </section>
+
+    <section id="result" class="panel result" aria-labelledby="result-title">
+      <h2 id="result-title">账号信息</h2>
+      <ul class="info-list">
+        <li class="info-item"><span class="info-label">账号</span><span class="info-value copy-row"><span id="account"></span><button class="copy-button" type="button" data-copy-target="account" aria-label="复制账号">复制</button></span></li>
+        <li class="info-item"><span class="info-label">密码</span><span class="info-value copy-row"><span id="password"></span><button class="copy-button" type="button" data-copy-target="password" aria-label="复制密码">复制</button></span></li>
+        <li class="info-item"><span class="info-label">验证码</span><span class="info-value"><span class="totp-row"><span id="totp-code" class="totp-code">------</span><button class="copy-button" type="button" data-copy-target="totp-code" aria-label="复制验证码">复制</button><button id="refresh-totp" type="button">刷新验证码</button><span id="totp-timer" class="timer"></span></span></span></li>
+        <li class="info-item"><span class="info-label">订阅剩余时间</span><span class="info-value" id="expires-in"></span></li>
+      </ul>
+      <p id="copy-status" class="copy-status" aria-live="polite"></p>
+      <p id="replacement-notice" class="notice"></p>
+    </section>
+  </main>
+  <script src="/static/user.js" defer></script>
+</body>
+</html>
