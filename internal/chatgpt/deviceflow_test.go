@@ -13,9 +13,14 @@ import (
 func TestDevicePollClassifiesPendingAndSlowDown(t *testing.T) {
 	responses := []struct {
 		status int
-		body   map[string]string
+		body   any
 	}{
 		{status: http.StatusBadRequest, body: map[string]string{"error": "authorization_pending"}},
+		{status: http.StatusForbidden, body: map[string]any{"error": map[string]any{
+			"message": "Device authorization is pending. Please try again.",
+			"type":    "invalid_request_error",
+			"code":    "deviceauth_authorization_pending",
+		}}},
 		{status: http.StatusForbidden, body: map[string]string{"error": "slow_down"}},
 	}
 	calls := 0
@@ -31,7 +36,11 @@ func TestDevicePollClassifiesPendingAndSlowDown(t *testing.T) {
 	authorization := DeviceAuthorization{DeviceAuthID: "device-placeholder", UserCode: "ABCD-EFGH", Interval: 5 * time.Second, ExpiresAt: now.Add(time.Minute)}
 	result, err := client.PollDeviceAuthorizationResult(context.Background(), authorization)
 	if err != nil || result.State != DevicePollPending || result.RetryAfter != 5*time.Second {
-		t.Fatalf("pending=%+v err=%v", result, err)
+		t.Fatalf("legacy pending=%+v err=%v", result, err)
+	}
+	result, err = client.PollDeviceAuthorizationResult(context.Background(), authorization)
+	if err != nil || result.State != DevicePollPending || result.RetryAfter != 5*time.Second {
+		t.Fatalf("current pending=%+v err=%v", result, err)
 	}
 	result, err = client.PollDeviceAuthorizationResult(context.Background(), authorization)
 	if err != nil || result.State != DevicePollSlowDown || result.RetryAfter != 10*time.Second {

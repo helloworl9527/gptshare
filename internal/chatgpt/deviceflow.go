@@ -35,10 +35,11 @@ func (c *Client) PollDeviceAuthorizationResult(ctx context.Context, auth DeviceA
 		return DevicePollResult{}, doErr
 	}
 	code := deviceResponseCode(response)
-	if code == "slow_down" {
+	if code == "slow_down" || code == "deviceauth_slow_down" {
 		return DevicePollResult{State: DevicePollSlowDown, RetryAfter: auth.Interval + 5*time.Second}, nil
 	}
-	if code == "authorization_pending" || ((status == http.StatusForbidden || status == http.StatusNotFound) && code == "") {
+	if code == "authorization_pending" || code == "deviceauth_authorization_pending" ||
+		((status == http.StatusForbidden || status == http.StatusNotFound) && code == "") {
 		return DevicePollResult{State: DevicePollPending, RetryAfter: auth.Interval}, nil
 	}
 	if status < 200 || status >= 300 {
