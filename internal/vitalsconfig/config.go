@@ -103,7 +103,11 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 		return Config{}, errors.New("ADMIN_PASSWORD_HASH must be a bcrypt hash with cost at least 12")
 	}
 	appOrigin := get("APP_ORIGIN", "https://"+listenAddr)
-	if err := validateOrigin(appOrigin); err != nil {
+	allowPublicOrigin, err := strconv.ParseBool(get("VITALS_ALLOW_PUBLIC_APP_ORIGIN", "false"))
+	if err != nil {
+		return Config{}, errors.New("VITALS_ALLOW_PUBLIC_APP_ORIGIN must be true or false")
+	}
+	if err := validateOrigin(appOrigin, allowPublicOrigin); err != nil {
 		return Config{}, err
 	}
 	trustProxy, err := strconv.ParseBool(get("TRUST_LOOPBACK_PROXY", "false"))
@@ -247,15 +251,15 @@ func validPasswordHash(value string) bool {
 	return err == nil && cost >= 12
 }
 
-func validateOrigin(value string) error {
+func validateOrigin(value string, allowPublic bool) error {
 	origin, err := url.Parse(value)
 	if err != nil || origin.Scheme != "https" || origin.Host == "" || origin.Path != "" || origin.RawQuery != "" || origin.Fragment != "" || origin.User != nil {
 		return errors.New("APP_ORIGIN must be an HTTPS origin without credentials, path, query, or fragment")
 	}
 	host := origin.Hostname()
 	ip := net.ParseIP(host)
-	if !strings.EqualFold(host, "localhost") && (ip == nil || !ip.IsLoopback()) {
-		return errors.New("APP_ORIGIN must use a loopback host during implementation")
+	if !allowPublic && !strings.EqualFold(host, "localhost") && (ip == nil || !ip.IsLoopback()) {
+		return errors.New("APP_ORIGIN must use a loopback host unless VITALS_ALLOW_PUBLIC_APP_ORIGIN is true")
 	}
 	return nil
 }

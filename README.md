@@ -57,6 +57,29 @@ go build ./cmd/vitals ./cmd/vitals-migrate
 
 访问：后台 `https://<APP_ORIGIN>/admin/`，公开兑换页 `https://<APP_ORIGIN>/`。
 
+## Docker 一键部署
+
+新服务器需预装 Docker（含 Compose 插件）和 OpenSSL。克隆仓库后执行：
+
+```bash
+sudo ./deploy.sh
+```
+
+脚本会自动构建多阶段镜像、生成独立运行密钥和 TOTP、创建本机自签名
+TLS 证书、启动容器并等待健康检查。默认仅监听服务器回环地址：
+
+- 应用：`127.0.0.1:18081`
+- HTTPS：`https://127.0.0.1:19443/`
+- 初始登录信息：`deploy-credentials.txt`（权限 `0600`）
+- 持久化数据库：`data/`
+
+重复执行脚本会保留已有 `.env`、证书和数据库。可在首次执行前通过
+`APP_HTTP_PORT`、`APP_HTTPS_PORT` 和 `ADMIN_USER` 覆盖默认值。
+
+公网域名部署时，应用仍应只监听回环地址，并由宿主机 Nginx 终止 TLS。
+将 `APP_ORIGIN` 设置为完整 HTTPS Origin，同时显式设置
+`VITALS_ALLOW_PUBLIC_APP_ORIGIN=true`；默认值为 `false`，防止意外公开部署。
+
 ## 测试与门禁
 
 ```bash

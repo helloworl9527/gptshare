@@ -77,6 +77,18 @@ func TestLoadDefaultsCompatHTTPToDisabledWithoutAPIKey(t *testing.T) {
 	}
 }
 
+func TestLoadPublicOriginRequiresExplicitOptIn(t *testing.T) {
+	env := validEnv()
+	env["APP_ORIGIN"] = "https://gpt.example.com"
+	if _, err := Load(mapLookup(env)); err == nil {
+		t.Fatal("expected public origin without explicit opt-in to fail")
+	}
+	env["VITALS_ALLOW_PUBLIC_APP_ORIGIN"] = "true"
+	if _, err := Load(mapLookup(env)); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestLoadCompatHTTPRequiresCompleteTemporaryException(t *testing.T) {
 	env := validEnv()
 	env["VITALS_MONITOR_COMPAT_HTTP_ENABLED"] = "true"

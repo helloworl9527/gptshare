@@ -1,0 +1,48 @@
+services:
+  vitals:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: gptshare-vitals:local
+    network_mode: host
+    env_file:
+      - .env
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:${APP_HTTP_PORT}/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+          cpus: "1.50"
+
+  proxy:
+    image: nginx:1.27-alpine
+    network_mode: host
+    environment:
+      APP_HTTP_PORT: ${APP_HTTP_PORT}
+      APP_HTTPS_PORT: ${APP_HTTPS_PORT}
+    volumes:
+      - ./docker/default.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - ./certs:/etc/nginx/tls:ro
+    restart: unless-stopped
+    depends_on:
+      vitals:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://127.0.0.1:${APP_HTTPS_PORT}/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.50"
