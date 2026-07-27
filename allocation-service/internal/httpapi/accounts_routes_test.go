@@ -64,6 +64,7 @@ func TestAdminAccountCRUDSyncDegradeAndLeakRedaction(t *testing.T) {
 	create := postJSON(t, client, server.URL+"/api/admin/accounts", csrf, map[string]any{
 		"display_password":     "LEAK_PASSWORD_SENTINEL",
 		"display_2fa_secret":   "LEAK_TOTP_SENTINEL",
+		"source_url":           "https://accounts.example.test/orders/LEAK_SOURCE_SENTINEL",
 		"max_concurrent_users": 2,
 		"monitor_token":        "monitor-token-sentinel",
 		"monitor_token_type":   "session_token",
@@ -80,13 +81,14 @@ func TestAdminAccountCRUDSyncDegradeAndLeakRedaction(t *testing.T) {
 			MonitorStatus    string `json:"monitor_status"`
 			DisplayUsername  string `json:"display_username"`
 			AccountExpiry    string `json:"account_expiry"`
+			SourceURL        string `json:"source_url"`
 		} `json:"account"`
 		Warnings []string `json:"warnings"`
 	}
 	if err := json.Unmarshal([]byte(createBody), &created); err != nil {
 		t.Fatal(err)
 	}
-	if created.Account.ID == 0 || created.Account.MonitorAccountID != "phase-one-123" || created.Account.MonitorStatus != "alive" || created.Account.DisplayUsername != "synced@example.test" || len(created.Warnings) != 0 {
+	if created.Account.ID == 0 || created.Account.MonitorAccountID != "phase-one-123" || created.Account.MonitorStatus != "alive" || created.Account.DisplayUsername != "synced@example.test" || created.Account.SourceURL != "https://accounts.example.test/orders/LEAK_SOURCE_SENTINEL" || len(created.Warnings) != 0 {
 		t.Fatalf("bad create response: %+v", created)
 	}
 	if !strings.Contains(created.Account.AccountExpiry, "T") {
@@ -96,12 +98,12 @@ func TestAdminAccountCRUDSyncDegradeAndLeakRedaction(t *testing.T) {
 	if !ok {
 		t.Fatal("test database not registered")
 	}
-	var passwordCipher, totpCipher []byte
-	if err := dbValue.(*sql.DB).QueryRow(`SELECT display_password_secret, display_2fa_secret FROM chatgpt_accounts WHERE id=?`, created.Account.ID).Scan(&passwordCipher, &totpCipher); err != nil {
+	var passwordCipher, totpCipher, sourceCipher []byte
+	if err := dbValue.(*sql.DB).QueryRow(`SELECT display_password_secret, display_2fa_secret, source_url_secret FROM chatgpt_accounts WHERE id=?`, created.Account.ID).Scan(&passwordCipher, &totpCipher, &sourceCipher); err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Contains(passwordCipher, []byte("LEAK_PASSWORD_SENTINEL")) || bytes.Contains(totpCipher, []byte("LEAK_TOTP_SENTINEL")) {
-		t.Fatal("display credentials were not encrypted at rest")
+	if bytes.Contains(passwordCipher, []byte("LEAK_PASSWORD_SENTINEL")) || bytes.Contains(totpCipher, []byte("LEAK_TOTP_SENTINEL")) || bytes.Contains(sourceCipher, []byte("LEAK_SOURCE_SENTINEL")) {
+		t.Fatal("display credentials or source URL were not encrypted at rest")
 	}
 	list := getRaw(t, client, server.URL+"/api/admin/accounts")
 	listBody := readBody(t, list)
@@ -113,6 +115,7 @@ func TestAdminAccountCRUDSyncDegradeAndLeakRedaction(t *testing.T) {
 		"display_username":     "updated-account",
 		"display_password":     "UPDATED_PASSWORD_SENTINEL",
 		"display_2fa_secret":   "UPDATED_TOTP_SENTINEL",
+		"source_url":           "https://accounts.example.test/orders/UPDATED_SOURCE_SENTINEL",
 		"account_expiry":       time.Now().UTC().Add(24 * time.Hour).Format(time.RFC3339Nano),
 		"max_concurrent_users": 3,
 		"status":               "available",
@@ -120,10 +123,29 @@ func TestAdminAccountCRUDSyncDegradeAndLeakRedaction(t *testing.T) {
 		"monitor_account_id":   "phase-one-123",
 	})
 	updateBody := readBody(t, update)
-	if update.StatusCode != http.StatusOK || !strings.Contains(updateBody, "updated-account") {
+	if update.StatusCode != http.StatusOK || !strings.Contains(updateBody, "updated-account") || !strings.Contains(updateBody, "UPDATED_SOURCE_SENTINEL") {
 		t.Fatalf("update status=%d body=%s", update.StatusCode, updateBody)
 	}
 	assertNoCredentialLeak(t, updateBody)
+	var updatedSourceCipher []byte
+	if err := dbValue.(*sql.DB).QueryRow(`SELECT source_url_secret FROM chatgpt_accounts WHERE id=?`, created.Account.ID).Scan(&updatedSourceCipher); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(updatedSourceCipher, []byte("UPDATED_SOURCE_SENTINEL")) {
+		t.Fatal("updated source URL was not encrypted at rest")
+	}
+	invalidSource := putJSON(t, client, server.URL+"/api/admin/accounts/"+itoa(created.Account.ID), csrf, map[string]any{
+		"display_username":     "updated-account",
+		"source_url":           "javascript:alert(1)",
+		"account_expiry":       time.Now().UTC().Add(24 * time.Hour).Format(time.RFC3339Nano),
+		"max_concurrent_users": 3,
+		"status":               "available",
+		"monitor_status":       "unknown",
+		"monitor_account_id":   "phase-one-123",
+	})
+	if invalidSource.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("invalid source status=%d body=%s", invalidSource.StatusCode, readBody(t, invalidSource))
+	}
 	syncStatus := postJSON(t, client, server.URL+"/api/admin/accounts/"+itoa(created.Account.ID)+"/sync-status", csrf, map[string]any{})
 	syncBody := readBody(t, syncStatus)
 	if syncStatus.StatusCode != http.StatusOK || !strings.Contains(syncBody, `"monitor_status":"dead_normal"`) {

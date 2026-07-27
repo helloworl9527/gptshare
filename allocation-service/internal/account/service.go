@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"net/url"
 	"strings"
 	"time"
 
@@ -50,6 +51,7 @@ type CreateInput struct {
 	DisplayUsername    string
 	DisplayPassword    string
 	DisplayTOTPSecret  string
+	SourceURL          string
 	AccountExpiry      time.Time
 	MaxConcurrentUsers int
 	SyncMonitor        bool
@@ -61,6 +63,7 @@ type UpdateInput struct {
 	DisplayUsername    string
 	DisplayPassword    string
 	DisplayTOTPSecret  string
+	SourceURL          *string
 	AccountExpiry      time.Time
 	MaxConcurrentUsers int
 	Status             string
@@ -111,6 +114,10 @@ func (s *Service) Create(ctx context.Context, input CreateInput) (CreateResult, 
 	if err := validateCreateInput(s.now().UTC(), input); err != nil {
 		return CreateResult{}, err
 	}
+	sourceURL, err := normalizeSourceURL(input.SourceURL)
+	if err != nil {
+		return CreateResult{}, err
+	}
 	result, err := s.importMonitor(ctx, input)
 	if err != nil {
 		return CreateResult{}, err
@@ -131,6 +138,7 @@ func (s *Service) Create(ctx context.Context, input CreateInput) (CreateResult, 
 		DisplayUsername:    displayUsername,
 		DisplayPassword:    input.DisplayPassword,
 		DisplayTOTPSecret:  input.DisplayTOTPSecret,
+		SourceURL:          sourceURL,
 		AccountExpiry:      result.AccountExpiry,
 		MaxConcurrentUsers: capacity,
 		Status:             "available",
@@ -207,6 +215,10 @@ func (s *Service) Update(ctx context.Context, id int64, input UpdateInput) (mode
 	if input.AccountExpiry.IsZero() || input.AccountExpiry.Before(s.now().UTC()) {
 		return models.Account{}, repository.ErrAccountExpiryTooLong
 	}
+	sourceURL, err := normalizeOptionalSourceURL(input.SourceURL)
+	if err != nil {
+		return models.Account{}, err
+	}
 	current, err := s.repo.Account(ctx, id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return models.Account{}, ErrNotFound
@@ -226,6 +238,7 @@ func (s *Service) Update(ctx context.Context, id int64, input UpdateInput) (mode
 		DisplayUsername:    strings.TrimSpace(input.DisplayUsername),
 		DisplayPassword:    input.DisplayPassword,
 		DisplayTOTPSecret:  input.DisplayTOTPSecret,
+		SourceURL:          sourceURL,
 		AccountExpiry:      input.AccountExpiry,
 		MaxConcurrentUsers: input.MaxConcurrentUsers,
 		Status:             status,
@@ -404,6 +417,32 @@ func validateCreateInput(now time.Time, input CreateInput) error {
 	}
 	_ = now
 	return nil
+}
+
+func normalizeOptionalSourceURL(value *string) (*string, error) {
+	if value == nil {
+		return nil, nil
+	}
+	normalized, err := normalizeSourceURL(*value)
+	if err != nil {
+		return nil, err
+	}
+	return &normalized, nil
+}
+
+func normalizeSourceURL(value string) (string, error) {
+	normalized := strings.TrimSpace(value)
+	if normalized == "" {
+		return "", nil
+	}
+	if len(normalized) > 2048 {
+		return "", ErrValidation
+	}
+	parsed, err := url.ParseRequestURI(normalized)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil {
+		return "", ErrValidation
+	}
+	return parsed.String(), nil
 }
 
 func validAccountStatus(status string) bool {

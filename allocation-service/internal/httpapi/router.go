@@ -285,6 +285,7 @@ type createAccountRequest struct {
 	DisplayUsername    string `json:"display_username" binding:"max=256"`
 	DisplayPassword    string `json:"display_password" binding:"required,max=2048"`
 	DisplayTOTPSecret  string `json:"display_2fa_secret" binding:"required,max=2048"`
+	SourceURL          string `json:"source_url" binding:"max=2048"`
 	AccountExpiry      string `json:"account_expiry" binding:"max=64"`
 	MaxConcurrentUsers int    `json:"max_concurrent_users" binding:"min=0,max=1000"`
 	SyncMonitor        bool   `json:"sync_monitor"`
@@ -293,14 +294,15 @@ type createAccountRequest struct {
 }
 
 type updateAccountRequest struct {
-	DisplayUsername    string `json:"display_username" binding:"required,max=256"`
-	DisplayPassword    string `json:"display_password" binding:"max=2048"`
-	DisplayTOTPSecret  string `json:"display_2fa_secret" binding:"max=2048"`
-	AccountExpiry      string `json:"account_expiry" binding:"required"`
-	MaxConcurrentUsers int    `json:"max_concurrent_users" binding:"required,min=1,max=1000"`
-	Status             string `json:"status" binding:"required,max=32"`
-	MonitorStatus      string `json:"monitor_status" binding:"required,max=32"`
-	MonitorAccountID   string `json:"monitor_account_id" binding:"max=256"`
+	DisplayUsername    string  `json:"display_username" binding:"required,max=256"`
+	DisplayPassword    string  `json:"display_password" binding:"max=2048"`
+	DisplayTOTPSecret  string  `json:"display_2fa_secret" binding:"max=2048"`
+	SourceURL          *string `json:"source_url" binding:"omitempty,max=2048"`
+	AccountExpiry      string  `json:"account_expiry" binding:"required"`
+	MaxConcurrentUsers int     `json:"max_concurrent_users" binding:"required,min=1,max=1000"`
+	Status             string  `json:"status" binding:"required,max=32"`
+	MonitorStatus      string  `json:"monitor_status" binding:"required,max=32"`
+	MonitorAccountID   string  `json:"monitor_account_id" binding:"max=256"`
 }
 
 type accountSettingsRequest struct {
@@ -368,6 +370,7 @@ func createAccountHandler(service *accountsvc.Service) gin.HandlerFunc {
 			DisplayUsername:    request.DisplayUsername,
 			DisplayPassword:    request.DisplayPassword,
 			DisplayTOTPSecret:  request.DisplayTOTPSecret,
+			SourceURL:          request.SourceURL,
 			MaxConcurrentUsers: request.MaxConcurrentUsers,
 			SyncMonitor:        true,
 			MonitorToken:       request.MonitorToken,
@@ -424,6 +427,7 @@ func updateAccountHandler(service *accountsvc.Service) gin.HandlerFunc {
 			DisplayUsername:    request.DisplayUsername,
 			DisplayPassword:    request.DisplayPassword,
 			DisplayTOTPSecret:  request.DisplayTOTPSecret,
+			SourceURL:          request.SourceURL,
 			AccountExpiry:      expiry,
 			MaxConcurrentUsers: request.MaxConcurrentUsers,
 			Status:             status,
@@ -994,6 +998,9 @@ func serializeAccount(account models.Account) gin.H {
 		"current_allocations":  account.CurrentAllocations,
 		"monitor_status":       account.MonitorStatus,
 		"status":               account.Status,
+	}
+	if account.SourceURL != "" {
+		body["source_url"] = account.SourceURL
 	}
 	if account.MonitorAccountID != "" {
 		body["monitor_account_id"] = account.MonitorAccountID

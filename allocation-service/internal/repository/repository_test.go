@@ -136,7 +136,7 @@ func TestAccountCredentialsEncryptedAndAADBound(t *testing.T) {
 	now := time.Date(2026, 7, 24, 0, 0, 0, 0, time.UTC)
 	repo.SetNow(func() time.Time { return now })
 	accountID, err := repo.CreateAccount(context.Background(), AccountSeed{
-		DisplayUsername: "leak-check", DisplayPassword: "LEAK_PASSWORD_SENTINEL", DisplayTOTPSecret: "LEAK_TOTP_SENTINEL", AccountExpiry: now.Add(24 * time.Hour), MaxConcurrentUsers: 2,
+		DisplayUsername: "leak-check", DisplayPassword: "LEAK_PASSWORD_SENTINEL", DisplayTOTPSecret: "LEAK_TOTP_SENTINEL", SourceURL: "https://accounts.example.test/LEAK_SOURCE_SENTINEL", AccountExpiry: now.Add(24 * time.Hour), MaxConcurrentUsers: 2,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -160,6 +160,25 @@ func TestAccountCredentialsEncryptedAndAADBound(t *testing.T) {
 	}
 	if _, err := keyring.Open(accountID+1, credential.CredentialTOTP, totpKeyID, totpCiphertext); err == nil {
 		t.Fatal("wrong account AAD decrypted totp")
+	}
+	var sourceKeyID string
+	var sourceCiphertext []byte
+	if err := db.DB().QueryRow(`SELECT source_url_key_id,source_url_secret FROM chatgpt_accounts WHERE id=?`, accountID).Scan(&sourceKeyID, &sourceCiphertext); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(sourceCiphertext, []byte("LEAK_SOURCE_SENTINEL")) {
+		t.Fatal("plaintext source URL found in ciphertext")
+	}
+	sourceURL, err := keyring.Open(accountID, credential.CredentialSourceURL, sourceKeyID, sourceCiphertext)
+	if err != nil || string(sourceURL) != "https://accounts.example.test/LEAK_SOURCE_SENTINEL" {
+		t.Fatalf("source URL=%q err=%v", sourceURL, err)
+	}
+	if _, err := keyring.Open(accountID, credential.CredentialPassword, sourceKeyID, sourceCiphertext); err == nil {
+		t.Fatal("wrong AAD decrypted source URL")
+	}
+	account, err := repo.Account(context.Background(), accountID)
+	if err != nil || account.SourceURL != "https://accounts.example.test/LEAK_SOURCE_SENTINEL" {
+		t.Fatalf("account source=%q err=%v", account.SourceURL, err)
 	}
 }
 
@@ -400,7 +419,7 @@ func TestCredentialKeyRotationReencryptAndOldKeyRemovalFailClosed(t *testing.T) 
 	now := time.Date(2026, 7, 24, 0, 0, 0, 0, time.UTC)
 	repo.SetNow(func() time.Time { return now })
 	firstID, err := repo.CreateAccount(ctx, AccountSeed{
-		DisplayUsername: "old-key", DisplayPassword: "old-password", DisplayTOTPSecret: "old-totp", AccountExpiry: now.Add(24 * time.Hour), MaxConcurrentUsers: 1,
+		DisplayUsername: "old-key", DisplayPassword: "old-password", DisplayTOTPSecret: "old-totp", SourceURL: "https://old.example.test/account", AccountExpiry: now.Add(24 * time.Hour), MaxConcurrentUsers: 1,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -422,7 +441,7 @@ func TestCredentialKeyRotationReencryptAndOldKeyRemovalFailClosed(t *testing.T) 
 	rotatingRepo := New(db.DB(), rotating)
 	rotatingRepo.SetNow(func() time.Time { return now.Add(time.Hour) })
 	secondID, err := rotatingRepo.CreateAccount(ctx, AccountSeed{
-		DisplayUsername: "new-key", DisplayPassword: "new-password", DisplayTOTPSecret: "new-totp", AccountExpiry: now.Add(24 * time.Hour), MaxConcurrentUsers: 1,
+		DisplayUsername: "new-key", DisplayPassword: "new-password", DisplayTOTPSecret: "new-totp", SourceURL: "https://new.example.test/account", AccountExpiry: now.Add(24 * time.Hour), MaxConcurrentUsers: 1,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -476,6 +495,10 @@ func TestCredentialKeyRotationReencryptAndOldKeyRemovalFailClosed(t *testing.T) 
 	}
 	if creds.Password != "old-password" || creds.TOTPSecret != "old-totp" {
 		t.Fatalf("credentials changed after reencrypt: %+v", creds)
+	}
+	rotatedAccount, err := newOnlyRepo.Account(ctx, firstID)
+	if err != nil || rotatedAccount.SourceURL != "https://old.example.test/account" {
+		t.Fatalf("source URL changed after reencrypt: account=%+v err=%v", rotatedAccount, err)
 	}
 }
 

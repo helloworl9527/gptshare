@@ -160,6 +160,7 @@ const server = http.createServer(async (request, response) => {
       status: existing.status === 'pending_credentials' && body.display_password && body.display_2fa_secret ? 'available' : body.status,
       monitor_status: body.monitor_status,
       monitor_account_id: body.monitor_account_id,
+      source_url: body.source_url,
     })
     return send(response, 200, { account: existing })
   }

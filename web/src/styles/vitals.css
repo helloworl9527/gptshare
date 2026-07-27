@@ -220,6 +220,8 @@ td { color: #28362f; font-size: 13px; }
 tbody tr { border-left: 4px solid var(--green); }
 .row-amber { border-left-color: var(--amber); }.row-red { border-left-color: var(--red); }.row-retired { border-left-color: var(--retired); }.row-cyan { border-left-color: var(--cyan); }
 .mono-cell { font: 650 12px var(--mono); }
+.source-link { color: var(--green-dark); font-weight: 700; text-underline-offset: 3px; }
+.muted-value { color: var(--muted); }
 .reveal-code { color: var(--ink); font-weight: 800; }
 .status-badge { display: inline-flex; max-width: 100%; border-radius: 3px; padding: 4px 8px; background: #e7f7f2; color: var(--green-dark); font: 700 10px var(--mono); text-transform: uppercase; overflow-wrap: anywhere; }
 .status-full, .status-unknown_monitor, .status-pending_credentials { background: #fff8e7; color: #735000; }.status-revoked, .status-dead_banned { background: #fff0f1; color: #9d2730; }.status-expired, .status-disabled { background: #edf1ef; color: #56645d; }
@@ -275,7 +277,7 @@ tbody tr { border-left: 4px solid var(--green); }
 .action-row .primary-action:hover:not(:disabled) { background: #065f4c; }
 .danger-button { border-color: #e9b5b8 !important; color: #a3272f; }
 .modal-backdrop { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; background: rgba(14,27,23,.58); padding: 20px; overscroll-behavior: contain; }
-.confirm-dialog { width: min(100%, 460px); background: #fff; padding: 30px; box-shadow: 0 24px 70px rgba(0,0,0,.24); }
+.confirm-dialog { width: min(100%, 460px); max-height: calc(100dvh - 40px); overflow-y: auto; overscroll-behavior: contain; background: #fff; padding: 30px; box-shadow: 0 24px 70px rgba(0,0,0,.24); }
 .confirm-dialog h2 { margin: 0; font: 650 28px var(--display); }.confirm-dialog p { color: var(--muted); line-height: 1.7; }
 .form-page { max-width: 980px; }
 .tab-list { display: flex; gap: 1px; margin-bottom: 18px; background: var(--line); border: 1px solid var(--line); }

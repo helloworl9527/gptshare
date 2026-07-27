@@ -37,8 +37,10 @@ test('unified admin covers both domains, credential completion and reveal', asyn
   await page.getByRole('row', { name: /pulled-sync@example.test/ }).getByRole('button', { name: '编辑' }).click()
   await page.getByLabel('新密码').fill('completed-password')
   await page.getByLabel('新 2FA Secret').fill('JBSWY3DPEHPK3PXP')
+  await page.getByLabel('账号来源链接').fill('https://accounts.example.test/orders/42')
   await page.getByRole('dialog').getByRole('button', { name: '保存修改' }).click()
   await expect(page.getByText('账号已更新')).toBeVisible()
+  await expect(page.getByRole('row', { name: /pulled-sync@example.test/ }).getByRole('link', { name: '打开来源' })).toHaveAttribute('href', 'https://accounts.example.test/orders/42')
   await page.screenshot({ path: path.join(screenshots, `mstep04-accounts-${testInfo.project.name}.png`), fullPage: true })
 
   await page.getByRole('link', { name: '卡密', exact: true }).click()

@@ -44,8 +44,12 @@ func TestMigrateIsIdempotentAndReachesLatestAllocationSchema(t *testing.T) {
 	if err := database.DB().QueryRow("SELECT max(version), count(*) FROM schema_migrations").Scan(&version, &count); err != nil {
 		t.Fatal(err)
 	}
-	if version != 5 || count != 5 {
-		t.Fatalf("allocation migration ledger = version %d count %d, want version 5 count 5", version, count)
+	latest, err := store.LatestSchemaVersion()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if version != latest || count != latest {
+		t.Fatalf("allocation migration ledger = version %d count %d, want version %d count %d", version, count, latest, latest)
 	}
 }
 

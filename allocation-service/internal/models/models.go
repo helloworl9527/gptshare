@@ -10,6 +10,7 @@ type Account struct {
 	CurrentAllocations int
 	MonitorAccountID   string
 	MonitorStatus      string
+	SourceURL          string
 	Status             string
 	LastAllocatedAt    *time.Time
 }

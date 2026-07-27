@@ -46,6 +46,7 @@ type AccountSeed struct {
 	DisplayUsername    string
 	DisplayPassword    string
 	DisplayTOTPSecret  string
+	SourceURL          string
 	AccountExpiry      time.Time
 	MaxConcurrentUsers int
 	MonitorAccountID   string
@@ -57,6 +58,7 @@ type AccountUpdate struct {
 	DisplayUsername    string
 	DisplayPassword    string
 	DisplayTOTPSecret  string
+	SourceURL          *string
 	AccountExpiry      time.Time
 	MaxConcurrentUsers int
 	Status             string
@@ -232,10 +234,22 @@ func (r *Repository) CreateAccount(ctx context.Context, seed AccountSeed) (int64
 	if err != nil {
 		return 0, err
 	}
+	var sourceKeyID any
+	var sourceCiphertext any
+	if strings.TrimSpace(seed.SourceURL) != "" {
+		source, err := r.credentials.Seal(accountID, credential.CredentialSourceURL, []byte(seed.SourceURL))
+		if err != nil {
+			return 0, err
+		}
+		sourceKeyID = source.KeyID
+		sourceCiphertext = source.Ciphertext
+	}
 	if _, err := tx.ExecContext(ctx, `UPDATE chatgpt_accounts
-		SET display_password_secret=?, display_password_key_id=?, display_2fa_secret=?, display_2fa_key_id=?, updated_at=?
+		SET display_password_secret=?, display_password_key_id=?, display_2fa_secret=?, display_2fa_key_id=?,
+		    source_url_key_id=?, source_url_secret=?, updated_at=?
 		WHERE id=?`,
-		password.Ciphertext, password.KeyID, totp.Ciphertext, totp.KeyID, formatTime(now), accountID); err != nil {
+		password.Ciphertext, password.KeyID, totp.Ciphertext, totp.KeyID,
+		sourceKeyID, sourceCiphertext, formatTime(now), accountID); err != nil {
 		return 0, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -774,33 +788,13 @@ func (r *Repository) ActiveAllocationCount(ctx context.Context, accountID int64)
 }
 
 func (r *Repository) Account(ctx context.Context, accountID int64) (models.Account, error) {
-	var account models.Account
-	var expiry, lastAllocated sql.NullString
-	var monitorAccount sql.NullString
-	if err := r.db.QueryRowContext(ctx, `SELECT id,display_username,account_expiry,max_concurrent_users,current_allocations,monitor_account_id,monitor_status,status,last_allocated_at
-		FROM chatgpt_accounts WHERE id=?`, accountID).Scan(&account.ID, &account.DisplayUsername, &expiry, &account.MaxConcurrentUsers, &account.CurrentAllocations, &monitorAccount, &account.MonitorStatus, &account.Status, &lastAllocated); err != nil {
-		return models.Account{}, err
-	}
-	parsed, err := parseTime(expiry.String)
-	if err != nil {
-		return models.Account{}, err
-	}
-	account.AccountExpiry = parsed
-	if monitorAccount.Valid {
-		account.MonitorAccountID = monitorAccount.String
-	}
-	if lastAllocated.Valid {
-		allocated, err := parseTime(lastAllocated.String)
-		if err != nil {
-			return models.Account{}, err
-		}
-		account.LastAllocatedAt = &allocated
-	}
-	return account, nil
+	row := r.db.QueryRowContext(ctx, `SELECT id,display_username,account_expiry,max_concurrent_users,current_allocations,monitor_account_id,monitor_status,status,last_allocated_at,source_url_key_id,source_url_secret
+		FROM chatgpt_accounts WHERE id=?`, accountID)
+	return r.scanAccount(row)
 }
 
 func (r *Repository) ListAccounts(ctx context.Context) ([]models.Account, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT id,display_username,account_expiry,max_concurrent_users,current_allocations,monitor_account_id,monitor_status,status,last_allocated_at
+	rows, err := r.db.QueryContext(ctx, `SELECT id,display_username,account_expiry,max_concurrent_users,current_allocations,monitor_account_id,monitor_status,status,last_allocated_at,source_url_key_id,source_url_secret
 		FROM chatgpt_accounts ORDER BY id ASC`)
 	if err != nil {
 		return nil, err
@@ -808,7 +802,7 @@ func (r *Repository) ListAccounts(ctx context.Context) ([]models.Account, error)
 	defer rows.Close()
 	var accounts []models.Account
 	for rows.Next() {
-		account, err := scanAccount(rows)
+		account, err := r.scanAccount(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -843,7 +837,7 @@ func (r *Repository) UpdateAccount(ctx context.Context, accountID int64, update 
 	if affected != 1 {
 		return models.Account{}, sql.ErrNoRows
 	}
-	if update.DisplayPassword != "" || update.DisplayTOTPSecret != "" {
+	if update.DisplayPassword != "" || update.DisplayTOTPSecret != "" || (update.SourceURL != nil && strings.TrimSpace(*update.SourceURL) != "") {
 		if r.credentials == nil {
 			return models.Account{}, credential.ErrInvalidKeyring
 		}
@@ -868,6 +862,25 @@ func (r *Repository) UpdateAccount(ctx context.Context, accountID int64, update 
 			SET display_2fa_secret=?, display_2fa_key_id=?, updated_at=?
 			WHERE id=?`, totp.Ciphertext, totp.KeyID, formatTime(now), accountID); err != nil {
 			return models.Account{}, err
+		}
+	}
+	if update.SourceURL != nil {
+		if strings.TrimSpace(*update.SourceURL) == "" {
+			if _, err := tx.ExecContext(ctx, `UPDATE chatgpt_accounts
+				SET source_url_secret=NULL, source_url_key_id=NULL, updated_at=?
+				WHERE id=?`, formatTime(now), accountID); err != nil {
+				return models.Account{}, err
+			}
+		} else {
+			source, err := r.credentials.Seal(accountID, credential.CredentialSourceURL, []byte(*update.SourceURL))
+			if err != nil {
+				return models.Account{}, err
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE chatgpt_accounts
+				SET source_url_secret=?, source_url_key_id=?, updated_at=?
+				WHERE id=?`, source.Ciphertext, source.KeyID, formatTime(now), accountID); err != nil {
+				return models.Account{}, err
+			}
 		}
 	}
 	if err := tx.Commit(); err != nil {
@@ -1088,7 +1101,7 @@ func (r *Repository) ReencryptCredentials(ctx context.Context) (int64, error) {
 		return 0, err
 	}
 	defer tx.Rollback()
-	rows, err := tx.QueryContext(ctx, `SELECT id,display_password_key_id,display_password_secret,display_2fa_key_id,display_2fa_secret FROM chatgpt_accounts ORDER BY id ASC`)
+	rows, err := tx.QueryContext(ctx, `SELECT id,display_password_key_id,display_password_secret,display_2fa_key_id,display_2fa_secret,source_url_key_id,source_url_secret FROM chatgpt_accounts ORDER BY id ASC`)
 	if err != nil {
 		return 0, err
 	}
@@ -1098,11 +1111,13 @@ func (r *Repository) ReencryptCredentials(ctx context.Context) (int64, error) {
 		passwordCiphertext []byte
 		totpKeyID          string
 		totpCiphertext     []byte
+		sourceKeyID        sql.NullString
+		sourceCiphertext   []byte
 	}
 	var accounts []row
 	for rows.Next() {
 		var item row
-		if err := rows.Scan(&item.id, &item.passwordKeyID, &item.passwordCiphertext, &item.totpKeyID, &item.totpCiphertext); err != nil {
+		if err := rows.Scan(&item.id, &item.passwordKeyID, &item.passwordCiphertext, &item.totpKeyID, &item.totpCiphertext, &item.sourceKeyID, &item.sourceCiphertext); err != nil {
 			rows.Close()
 			return 0, err
 		}
@@ -1131,10 +1146,29 @@ func (r *Repository) ReencryptCredentials(ctx context.Context) (int64, error) {
 		if err != nil {
 			return 0, err
 		}
+		var sourceKeyID any
+		var sourceCiphertext any
+		if item.sourceKeyID.Valid || len(item.sourceCiphertext) > 0 {
+			if !item.sourceKeyID.Valid || len(item.sourceCiphertext) == 0 {
+				return 0, credential.ErrDecryptCredential
+			}
+			source, err := r.credentials.Open(item.id, credential.CredentialSourceURL, item.sourceKeyID.String, item.sourceCiphertext)
+			if err != nil {
+				return 0, err
+			}
+			resealedSource, err := r.credentials.Seal(item.id, credential.CredentialSourceURL, source)
+			if err != nil {
+				return 0, err
+			}
+			sourceKeyID = resealedSource.KeyID
+			sourceCiphertext = resealedSource.Ciphertext
+		}
 		if _, err := tx.ExecContext(ctx, `UPDATE chatgpt_accounts
-			SET display_password_secret=?, display_password_key_id=?, display_2fa_secret=?, display_2fa_key_id=?, updated_at=?
+			SET display_password_secret=?, display_password_key_id=?, display_2fa_secret=?, display_2fa_key_id=?,
+			    source_url_key_id=?, source_url_secret=?, updated_at=?
 			WHERE id=?`,
-			resealedPassword.Ciphertext, resealedPassword.KeyID, resealedTOTP.Ciphertext, resealedTOTP.KeyID, formatTime(now), item.id); err != nil {
+			resealedPassword.Ciphertext, resealedPassword.KeyID, resealedTOTP.Ciphertext, resealedTOTP.KeyID,
+			sourceKeyID, sourceCiphertext, formatTime(now), item.id); err != nil {
 			return 0, err
 		}
 	}
@@ -1530,11 +1564,13 @@ func hydrateCardTimes(card *models.Card, redeemed, expires, revoked sql.NullStri
 	return nil
 }
 
-func scanAccount(scanner accountScanner) (models.Account, error) {
+func (r *Repository) scanAccount(scanner accountScanner) (models.Account, error) {
 	var account models.Account
 	var expiry, lastAllocated sql.NullString
 	var monitorAccount sql.NullString
-	if err := scanner.Scan(&account.ID, &account.DisplayUsername, &expiry, &account.MaxConcurrentUsers, &account.CurrentAllocations, &monitorAccount, &account.MonitorStatus, &account.Status, &lastAllocated); err != nil {
+	var sourceKeyID sql.NullString
+	var sourceCiphertext []byte
+	if err := scanner.Scan(&account.ID, &account.DisplayUsername, &expiry, &account.MaxConcurrentUsers, &account.CurrentAllocations, &monitorAccount, &account.MonitorStatus, &account.Status, &lastAllocated, &sourceKeyID, &sourceCiphertext); err != nil {
 		return models.Account{}, err
 	}
 	parsed, err := parseTime(expiry.String)
@@ -1551,6 +1587,16 @@ func scanAccount(scanner accountScanner) (models.Account, error) {
 			return models.Account{}, err
 		}
 		account.LastAllocatedAt = &allocated
+	}
+	if sourceKeyID.Valid || len(sourceCiphertext) > 0 {
+		if !sourceKeyID.Valid || len(sourceCiphertext) == 0 || r.credentials == nil {
+			return models.Account{}, credential.ErrDecryptCredential
+		}
+		sourceURL, err := r.credentials.Open(account.ID, credential.CredentialSourceURL, sourceKeyID.String, sourceCiphertext)
+		if err != nil {
+			return models.Account{}, err
+		}
+		account.SourceURL = string(sourceURL)
 	}
 	return account, nil
 }

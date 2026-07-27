@@ -21,6 +21,7 @@ const editForm = reactive({
   display_username: '',
   display_password: '',
   display_2fa_secret: '',
+  source_url: '',
   account_expiry: '',
   max_concurrent_users: 3,
   status: 'available',
@@ -30,7 +31,10 @@ const editForm = reactive({
 
 const visible = computed(() => {
   const term = search.value.trim().toLocaleLowerCase()
-  return accounts.value.filter((item) => !term || String(item.display_username).toLocaleLowerCase().includes(term) || String(item.monitor_account_id || '').toLocaleLowerCase().includes(term))
+  return accounts.value.filter((item) => !term
+    || String(item.display_username).toLocaleLowerCase().includes(term)
+    || String(item.monitor_account_id || '').toLocaleLowerCase().includes(term)
+    || String(item.source_url || '').toLocaleLowerCase().includes(term))
 })
 
 async function load() {
@@ -164,6 +168,7 @@ function openEdit(account) {
     display_username: account.display_username || '',
     display_password: '',
     display_2fa_secret: '',
+    source_url: account.source_url || '',
     account_expiry: toLocalDatetime(account.account_expiry),
     max_concurrent_users: account.max_concurrent_users || 1,
     status: account.status || 'available',
@@ -237,7 +242,7 @@ onMounted(load)
         </div>
         <div class="controls">
           <label for="account-search">搜索账号</label>
-          <input id="account-search" v-model="search" type="search" autocomplete="off" placeholder="搜索账号或监控 ID">
+          <input id="account-search" v-model="search" type="search" autocomplete="off" placeholder="搜索账号、来源或监控 ID">
           <button class="refresh-button" type="button" :disabled="loading" @click="load">
             刷新
           </button>
@@ -253,11 +258,15 @@ onMounted(load)
       <StatePanel v-else-if="visible.length === 0" title="暂无账号" message="从一期同步账号后，补齐密码和 2FA 即可分配卡密。" action="从一期同步账号" @action="pullMonitorAccounts" />
       <div v-else class="table-wrap">
         <table>
-          <thead><tr><th>账号</th><th>状态</th><th>容量</th><th>到期</th><th>一期状态</th><th>操作</th></tr></thead>
+          <thead><tr><th>账号</th><th>来源</th><th>状态</th><th>容量</th><th>到期</th><th>一期状态</th><th>操作</th></tr></thead>
           <tbody>
             <tr v-for="account in visible" :key="account.id" :class="`row-${accountTone(account)}`">
               <td class="mono-cell">
                 {{ account.display_username }}
+              </td>
+              <td>
+                <a v-if="account.source_url" class="source-link" :href="account.source_url" target="_blank" rel="noopener noreferrer">打开来源</a>
+                <span v-else class="muted-value">未填写</span>
               </td>
               <td><span class="status-badge" :class="`status-${account.status}`">{{ account.status }}</span></td>
               <td><meter min="0" :max="account.max_concurrent_users" :value="account.current_allocations" /> {{ account.current_allocations }}/{{ account.max_concurrent_users }}</td>
@@ -290,6 +299,8 @@ onMounted(load)
         <input id="edit-display-password" v-model="editForm.display_password" type="password" autocomplete="new-password" placeholder="留空不修改">
         <label for="edit-display-totp">新 2FA Secret</label>
         <input id="edit-display-totp" v-model="editForm.display_2fa_secret" autocomplete="off" placeholder="留空不修改">
+        <label for="edit-source-url">账号来源链接</label>
+        <input id="edit-source-url" v-model="editForm.source_url" type="url" maxlength="2048" autocomplete="off" placeholder="https://…（留空清除）">
         <label for="edit-account-expiry">账号到期</label>
         <input id="edit-account-expiry" v-model="editForm.account_expiry" required type="datetime-local">
         <label for="edit-max-users">最大并发</label>
