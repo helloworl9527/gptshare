@@ -2,7 +2,7 @@ openapi: 3.0.3
 info:
   title: ChatGPT Monitor API
   version: 0.6.0
-  description: STEP-07 API contract. Authentication uses same-origin Secure cookies; credentials, OAuth device codes, channel secrets, and raw upstream evidence are never returned. Notification channels are configuration-only and remain disconnected.
+  description: STEP-07 API contract. Authentication uses same-origin Secure cookies; credentials, OAuth PKCE verifiers/codes, OAuth device codes, channel secrets, and raw upstream evidence are never returned. Notification channels are configuration-only and remain disconnected.
   license:
     name: Proprietary
 servers:
@@ -252,6 +252,38 @@ paths:
           $ref: '#/components/responses/ProviderUnavailable'
         '500':
           $ref: '#/components/responses/InternalError'
+  /api/accounts/import/token/batch:
+    post:
+      operationId: importAccountsByTokenBatch
+      summary: Independently validate and import up to 50 direct credentials with at most three workers
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+        - $ref: '#/components/parameters/CSRFToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BatchTokenImportRequest'
+      responses:
+        '200':
+          description: Per-item results; successful imports are not rolled back when another item fails
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchTokenImportResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/CSRFRejected'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+        '500':
+          $ref: '#/components/responses/InternalError'
   /api/accounts/{accountId}/reauthorize/token:
     parameters:
       - $ref: '#/components/parameters/AccountID'
@@ -284,6 +316,109 @@ paths:
           $ref: '#/components/responses/NotFound'
         '415':
           $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+        '503':
+          $ref: '#/components/responses/ProviderUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/accounts/import/oauth/start:
+    post:
+      operationId: startOAuthImport
+      summary: Start a 15-minute Codex CLI PKCE authorization for a new account
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+        - $ref: '#/components/parameters/CSRFToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OAuthStartRequest'
+      responses:
+        '201':
+          description: Encrypted OAuth session created; state appears only inside the standard authorization URL and the verifier is never returned
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OAuthStartResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/CSRFRejected'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/accounts/{accountId}/reauthorize/oauth/start:
+    parameters:
+      - $ref: '#/components/parameters/AccountID'
+    post:
+      operationId: startOAuthReauthorization
+      summary: Start a 15-minute Codex CLI PKCE authorization for an existing account
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+        - $ref: '#/components/parameters/CSRFToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+      responses:
+        '201':
+          description: Encrypted OAuth reauthorization session created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OAuthStartResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/CSRFRejected'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/accounts/oauth/{oauthSessionId}/complete:
+    parameters:
+      - $ref: '#/components/parameters/OAuthSessionID'
+    post:
+      operationId: completeOAuthAuthorization
+      summary: Validate a manually pasted localhost callback and atomically consume its PKCE session
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+        - $ref: '#/components/parameters/CSRFToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OAuthCompleteRequest'
+      responses:
+        '200':
+          description: OAuth code exchanged and account imported or reauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Account'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/CSRFRejected'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '422':
           $ref: '#/components/responses/ValidationFailed'
         '503':
@@ -684,6 +819,14 @@ components:
         type: string
         minLength: 32
         maxLength: 128
+    OAuthSessionID:
+      name: oauthSessionId
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 32
+        maxLength: 128
     PollRunID:
       name: pollRunId
       in: path
@@ -864,6 +1007,92 @@ components:
         - required: [access_token]
         - required: [refresh_token]
         - required: [session_token]
+    BatchTokenImportRequest:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          minItems: 1
+          maxItems: 50
+          items:
+            $ref: '#/components/schemas/BatchTokenImportItem'
+    BatchTokenImportItem:
+      allOf:
+        - $ref: '#/components/schemas/TokenImportRequest'
+        - oneOf:
+            - required: [access_token]
+            - required: [refresh_token]
+            - required: [session_token]
+    BatchTokenImportResponse:
+      type: object
+      additionalProperties: false
+      required: [total, succeeded, failed, results]
+      properties:
+        total:
+          type: integer
+          minimum: 1
+          maximum: 50
+        succeeded:
+          type: integer
+          minimum: 0
+        failed:
+          type: integer
+          minimum: 0
+        results:
+          type: array
+          maxItems: 50
+          items:
+            $ref: '#/components/schemas/BatchTokenImportItemResult'
+    BatchTokenImportItemResult:
+      type: object
+      additionalProperties: false
+      required: [index, status]
+      properties:
+        index:
+          type: integer
+          minimum: 0
+          maximum: 49
+        status:
+          type: string
+          enum: [success, duplicate, invalid, upstream_unavailable, failed]
+        code:
+          type: string
+        account:
+          $ref: '#/components/schemas/Account'
+    OAuthStartRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        label:
+          type: string
+          maxLength: 256
+    OAuthStartResponse:
+      type: object
+      additionalProperties: false
+      required: [session_id, authorization_url, expires_at]
+      properties:
+        session_id:
+          type: string
+          minLength: 32
+          maxLength: 128
+        authorization_url:
+          type: string
+          format: uri
+        expires_at:
+          type: string
+          format: date-time
+    OAuthCompleteRequest:
+      type: object
+      additionalProperties: false
+      required: [callback_url]
+      properties:
+        callback_url:
+          type: string
+          format: uri
+          maxLength: 8192
+          writeOnly: true
     AllocationImportRequest:
       type: object
       additionalProperties: false

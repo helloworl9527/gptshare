@@ -311,7 +311,7 @@ func (s *Service) importDeviceTx(ctx context.Context, tx *sql.Tx, label string, 
 	label = defaultLabel(label, prepared.status)
 	result, err := tx.ExecContext(ctx, `INSERT INTO accounts
 		(provider_account_id,email,label,token_type,enc_credentials,credential_key_id,plan,raw_plan,current_expiry,auth_expiry,status,last_alive_at,import_time,last_check_state,last_check_error_code,updated_at)
-		VALUES (?,?,?,'device',x'',?,?,?,?,?,'alive',?,?,'ok',NULL,?)`, prepared.status.ProviderAccountID, nullable(prepared.status.Email), label, s.cipher.ActiveKeyID(), string(prepared.status.Plan), prepared.status.RawPlan,
+		VALUES (?,?,?,?,x'',?,?,?,?,?,'alive',?,?,'ok',NULL,?)`, prepared.status.ProviderAccountID, nullable(prepared.status.Email), label, string(prepared.kind), s.cipher.ActiveKeyID(), string(prepared.status.Plan), prepared.status.RawPlan,
 		expiry.Format(time.RFC3339Nano), expiry.Format(time.RFC3339Nano), stamp, stamp, stamp)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
@@ -323,7 +323,7 @@ func (s *Service) importDeviceTx(ctx context.Context, tx *sql.Tx, label string, 
 	if err != nil {
 		return 0, internalError("account_id")
 	}
-	envelope, err := s.cipher.Seal(prepared.plaintext, credentialcrypto.CredentialAAD(accountID, string(chatgpt.CredentialDevice)))
+	envelope, err := s.cipher.Seal(prepared.plaintext, credentialcrypto.CredentialAAD(accountID, string(prepared.kind)))
 	if err != nil {
 		return 0, internalError("credential_encrypt")
 	}
@@ -348,7 +348,7 @@ func (s *Service) reauthorizeDeviceTx(ctx context.Context, tx *sql.Tx, accountID
 	if providerID != prepared.status.ProviderAccountID {
 		return &ServiceError{Kind: ErrorInvalid, Code: "provider_account_mismatch"}
 	}
-	envelope, err := s.cipher.Seal(prepared.plaintext, credentialcrypto.CredentialAAD(accountID, string(chatgpt.CredentialDevice)))
+	envelope, err := s.cipher.Seal(prepared.plaintext, credentialcrypto.CredentialAAD(accountID, string(prepared.kind)))
 	if err != nil {
 		return internalError("credential_encrypt")
 	}
@@ -359,10 +359,10 @@ func (s *Service) reauthorizeDeviceTx(ctx context.Context, tx *sql.Tx, accountID
 	}
 	label := reauthorizeLabel("", currentLabel, providerID, currentEmail, prepared.status.Email)
 	if _, err := tx.ExecContext(ctx, `UPDATE accounts SET email=CASE WHEN (email IS NULL OR email='') AND ? IS NOT NULL THEN ? ELSE email END,
-		label=?,token_type='device',enc_credentials=?,credential_key_id=?,plan=?,raw_plan=?,current_expiry=?,auth_expiry=?,
+		label=?,token_type=?,enc_credentials=?,credential_key_id=?,plan=?,raw_plan=?,current_expiry=?,auth_expiry=?,
 		status='alive',last_alive_at=?,dead_at=NULL,death_type=NULL,banned_survival_days=NULL,import_time=?,last_check_state='ok',last_check_error_code=NULL,next_retry_at=NULL,
 		polling_paused=0,pause_reason=NULL,pending_evidence_signature=NULL,pending_detected_at=NULL,updated_at=? WHERE id=?`,
-		nullable(prepared.status.Email), nullable(prepared.status.Email), label, envelope, s.cipher.ActiveKeyID(), string(prepared.status.Plan), prepared.status.RawPlan, expiry.Format(time.RFC3339Nano), expiry.Format(time.RFC3339Nano), stamp, stamp, stamp, accountID); err != nil {
+		nullable(prepared.status.Email), nullable(prepared.status.Email), label, string(prepared.kind), envelope, s.cipher.ActiveKeyID(), string(prepared.status.Plan), prepared.status.RawPlan, expiry.Format(time.RFC3339Nano), expiry.Format(time.RFC3339Nano), stamp, stamp, stamp, accountID); err != nil {
 		return internalError("account_reauthorize")
 	}
 	if _, err := tx.ExecContext(ctx, "INSERT INTO authorization_epochs(account_id,started_at,auth_expiry) VALUES (?,?,?)", accountID, stamp, expiry.Format(time.RFC3339Nano)); err != nil {

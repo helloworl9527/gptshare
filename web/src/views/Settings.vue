@@ -14,7 +14,7 @@ const form = reactive({ poll_interval: 3600, near_expiry_days: 3, secrets: { tel
 const channels = [{ key: 'telegram', label: 'Telegram Bot' }, { key: 'wecom', label: '企业微信' }, { key: 'feishu', label: '飞书' }]
 const groupLabels = {
   unified_admin_auth: ['统一管理员认证', '仅用于管理员密码、会话、CSRF 与 TOTP'],
-  monitor_data_encryption: ['监控数据加密', '仅用于监控 token 与账号凭证'],
+  monitor_data_encryption: ['监控数据加密', '仅用于监控凭证与临时授权会话'],
   allocation_data_encryption: ['分配数据加密', '仅用于分配凭证与卡密明文 reveal'],
 }
 

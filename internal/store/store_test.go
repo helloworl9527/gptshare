@@ -36,8 +36,8 @@ func TestOpenAppliesAndRepeatsMigrations(t *testing.T) {
 	if err := second.db.QueryRow("SELECT count(*) FROM schema_migrations").Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != 4 {
-		t.Fatalf("migration count = %d, want 4", count)
+	if count != 5 {
+		t.Fatalf("migration count = %d, want 5", count)
 	}
 	assertRequiredSchema(t, second.db)
 	assertPragmas(t, second.db)
@@ -70,7 +70,7 @@ func TestAccountsEmailMigrationFromSchemaThree(t *testing.T) {
 
 	upgraded, err := Open(ctx, dbPath, repositoryMigrations(t))
 	if err != nil {
-		t.Fatalf("upgrade to schema 4: %v", err)
+		t.Fatalf("upgrade to schema 5: %v", err)
 	}
 	defer upgraded.Close()
 	after := rowCounts(t, upgraded.db, "accounts", "authorization_epochs", "status_change_log")
@@ -93,7 +93,7 @@ func TestAccountsEmailMigrationFromSchemaThree(t *testing.T) {
 	if err := upgraded.db.QueryRow("PRAGMA user_version").Scan(&userVersion); err != nil {
 		t.Fatal(err)
 	}
-	if migrationCount != 4 || userVersion != 4 {
+	if migrationCount != 5 || userVersion != 5 {
 		t.Fatalf("migration_count=%d user_version=%d", migrationCount, userVersion)
 	}
 }
@@ -414,12 +414,12 @@ func rowCounts(t *testing.T, db *sql.DB, tables ...string) map[string]int {
 
 func assertRequiredSchema(t *testing.T, db *sql.DB) {
 	t.Helper()
-	for _, table := range []string{"accounts", "authorization_epochs", "status_change_log", "poll_runs", "alert_events", "device_auth_sessions", "settings", "settings_audit", "admin_login_attempts", "admin_sessions", "schema_migrations"} {
+	for _, table := range []string{"accounts", "authorization_epochs", "status_change_log", "poll_runs", "alert_events", "device_auth_sessions", "oauth_auth_sessions", "settings", "settings_audit", "admin_login_attempts", "admin_sessions", "schema_migrations"} {
 		if !tableExists(t, db, table) {
 			t.Errorf("missing table %s", table)
 		}
 	}
-	for _, index := range []string{"accounts_provider_active_uq", "accounts_poll_due_idx", "accounts_poll_ready_idx", "authorization_epochs_active_uq", "status_change_review_idx", "alert_events_delivery_idx", "settings_audit_at_idx", "admin_login_attempts_rate_idx", "poll_runs_account_started_idx", "accounts_pending_evidence_idx"} {
+	for _, index := range []string{"accounts_provider_active_uq", "accounts_poll_due_idx", "accounts_poll_ready_idx", "authorization_epochs_active_uq", "status_change_review_idx", "alert_events_delivery_idx", "oauth_auth_expiry_idx", "settings_audit_at_idx", "admin_login_attempts_rate_idx", "poll_runs_account_started_idx", "accounts_pending_evidence_idx"} {
 		var count int
 		if err := db.QueryRow("SELECT count(*) FROM sqlite_master WHERE type='index' AND name=?", index).Scan(&count); err != nil || count != 1 {
 			t.Errorf("missing index %s: count=%d err=%v", index, count, err)
@@ -429,7 +429,7 @@ func assertRequiredSchema(t *testing.T, db *sql.DB) {
 
 func assertPragmas(t *testing.T, db *sql.DB) {
 	t.Helper()
-	checks := map[string]any{"foreign_keys": 1, "journal_mode": "wal", "busy_timeout": busyTimeoutMS, "user_version": 4}
+	checks := map[string]any{"foreign_keys": 1, "journal_mode": "wal", "busy_timeout": busyTimeoutMS, "user_version": 5}
 	for pragma, want := range checks {
 		var got any
 		if err := db.QueryRow("PRAGMA " + pragma).Scan(&got); err != nil {

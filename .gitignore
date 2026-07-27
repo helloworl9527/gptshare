@@ -11,6 +11,7 @@
 # (contains dev secrets, seed data, self-signed certs, DBs, build artifacts)
 .workflow/
 .dev-run/
+backups/
 
 # ── Secrets & environment ─────────────────────────
 *.env

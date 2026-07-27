@@ -12,6 +12,7 @@ const (
 	CredentialRefresh CredentialKind = "refresh"
 	CredentialSession CredentialKind = "session"
 	CredentialDevice  CredentialKind = "device"
+	CredentialOAuth   CredentialKind = "oauth"
 )
 
 type Plan string

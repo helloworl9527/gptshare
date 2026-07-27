@@ -5,7 +5,7 @@ if [ "$#" -ne 4 ]; then echo "usage: vitals-backup.sh MONITOR_DB ALLOCATION_DB B
 monitor=$1; allocation=$2; out=$3; pass_file=$4
 test "$monitor" != "$allocation" || { echo "database paths must be distinct" >&2; exit 65; }
 test -f "$pass_file" || { echo "backup passphrase file not found" >&2; exit 66; }
-test "$(stat -f %Lp "$pass_file" 2>/dev/null || stat -c %a "$pass_file")" = 600 || { echo "backup passphrase file must be 0600" >&2; exit 77; }
+test "$(stat -c %a "$pass_file" 2>/dev/null || stat -f %Lp "$pass_file")" = 600 || { echo "backup passphrase file must be 0600" >&2; exit 77; }
 mkdir -p "$out"; chmod 700 "$out"; stamp=$(date -u +%Y%m%dT%H%M%SZ)
 manifest="$out/vitals-$stamp.manifest"
 : > "$manifest"; chmod 600 "$manifest"

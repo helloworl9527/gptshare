@@ -103,7 +103,7 @@ func securityBoundariesHandler() gin.HandlerFunc {
 		c.JSON(http.StatusOK, gin.H{
 			"groups": []gin.H{
 				{"id": "unified_admin_auth", "purpose": "administrator authentication only", "configuration": []string{"ADMIN_PASSWORD_HASH", "ADMIN_TOTP_SECRET", "JWT_SIGNING_KEY", "RATE_LIMIT_KEY"}},
-				{"id": "monitor_data_encryption", "purpose": "monitor token and credential encryption only", "configuration": []string{"CREDENTIAL_MASTER_KEYS", "CREDENTIAL_ACTIVE_KEY_ID"}},
+				{"id": "monitor_data_encryption", "purpose": "monitor credentials and temporary authorization session encryption only", "configuration": []string{"CREDENTIAL_MASTER_KEYS", "CREDENTIAL_ACTIVE_KEY_ID"}},
 				{"id": "allocation_data_encryption", "purpose": "allocation credentials and card reveal encryption only", "configuration": []string{"ALLOCATION_CREDENTIAL_MASTER_KEYS", "ALLOCATION_CREDENTIAL_ACTIVE_KEY_ID"}},
 			},
 			"key_material_exposed": false,

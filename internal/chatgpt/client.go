@@ -18,6 +18,7 @@ import (
 
 const (
 	defaultClientID       = "app_EMoamEEZ73f0CkXaXp7hrann"
+	defaultAuthorizeURL   = "https://auth.openai.com/oauth/authorize"
 	defaultTokenURL       = "https://auth.openai.com/oauth/token"
 	defaultSessionURL     = "https://chatgpt.com/api/auth/session"
 	defaultStatusURL      = "https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27"
@@ -25,11 +26,15 @@ const (
 	defaultDevicePollURL  = "https://auth.openai.com/api/accounts/deviceauth/token"
 	defaultDeviceVerify   = "https://auth.openai.com/codex/device"
 	deviceRedirectURI     = "https://auth.openai.com/deviceauth/callback"
+	oauthRedirectURI      = "http://localhost:1455/auth/callback"
+	oauthScopes           = "openid profile email offline_access"
+	oauthOriginator       = "codex_cli_rs"
 )
 
 type Config struct {
 	HTTPClient      *http.Client
 	ClientID        string
+	AuthorizeURL    string
 	TokenURL        string
 	SessionURL      string
 	StatusURL       string
@@ -43,6 +48,7 @@ type Config struct {
 type Client struct {
 	httpClient      *http.Client
 	clientID        string
+	authorizeURL    string
 	tokenURL        string
 	sessionURL      string
 	statusURL       string
@@ -71,6 +77,7 @@ func NewClient(cfg Config) *Client {
 	return &Client{
 		httpClient:      httpClient,
 		clientID:        valueOr(cfg.ClientID, defaultClientID),
+		authorizeURL:    valueOr(cfg.AuthorizeURL, defaultAuthorizeURL),
 		tokenURL:        valueOr(cfg.TokenURL, defaultTokenURL),
 		sessionURL:      valueOr(cfg.SessionURL, defaultSessionURL),
 		statusURL:       valueOr(cfg.StatusURL, defaultStatusURL),
@@ -80,6 +87,51 @@ func NewClient(cfg Config) *Client {
 		evidenceLevel:   evidenceLevel,
 		now:             now,
 	}
+}
+
+// BuildOAuthAuthorizationURL builds the Codex CLI-compatible PKCE authorization
+// URL. The verifier and state are intentionally owned by the caller so they can
+// be encrypted at rest before this URL is returned.
+func (c *Client) BuildOAuthAuthorizationURL(state, codeChallenge string) string {
+	values := url.Values{
+		"response_type":              {"code"},
+		"client_id":                  {c.clientID},
+		"redirect_uri":               {oauthRedirectURI},
+		"scope":                      {oauthScopes},
+		"state":                      {state},
+		"code_challenge":             {codeChallenge},
+		"code_challenge_method":      {"S256"},
+		"id_token_add_organizations": {"true"},
+		"codex_cli_simplified_flow":  {"true"},
+		"originator":                 {oauthOriginator},
+	}
+	return c.authorizeURL + "?" + values.Encode()
+}
+
+// ExchangeOAuthCode exchanges a manually pasted localhost callback code using
+// the Codex CLI public client and its PKCE verifier.
+func (c *Client) ExchangeOAuthCode(ctx context.Context, code, codeVerifier string) (TokenSet, error) {
+	form := url.Values{
+		"grant_type":    {"authorization_code"},
+		"client_id":     {c.clientID},
+		"code":          {strings.TrimSpace(code)},
+		"redirect_uri":  {oauthRedirectURI},
+		"code_verifier": {codeVerifier},
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.tokenURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		return TokenSet{}, transient("oauth_request_create", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+	status, body, _, err := c.do(req)
+	if err != nil {
+		return TokenSet{}, err
+	}
+	if status < 200 || status >= 300 {
+		return TokenSet{}, classifyHTTP(status, body)
+	}
+	return decodeTokenSet(body, "oauth")
 }
 
 func valueOr(v, fallback string) string {

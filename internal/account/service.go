@@ -120,6 +120,10 @@ func (s *Service) ImportByToken(ctx context.Context, input *TokenInput) (Account
 		return Account{}, err
 	}
 	defer zero(prepared.plaintext)
+	return s.importPrepared(ctx, input.Label, prepared)
+}
+
+func (s *Service) importPrepared(ctx context.Context, inputLabel string, prepared preparedImport) (Account, error) {
 	now := s.now().UTC()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -135,7 +139,7 @@ func (s *Service) ImportByToken(ctx context.Context, input *TokenInput) (Account
 	}
 	expiry := prepared.status.SubscriptionExpiry.UTC()
 	email := nullable(prepared.status.Email)
-	label := defaultLabel(input.Label, prepared.status)
+	label := defaultLabel(inputLabel, prepared.status)
 	result, err := tx.ExecContext(ctx, `INSERT INTO accounts
 		(provider_account_id,email,label,token_type,enc_credentials,credential_key_id,plan,raw_plan,current_expiry,auth_expiry,status,last_alive_at,import_time,last_check_state,last_check_error_code,updated_at)
 		VALUES (?,?,?,?,x'',?,?,?,?,?,'alive',?,?,'ok',NULL,?)`,
@@ -235,6 +239,9 @@ func (s *Service) Delete(ctx context.Context, accountID int64) error {
 	}
 	if _, err := tx.ExecContext(ctx, "DELETE FROM device_auth_sessions WHERE account_id=?", accountID); err != nil {
 		return internalError("device_session_delete")
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM oauth_auth_sessions WHERE account_id=?", accountID); err != nil {
+		return internalError("oauth_session_delete")
 	}
 	if err := tx.Commit(); err != nil {
 		return internalError("transaction_commit")

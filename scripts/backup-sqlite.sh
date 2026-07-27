@@ -11,7 +11,7 @@ backup_dir=$2
 pass_file=$3
 test -f "$db_path" || { echo "database not found" >&2; exit 66; }
 test -f "$pass_file" || { echo "backup passphrase file not found" >&2; exit 66; }
-test "$(stat -f %Lp "$pass_file" 2>/dev/null || stat -c %a "$pass_file")" = 600 || { echo "backup passphrase file must be 0600" >&2; exit 77; }
+test "$(stat -c %a "$pass_file" 2>/dev/null || stat -f %Lp "$pass_file")" = 600 || { echo "backup passphrase file must be 0600" >&2; exit 77; }
 mkdir -p "$backup_dir"
 chmod 700 "$backup_dir"
 stamp=$(date -u +%Y%m%dT%H%M%SZ)

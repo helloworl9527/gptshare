@@ -169,6 +169,32 @@ func (k *Keyring) ReencryptAccounts(ctx context.Context, db *sql.DB) (int, error
 			return 0, err
 		}
 	}
+	oauthRows, err := tx.QueryContext(ctx, `SELECT id,enc_session FROM oauth_auth_sessions
+		WHERE state IN ('pending','exchanging') AND length(enc_session)>0 AND credential_key_id<>?`, k.activeID)
+	if err != nil {
+		return 0, err
+	}
+	var oauthRecords []deviceRecord
+	for oauthRows.Next() {
+		var item deviceRecord
+		if err := oauthRows.Scan(&item.id, &item.envelope); err != nil {
+			oauthRows.Close()
+			return 0, err
+		}
+		oauthRecords = append(oauthRecords, item)
+	}
+	if err := oauthRows.Close(); err != nil {
+		return 0, err
+	}
+	for _, item := range oauthRecords {
+		reencrypted, err := k.Reencrypt(item.envelope, OAuthSessionAAD(item.id))
+		if err != nil {
+			return 0, fmt.Errorf("reencrypt oauth session: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, "UPDATE oauth_auth_sessions SET enc_session=?,credential_key_id=? WHERE id=?", reencrypted, k.activeID, item.id); err != nil {
+			return 0, err
+		}
+	}
 	settingRows, err := tx.QueryContext(ctx, `SELECT key,value FROM settings
 		WHERE is_secret=1 AND length(value)>0 AND key_id<>?`, k.activeID)
 	if err != nil {
@@ -202,7 +228,7 @@ func (k *Keyring) ReencryptAccounts(ctx context.Context, db *sql.DB) (int, error
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
-	return len(records) + len(deviceRecords) + len(settingRecords), nil
+	return len(records) + len(deviceRecords) + len(oauthRecords) + len(settingRecords), nil
 }
 
 func CredentialAAD(accountID int64, credentialType string) []byte {
@@ -211,6 +237,10 @@ func CredentialAAD(accountID int64, credentialType string) []byte {
 
 func DeviceSessionAAD(sessionID string) []byte {
 	return []byte("device_auth_sessions:" + sessionID + ":device_code")
+}
+
+func OAuthSessionAAD(sessionID string) []byte {
+	return []byte("oauth_auth_sessions:" + sessionID + ":session")
 }
 
 func SettingAAD(key string) []byte {

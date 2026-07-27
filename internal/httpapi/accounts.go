@@ -22,6 +22,16 @@ type AccountService interface {
 	PollDevice(context.Context, string) (account.DevicePoll, error)
 }
 
+type OAuthAccountService interface {
+	StartOAuthImport(context.Context, string) (account.OAuthStart, error)
+	StartOAuthReauthorization(context.Context, int64) (account.OAuthStart, error)
+	CompleteOAuth(context.Context, string, string) (account.Account, error)
+}
+
+type BatchAccountService interface {
+	ImportTokenBatch(context.Context, *account.BatchTokenInput) (account.BatchTokenResult, error)
+}
+
 func registerAccountRoutes(router *gin.Engine, manager *auth.Manager, service AccountService, cfg Config) {
 	router.GET("/api/accounts", requireSession(manager), func(c *gin.Context) {
 		accounts, err := service.List(c.Request.Context())
@@ -56,6 +66,20 @@ func registerAccountRoutes(router *gin.Engine, manager *auth.Manager, service Ac
 		}
 		c.JSON(http.StatusCreated, result)
 	})
+	if batchService, ok := service.(BatchAccountService); ok {
+		router.POST("/api/accounts/import/token/batch", requireSession(manager), requireOrigin(cfg.Origin), requireSessionCSRF(manager), func(c *gin.Context) {
+			var input account.BatchTokenInput
+			if !bindJSON(c, &input, 1<<20) {
+				return
+			}
+			result, err := batchService.ImportTokenBatch(c.Request.Context(), &input)
+			if err != nil {
+				writeAccountError(c, err)
+				return
+			}
+			c.JSON(http.StatusOK, result)
+		})
+	}
 	router.POST("/api/accounts/:id/reauthorize/token", requireSession(manager), requireOrigin(cfg.Origin), requireSessionCSRF(manager), func(c *gin.Context) {
 		id, ok := accountID(c)
 		if !ok {
@@ -115,6 +139,53 @@ func registerAccountRoutes(router *gin.Engine, manager *auth.Manager, service Ac
 		}
 		c.JSON(http.StatusOK, result)
 	})
+	if oauthService, ok := service.(OAuthAccountService); ok {
+		router.POST("/api/accounts/import/oauth/start", requireSession(manager), requireOrigin(cfg.Origin), requireSessionCSRF(manager), func(c *gin.Context) {
+			var request struct {
+				Label string `json:"label" binding:"max=256"`
+			}
+			if !bindJSON(c, &request, 4096) {
+				return
+			}
+			result, err := oauthService.StartOAuthImport(c.Request.Context(), request.Label)
+			if err != nil {
+				writeAccountError(c, err)
+				return
+			}
+			c.JSON(http.StatusCreated, result)
+		})
+		router.POST("/api/accounts/:id/reauthorize/oauth/start", requireSession(manager), requireOrigin(cfg.Origin), requireSessionCSRF(manager), func(c *gin.Context) {
+			id, ok := accountID(c)
+			if !ok {
+				return
+			}
+			var request struct{}
+			if !bindJSON(c, &request, 1024) {
+				return
+			}
+			result, err := oauthService.StartOAuthReauthorization(c.Request.Context(), id)
+			if err != nil {
+				writeAccountError(c, err)
+				return
+			}
+			c.JSON(http.StatusCreated, result)
+		})
+		router.POST("/api/accounts/oauth/:id/complete", requireSession(manager), requireOrigin(cfg.Origin), requireSessionCSRF(manager), func(c *gin.Context) {
+			var request struct {
+				CallbackURL string `json:"callback_url" binding:"required,max=8192"`
+			}
+			if !bindJSON(c, &request, 9<<10) {
+				return
+			}
+			result, err := oauthService.CompleteOAuth(c.Request.Context(), c.Param("id"), request.CallbackURL)
+			request.CallbackURL = ""
+			if err != nil {
+				writeAccountError(c, err)
+				return
+			}
+			c.JSON(http.StatusOK, result)
+		})
+	}
 	router.DELETE("/api/accounts/:id", requireSession(manager), requireOrigin(cfg.Origin), requireSessionCSRF(manager), func(c *gin.Context) {
 		id, ok := accountID(c)
 		if !ok {

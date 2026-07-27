@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -44,6 +45,16 @@ type accountClient struct {
 	devicePolls []chatgpt.DevicePollResult
 	startCalls  int
 	pollCalls   int
+	oauthCode   string
+}
+
+func (client *accountClient) BuildOAuthAuthorizationURL(state, challenge string) string {
+	return "https://auth.example/oauth?state=" + url.QueryEscape(state) + "&code_challenge=" + url.QueryEscape(challenge)
+}
+
+func (client *accountClient) ExchangeOAuthCode(_ context.Context, code, _ string) (chatgpt.TokenSet, error) {
+	client.oauthCode = code
+	return client.tokens, client.exchangeErr
 }
 
 func (client *accountClient) StartDeviceAuthorization(context.Context) (chatgpt.DeviceAuthorization, error) {
@@ -185,6 +196,65 @@ func TestAccountHTTPSMapsRetryableProviderFailureTo503(t *testing.T) {
 	if result["code"] != "upstream_timeout" {
 		t.Fatalf("response=%v", result)
 	}
+}
+
+func TestAccountHTTPSOAuthManualCallbackSecurityContract(t *testing.T) {
+	expiry := time.Date(2026, 8, 19, 18, 28, 13, 0, time.UTC)
+	upstream := &accountClient{
+		tokens: chatgpt.TokenSet{
+			AccessToken:  "oauth-e2e-access-must-not-leak",
+			RefreshToken: "oauth-e2e-refresh-must-not-leak",
+		},
+		status: chatgpt.StatusResult{
+			ProviderAccountID: "acct-oauth-e2e", RawPlan: "chatgptplusplan", Plan: chatgpt.PlanPlus,
+			SubscriptionExpiry: &expiry, AccountState: chatgpt.StateActive,
+			EvidenceCode: "access_claim+accounts_check_2xx", EvidenceLevel: chatgpt.EvidenceLiveVerified,
+		},
+	}
+	h := newHarness(t, func(db *sql.DB) httpapi.AccountService {
+		keyring, _ := credentialcrypto.NewKeyring(map[string][]byte{"e2e": bytes.Repeat([]byte{8}, 32)}, "e2e")
+		service, _ := account.NewService(db, upstream, keyring)
+		return service
+	})
+	defer h.close()
+
+	response := h.request(t, http.MethodPost, "/api/accounts/import/oauth/start", map[string]string{"label": "OAuth"}, "not-bound", "")
+	assertStatus(t, response, http.StatusUnauthorized)
+	csrf := login(t, h)
+	response = h.request(t, http.MethodPost, "/api/accounts/import/oauth/start", map[string]string{"label": "OAuth"}, "wrong", "")
+	assertStatus(t, response, http.StatusForbidden)
+	response = h.request(t, http.MethodPost, "/api/accounts/import/oauth/start", map[string]string{"label": "OAuth"}, csrf, "")
+	assertStatus(t, response, http.StatusCreated)
+	startBody, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	for _, forbidden := range [][]byte{[]byte("code_verifier"), []byte("oauth-e2e-access"), []byte("oauth-e2e-refresh")} {
+		if bytes.Contains(startBody, forbidden) {
+			t.Fatalf("OAuth start exposed forbidden material: %s", startBody)
+		}
+	}
+	var started account.OAuthStart
+	if err := json.Unmarshal(startBody, &started); err != nil {
+		t.Fatal(err)
+	}
+	authorizationURL, err := url.Parse(started.AuthorizationURL)
+	if err != nil || authorizationURL.Query().Get("state") == "" {
+		t.Fatalf("authorization URL=%q err=%v", started.AuthorizationURL, err)
+	}
+	callback := "http://localhost:1455/auth/callback?code=e2e-code&state=" + url.QueryEscape(authorizationURL.Query().Get("state"))
+	response = h.request(t, http.MethodPost, "/api/accounts/oauth/"+started.SessionID+"/complete", map[string]string{"callback_url": callback}, csrf, "")
+	assertStatus(t, response, http.StatusOK)
+	doneBody, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	for _, forbidden := range [][]byte{[]byte("e2e-code"), []byte("oauth-e2e-access"), []byte("oauth-e2e-refresh"), []byte("callback_url")} {
+		if bytes.Contains(doneBody, forbidden) {
+			t.Fatalf("OAuth complete exposed forbidden material: %s", doneBody)
+		}
+	}
+	if upstream.oauthCode != "e2e-code" {
+		t.Fatalf("authorization code not exchanged: %q", upstream.oauthCode)
+	}
+	response = h.request(t, http.MethodPost, "/api/accounts/oauth/"+started.SessionID+"/complete", map[string]string{"callback_url": callback}, csrf, "")
+	assertStatus(t, response, http.StatusUnprocessableEntity)
 }
 
 func TestAccountHTTPSDeviceStartPollReplayAndResponseAllowlist(t *testing.T) {

@@ -43,6 +43,11 @@ func TestOpenAPIContract(t *testing.T) {
 			t.Errorf("missing account route %s", route)
 		}
 	}
+	for _, route := range []string{"/api/accounts/import/token/batch", "/api/accounts/import/oauth/start", "/api/accounts/{accountId}/reauthorize/oauth/start", "/api/accounts/oauth/{oauthSessionId}/complete"} {
+		if _, ok := paths[route]; !ok {
+			t.Errorf("missing oauth or batch route %s", route)
+		}
+	}
 	for _, route := range []string{"/api/accounts/import/device/start", "/api/accounts/{accountId}/reauthorize/device/start", "/api/accounts/import/device/{deviceSessionId}/poll"} {
 		if _, ok := paths[route]; !ok {
 			t.Errorf("missing device route %s", route)
@@ -70,10 +75,22 @@ func TestOpenAPIContract(t *testing.T) {
 		t.Errorf("allocation service auth must use bearer scheme, got %#v", bearer)
 	}
 	schemas := requireMap(t, components, "schemas")
-	for _, name := range []string{"HealthResponse", "ErrorResponse", "TokenImportRequest", "AllocationImportRequest", "AllocationBatchStatusRequest", "AllocationAccountStatus", "AllocationAccountListResponse", "AllocationAccountListItem", "AllocationBatchStatusResponse", "AllocationBatchStatusItem", "AllocationItemError", "CredentialSummary", "Account", "DeviceStartRequest", "DeviceStartResponse", "DevicePollResponse", "PollRun", "Settings", "SettingsUpdate", "ChannelState", "ChannelUpdate"} {
+	for _, name := range []string{"HealthResponse", "ErrorResponse", "TokenImportRequest", "BatchTokenImportRequest", "BatchTokenImportItem", "BatchTokenImportResponse", "BatchTokenImportItemResult", "OAuthStartRequest", "OAuthStartResponse", "OAuthCompleteRequest", "AllocationImportRequest", "AllocationBatchStatusRequest", "AllocationAccountStatus", "AllocationAccountListResponse", "AllocationAccountListItem", "AllocationBatchStatusResponse", "AllocationBatchStatusItem", "AllocationItemError", "CredentialSummary", "Account", "DeviceStartRequest", "DeviceStartResponse", "DevicePollResponse", "PollRun", "Settings", "SettingsUpdate", "ChannelState", "ChannelUpdate"} {
 		if _, ok := schemas[name]; !ok {
 			t.Errorf("missing schema %s", name)
 		}
+	}
+	for _, name := range []string{"OAuthStartResponse", "BatchTokenImportResponse", "BatchTokenImportItemResult"} {
+		properties := requireMap(t, requireMap(t, schemas, name), "properties")
+		for _, forbidden := range []string{"access_token", "refresh_token", "session_token", "code_verifier", "authorization_code", "state"} {
+			if _, ok := properties[forbidden]; ok {
+				t.Errorf("%s exposes forbidden property %s", name, forbidden)
+			}
+		}
+	}
+	oauthComplete := requireMap(t, requireMap(t, schemas, "OAuthCompleteRequest"), "properties")
+	if requireMap(t, oauthComplete, "callback_url")["writeOnly"] != true {
+		t.Error("OAuth callback URL must be writeOnly")
 	}
 	allocationImport := requireMap(t, schemas, "AllocationImportRequest")
 	allocationImportProperties := requireMap(t, allocationImport, "properties")

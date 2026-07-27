@@ -32,7 +32,7 @@ STEP-12 revision 8 本地 release：
 
 - 文件：`artifacts/chatgpt-monitor-linux-amd64.tar.gz`
 - SHA-256：`afdae50ca567e1581cc950ecd86388fdc8517e4fdd746336e29e1075cbb386e5`
-- 包内 `schema-version=4`，且包含 `migrations/0004_accounts_email.sql`。
+- 包内 `schema-version=5`，且包含 `migrations/0005_oauth_auth_sessions.sql`。
 - 该值 supersede STEP-11 的 `381fcdee36c9196560c3786c773e9ab6e7883205b30f25f7e7c12d795581f094`。变化来源仅为 STEP-12 增强批次 1：账号邮箱 nullable 字段、邮箱默认标签/展示/前端搜索，以及 schema 3→4 升级；生产上传仍需另行授权。
 
 ## Nginx 与 TLS

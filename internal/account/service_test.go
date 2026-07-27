@@ -16,17 +16,28 @@ import (
 )
 
 type fakeClient struct {
-	tokens      chatgpt.TokenSet
-	status      chatgpt.StatusResult
-	exchangeErr error
-	statusErr   error
-	lastKind    chatgpt.CredentialKind
-	lastSecret  string
-	deviceAuth  chatgpt.DeviceAuthorization
-	devicePolls []chatgpt.DevicePollResult
-	deviceErr   error
-	startCalls  int
-	pollCalls   int
+	tokens        chatgpt.TokenSet
+	status        chatgpt.StatusResult
+	exchangeErr   error
+	statusErr     error
+	lastKind      chatgpt.CredentialKind
+	lastSecret    string
+	deviceAuth    chatgpt.DeviceAuthorization
+	devicePolls   []chatgpt.DevicePollResult
+	deviceErr     error
+	startCalls    int
+	pollCalls     int
+	oauthCode     string
+	oauthVerifier string
+}
+
+func (f *fakeClient) BuildOAuthAuthorizationURL(state, challenge string) string {
+	return "https://auth.example/oauth?state=" + state + "&code_challenge=" + challenge
+}
+
+func (f *fakeClient) ExchangeOAuthCode(_ context.Context, code, verifier string) (chatgpt.TokenSet, error) {
+	f.oauthCode, f.oauthVerifier = code, verifier
+	return f.tokens, f.exchangeErr
 }
 
 func (f *fakeClient) StartDeviceAuthorization(context.Context) (chatgpt.DeviceAuthorization, error) {
@@ -306,12 +317,16 @@ func TestDatabasePlaintextScanAndBulkKeyRotation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	oauth, err := service.StartOAuthImport(context.Background(), "rotation-oauth")
+	if err != nil {
+		t.Fatal(err)
+	}
 	rotating, err := credentialcrypto.NewKeyring(map[string][]byte{"active": bytes.Repeat([]byte{7}, 32), "new": bytes.Repeat([]byte{8}, 32)}, "new")
 	if err != nil {
 		t.Fatal(err)
 	}
 	count, err := rotating.ReencryptAccounts(context.Background(), database.DB())
-	if err != nil || count != 2 {
+	if err != nil || count != 3 {
 		t.Fatalf("rotation count=%d err=%v", count, err)
 	}
 	var envelope []byte
@@ -335,6 +350,16 @@ func TestDatabasePlaintextScanAndBulkKeyRotation(t *testing.T) {
 		t.Fatalf("rotated device session key=%q err=%v", deviceKeyID, err)
 	}
 	zero(devicePlaintext)
+	var oauthEnvelope []byte
+	var oauthKeyID string
+	if err := database.DB().QueryRow("SELECT enc_session,credential_key_id FROM oauth_auth_sessions WHERE id=?", oauth.SessionID).Scan(&oauthEnvelope, &oauthKeyID); err != nil {
+		t.Fatal(err)
+	}
+	oauthPlaintext, err := rotating.Open(oauthEnvelope, credentialcrypto.OAuthSessionAAD(oauth.SessionID))
+	if err != nil || oauthKeyID != "new" || !bytes.Contains(oauthPlaintext, []byte("code_verifier")) {
+		t.Fatalf("rotated oauth session key=%q err=%v", oauthKeyID, err)
+	}
+	zero(oauthPlaintext)
 	if _, err := database.DB().Exec("PRAGMA wal_checkpoint(FULL)"); err != nil {
 		t.Fatal(err)
 	}
@@ -346,7 +371,7 @@ func TestDatabasePlaintextScanAndBulkKeyRotation(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if bytes.Contains(contents, []byte(secret)) || bytes.Contains(contents, []byte("rotation-device-secret")) || bytes.Contains(contents, []byte("ROTA-0001")) {
+		if bytes.Contains(contents, []byte(secret)) || bytes.Contains(contents, []byte("rotation-device-secret")) || bytes.Contains(contents, []byte("ROTA-0001")) || bytes.Contains(contents, []byte("rotation-oauth")) {
 			t.Fatalf("plaintext found in %s", filepath.Base(path))
 		}
 	}

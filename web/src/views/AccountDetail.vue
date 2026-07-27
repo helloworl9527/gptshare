@@ -135,7 +135,9 @@ watch(confirming, async (open) => { if (open) { await nextTick(); cancelButton.v
           </div><div class="action-row">
             <button type="button" :disabled="working" @click="refreshNow">
               {{ working ? '处理中…' : '立即刷新' }}
-            </button><RouterLink class="button-link" :to="{ name: 'import', query: { reauthorize: account.id, mode: 'token' } }">
+            </button><RouterLink class="button-link" :to="{ name: 'import', query: { reauthorize: account.id, mode: 'oauth' } }">
+              OAuth 重新授权
+            </RouterLink><RouterLink class="button-link" :to="{ name: 'import', query: { reauthorize: account.id, mode: 'token' } }">
               令牌重新授权
             </RouterLink><RouterLink class="button-link" :to="{ name: 'import', query: { reauthorize: account.id, mode: 'device' } }">
               设备码重新授权
