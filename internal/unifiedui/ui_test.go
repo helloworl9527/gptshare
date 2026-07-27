@@ -30,6 +30,9 @@ func TestRegisterServesUnifiedAdminAndPublicArtifacts(t *testing.T) {
 		if response.Code != http.StatusOK || !strings.Contains(response.Header().Get("Content-Type"), test.contentType) || !strings.Contains(response.Body.String(), test.contains) {
 			t.Fatalf("GET %s = %d type=%q body=%q", test.path, response.Code, response.Header().Get("Content-Type"), response.Body.String())
 		}
+		if response.Header().Get("Cache-Control") != "no-store, max-age=0" {
+			t.Fatalf("GET %s cache-control=%q", test.path, response.Header().Get("Cache-Control"))
+		}
 	}
 }
 

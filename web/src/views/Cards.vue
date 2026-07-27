@@ -47,6 +47,20 @@ async function generate() {
   }
 }
 
+async function copyGenerated() {
+  const plaintext = generated.value.map((card) => card.code).join('\n')
+  if (!plaintext || !navigator.clipboard?.writeText) {
+    notice.value = '浏览器不支持自动复制，请手动选择卡密。'
+    return
+  }
+  try {
+    await navigator.clipboard.writeText(plaintext)
+    notice.value = `已复制 ${generated.value.length} 张卡密，每行一个。`
+  } catch {
+    notice.value = '浏览器拒绝了复制请求，请手动选择卡密。'
+  }
+}
+
 async function exportBatch() {
   busy.value = true
   notice.value = ''
@@ -136,9 +150,14 @@ onMounted(load)
       {{ notice }}
     </p>
     <section v-if="generated.length" class="panel generated-panel" aria-label="本次生成明文卡密">
-      <p class="section-index">
-        ONE TIME PLAINTEXT
-      </p>
+      <div class="generated-heading">
+        <p class="section-index">
+          ONE TIME PLAINTEXT
+        </p>
+        <button type="button" @click="copyGenerated">
+          一键复制全部
+        </button>
+      </div>
       <div class="generated-list">
         <code v-for="card in generated" :key="card.id">{{ card.code }}</code>
       </div>

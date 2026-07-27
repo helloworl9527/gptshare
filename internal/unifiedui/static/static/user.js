@@ -8,9 +8,17 @@ const resultPanel = document.querySelector("#result");
 const queryButton = document.querySelector("#query-button");
 const refreshButton = document.querySelector("#refresh-totp");
 const copyStatus = document.querySelector("#copy-status");
+const savedCardsPanel = document.querySelector("#saved-cards");
+const savedCardsList = document.querySelector("#saved-cards-list");
+const clearSavedCardsButton = document.querySelector("#clear-saved-cards");
+const savedCardsStorageKey = "vitals.redeemed-cards.v1";
+const maximumSavedCards = 20;
 let captchaId = 0;
 let currentSecret = "";
 let validUntil = null;
+let generatedTOTPPeriod = null;
+
+renderSavedCards();
 
 setInterval(() => {
   document.querySelector("#clock").textContent = new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(new Date());
@@ -38,6 +46,9 @@ form.addEventListener("submit", async (event) => {
     if (!redeem.ok && !body.ok) {
       apiError = errorBody(body);
     }
+    if (redeem.ok || body.ok) {
+      saveRedeemedCard(payload.code, body.ok ? body.result.card.valid_until : null);
+    }
     if (body.ok) {
       captchaId = 0;
       captchaBox.classList.remove("visible");
@@ -59,6 +70,25 @@ form.addEventListener("submit", async (event) => {
   } finally {
     queryButton.disabled = false;
   }
+});
+
+savedCardsList.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-saved-code]");
+  if (!button) return;
+  codeInput.value = button.dataset.savedCode;
+  form.requestSubmit();
+});
+
+savedCardsList.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-remove-code]");
+  if (!button) return;
+  writeSavedCards(readSavedCards().filter((item) => item.code !== button.dataset.removeCode));
+  renderSavedCards();
+});
+
+clearSavedCardsButton.addEventListener("click", () => {
+  writeSavedCards([]);
+  renderSavedCards();
 });
 
 function errorBody(body) {
@@ -87,8 +117,7 @@ async function redeemCard(code) {
 
 refreshButton.addEventListener("click", async () => {
   if (!currentSecret) return;
-  document.querySelector("#totp-code").textContent = await generateTOTP(currentSecret);
-  updateCountdowns();
+  await refreshDisplayedTOTP();
 });
 
 document.querySelectorAll("[data-copy-target]").forEach((button) => {
@@ -114,10 +143,16 @@ async function renderResult(result) {
   document.querySelector("#account").textContent = result.account.display_username;
   document.querySelector("#password").textContent = result.account.password;
   document.querySelector("#replacement-notice").textContent = result.replacement_notice.state === "grace" ? "当前处于换号宽限期，请留意后续替换通知。" : "当前账号为主账号。";
-  document.querySelector("#totp-code").textContent = await generateTOTP(currentSecret);
+  await refreshDisplayedTOTP();
   setCopyStatus("");
-  updateCountdowns();
   resultPanel.classList.add("visible");
+}
+
+async function refreshDisplayedTOTP() {
+  const period = Math.floor(Date.now() / 1000 / 30);
+  document.querySelector("#totp-code").textContent = await generateTOTP(currentSecret, period);
+  generatedTOTPPeriod = period;
+  updateCountdowns();
 }
 
 function setCopyStatus(message) {
@@ -126,7 +161,14 @@ function setCopyStatus(message) {
 
 function updateCountdowns() {
   const now = Date.now();
-  document.querySelector("#totp-timer").textContent = `${30 - Math.floor(now / 1000) % 30}s 后进入下一周期`;
+  const nowSeconds = Math.floor(now / 1000);
+  const currentPeriod = Math.floor(nowSeconds / 30);
+  if (currentSecret && generatedTOTPPeriod !== null && currentPeriod > generatedTOTPPeriod) {
+    document.querySelector("#totp-timer").textContent = "当前验证码已过期，请手动刷新";
+  } else {
+    const period = generatedTOTPPeriod ?? currentPeriod;
+    document.querySelector("#totp-timer").textContent = `${Math.max(0, (period + 1) * 30 - nowSeconds)}s 后进入下一周期`;
+  }
   if (validUntil) {
     const seconds = Math.max(0, Math.floor((validUntil.getTime() - now) / 1000));
     const days = Math.floor(seconds / 86400);
@@ -141,9 +183,87 @@ function showError(message) {
   errorBox.classList.add("visible");
 }
 
-async function generateTOTP(secret) {
+function normalizeCardCode(value) {
+  const compact = String(value || "").toUpperCase().replace(/[^2-9A-HJKMNP-Z]/g, "").slice(0, 12);
+  return compact.replace(/(.{4})(?=.)/g, "$1-");
+}
+
+function readSavedCards() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(savedCardsStorageKey) || "[]");
+    if (!Array.isArray(parsed)) return [];
+    return parsed.flatMap((item) => {
+      const code = normalizeCardCode(item?.code);
+      if (code.length !== 14) return [];
+      const validUntil = item.valid_until && !Number.isNaN(new Date(item.valid_until).getTime()) ? item.valid_until : null;
+      return [{ code, saved_at: item.saved_at || null, valid_until: validUntil }];
+    }).slice(0, maximumSavedCards);
+  } catch {
+    return [];
+  }
+}
+
+function writeSavedCards(items) {
+  try {
+    if (items.length === 0) {
+      localStorage.removeItem(savedCardsStorageKey);
+      return;
+    }
+    localStorage.setItem(savedCardsStorageKey, JSON.stringify(items.slice(0, maximumSavedCards)));
+  } catch {
+    // Browsers may deny storage in private or hardened modes; querying still works.
+  }
+}
+
+function saveRedeemedCard(code, validUntil) {
+  const normalized = normalizeCardCode(code);
+  if (normalized.length !== 14) return;
+  const previous = readSavedCards().find((item) => item.code === normalized);
+  const next = {
+    code: normalized,
+    saved_at: previous?.saved_at || new Date().toISOString(),
+    valid_until: validUntil || previous?.valid_until || null,
+  };
+  writeSavedCards([next, ...readSavedCards().filter((item) => item.code !== normalized)]);
+  renderSavedCards();
+}
+
+function renderSavedCards() {
+  const items = readSavedCards();
+  savedCardsPanel.hidden = items.length === 0;
+  savedCardsList.replaceChildren();
+  for (const item of items) {
+    const row = document.createElement("li");
+    row.className = "saved-card-item";
+
+    const details = document.createElement("div");
+    const code = document.createElement("code");
+    code.textContent = item.code;
+    details.append(code);
+    if (item.valid_until) {
+      const expiry = document.createElement("small");
+      expiry.textContent = `有效至 ${new Intl.DateTimeFormat("zh-CN", { dateStyle: "medium", timeStyle: "short" }).format(new Date(item.valid_until))}`;
+      details.append(expiry);
+    }
+
+    const actions = document.createElement("div");
+    actions.className = "saved-card-actions";
+    const query = document.createElement("button");
+    query.type = "button";
+    query.dataset.savedCode = item.code;
+    query.textContent = "查询";
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.dataset.removeCode = item.code;
+    remove.textContent = "移除";
+    actions.append(query, remove);
+    row.append(details, actions);
+    savedCardsList.append(row);
+  }
+}
+
+async function generateTOTP(secret, counter = Math.floor(Date.now() / 1000 / 30)) {
   const key = base32Decode(secret);
-  const counter = Math.floor(Date.now() / 1000 / 30);
   const buffer = new ArrayBuffer(8);
   const view = new DataView(buffer);
   view.setUint32(4, counter);

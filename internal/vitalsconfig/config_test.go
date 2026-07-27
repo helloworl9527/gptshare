@@ -75,6 +75,27 @@ func TestLoadDefaultsCompatHTTPToDisabledWithoutAPIKey(t *testing.T) {
 	if cfg.CompatHTTP.Enabled {
 		t.Fatal("compatibility HTTP must default to disabled")
 	}
+	if cfg.AdminSessionTTL != 30*24*time.Hour {
+		t.Fatalf("admin session TTL = %s, want 720h", cfg.AdminSessionTTL)
+	}
+}
+
+func TestLoadAdminSessionTTL(t *testing.T) {
+	env := validEnv()
+	env["ADMIN_SESSION_TTL"] = "336h"
+	cfg, err := Load(mapLookup(env))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AdminSessionTTL != 14*24*time.Hour {
+		t.Fatalf("admin session TTL = %s, want 336h", cfg.AdminSessionTTL)
+	}
+	for _, invalid := range []string{"not-a-duration", "30m", "2161h"} {
+		env["ADMIN_SESSION_TTL"] = invalid
+		if _, err := Load(mapLookup(env)); err == nil {
+			t.Fatalf("expected ADMIN_SESSION_TTL=%q to be rejected", invalid)
+		}
+	}
 }
 
 func TestLoadPublicOriginRequiresExplicitOptIn(t *testing.T) {

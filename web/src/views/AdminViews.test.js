@@ -143,10 +143,15 @@ describe('P2 admin views', () => {
   })
 
   it('generates cards and keeps one-time plaintext visible only in generated panel', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    vi.stubGlobal('navigator', { clipboard: { writeText } })
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(response({ cards }))
       .mockResolvedValueOnce(response({ csrf_token: 'c'.repeat(43) }))
-      .mockResolvedValueOnce(response({ cards: [{ id: 5, code: '2345-6789-ABCD', code_suffix: 'ABCD', duration_days: 30, status: 'unused' }] }, 201))
+      .mockResolvedValueOnce(response({ cards: [
+        { id: 5, code: '2345-6789-ABCD', code_suffix: 'ABCD', duration_days: 30, status: 'unused' },
+        { id: 6, code: '2345-6789-EFGH', code_suffix: 'EFGH', duration_days: 30, status: 'unused' },
+      ] }, 201))
       .mockResolvedValueOnce(response({ cards }))
     const wrapper = await render(Cards, fetchMock)
     await wrapper.get('button.compact-action').trigger('click')
@@ -154,6 +159,10 @@ describe('P2 admin views', () => {
     await wrapper.find('.modal-form').trigger('submit')
     await flushPromises()
     expect(wrapper.text()).toContain('2345-6789-ABCD')
+    await wrapper.findAll('button').find((button) => button.text() === '一键复制全部').trigger('click')
+    await flushPromises()
+    expect(writeText).toHaveBeenCalledWith('2345-6789-ABCD\n2345-6789-EFGH')
+    expect(wrapper.text()).toContain('已复制 2 张卡密，每行一个。')
     expect(fetchMock.mock.calls.map(([url]) => String(url))).toContain('/api/admin/cards/generate')
     wrapper.unmount()
   })

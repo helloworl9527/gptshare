@@ -60,18 +60,42 @@ test('unified admin covers both domains, credential completion and reveal', asyn
   expect(consoleErrors).toEqual([])
 })
 
-test('public card flow remains unauthenticated and clipboard-only', async ({ page }) => {
+test('public card flow persists redeemed card codes without account credentials', async ({ page }) => {
   const consoleErrors = []
   page.on('console', (message) => { if (message.type() === 'error') consoleErrors.push(message.text()) })
+  await page.addInitScript(() => {
+    window.__testNow = Date.now()
+    Date.now = () => window.__testNow
+  })
   await page.goto('/admin/user.html')
   await page.waitForLoadState('networkidle')
   await expect(page.getByRole('heading', { name: '卡密查询', exact: true })).toBeVisible()
-  await page.getByLabel('卡密').fill('2345-6789-ABCD')
+  await page.getByLabel('卡密', { exact: true }).fill('2345-6789-ABCD')
   await page.getByRole('button', { name: '查询或兑换卡密' }).click()
   await expect(page.getByText('public@example.test')).toBeVisible()
   await expect(page.locator('#totp-code')).not.toHaveText('------')
+  const initialTOTP = await page.locator('#totp-code').textContent()
+  await page.evaluate(() => { window.__testNow += 31_000 })
+  await expect(page.locator('#totp-timer')).toHaveText('当前验证码已过期，请手动刷新')
+  await expect(page.locator('#totp-code')).toHaveText(initialTOTP)
+  await page.getByRole('button', { name: '刷新验证码' }).click()
+  await expect(page.locator('#totp-timer')).toHaveText(/s 后进入下一周期/)
   await page.getByRole('button', { name: '复制账号' }).click()
   await expect(page.locator('#copy-status')).toHaveText(/已复制|无法复制/)
-  expect(await page.evaluate(() => [localStorage.length, sessionStorage.length])).toEqual([0, 0])
+  await expect(page.getByRole('heading', { name: '已兑换卡密' })).toBeVisible()
+  await expect(page.locator('#saved-cards-list')).toContainText('2345-6789-ABCD')
+  const storage = await page.evaluate(() => ({
+    saved: localStorage.getItem('vitals.redeemed-cards.v1'),
+    sessionLength: sessionStorage.length,
+  }))
+  expect(storage.saved).toContain('2345-6789-ABCD')
+  expect(storage.saved).not.toContain('public@example.test')
+  expect(storage.saved).not.toContain('public-test-password')
+  expect(storage.saved).not.toContain('JBSWY3DPEHPK3PXP')
+  expect(storage.sessionLength).toBe(0)
+  await page.reload()
+  await expect(page.getByRole('heading', { name: '已兑换卡密' })).toBeVisible()
+  await page.locator('#saved-cards-list').getByRole('button', { name: '查询' }).click()
+  await expect(page.getByText('public@example.test')).toBeVisible()
   expect(consoleErrors).toEqual([])
 })

@@ -24,7 +24,7 @@ import (
 const (
 	challengeTTL      = 2 * time.Minute
 	challengeAttempts = 5
-	defaultSessionTTL = 15 * time.Minute
+	defaultSessionTTL = 30 * 24 * time.Hour
 	issuer            = "chatgpt-monitor"
 	audience          = "chatgpt-monitor-admin"
 )

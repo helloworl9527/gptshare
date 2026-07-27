@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
   <title>卡密查询</title>
-  <link rel="stylesheet" href="./static/user.css">
+  <link rel="stylesheet" href="./static/user.css?v=20260727-2">
 </head>
 <body>
   <a class="skip-link" href="#main">跳到查询表单</a>
@@ -37,6 +37,18 @@
       </form>
     </section>
 
+    <section id="saved-cards" class="panel saved-cards" aria-labelledby="saved-cards-title" hidden>
+      <div class="saved-cards-heading">
+        <div>
+          <p class="eyebrow">Saved on this device</p>
+          <h2 id="saved-cards-title">已兑换卡密</h2>
+        </div>
+        <button id="clear-saved-cards" type="button">清空记录</button>
+      </div>
+      <p class="storage-notice">兑换码仅保存在当前浏览器，清除浏览器数据后会丢失；请勿在公共设备上保留。</p>
+      <ul id="saved-cards-list" class="saved-cards-list"></ul>
+    </section>
+
     <section id="result" class="panel result" aria-labelledby="result-title">
       <h2 id="result-title">账号信息</h2>
       <ul class="info-list">
@@ -49,6 +61,6 @@
       <p id="replacement-notice" class="notice"></p>
     </section>
   </main>
-  <script src="./static/user.js" defer></script>
+  <script src="./static/user.js?v=20260727-2" defer></script>
 </body>
 </html>

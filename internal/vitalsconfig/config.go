@@ -18,6 +18,12 @@ import (
 
 const minimumSecretBytes = 32
 
+const (
+	defaultAdminSessionTTL = 30 * 24 * time.Hour
+	minAdminSessionTTL     = time.Hour
+	maxAdminSessionTTL     = 90 * 24 * time.Hour
+)
+
 type Config struct {
 	ListenAddr                   string
 	MonitorDBPath                string
@@ -30,6 +36,7 @@ type Config struct {
 	AdminUser                    string
 	AdminPasswordHash            string
 	AdminTOTPSecret              []byte
+	AdminSessionTTL              time.Duration
 	JWTSigningKey                []byte
 	RateLimitKey                 []byte
 	AppOrigin                    string
@@ -102,6 +109,10 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 	if !validPasswordHash(passwordHash) {
 		return Config{}, errors.New("ADMIN_PASSWORD_HASH must be a bcrypt hash with cost at least 12")
 	}
+	adminSessionTTL, err := time.ParseDuration(get("ADMIN_SESSION_TTL", defaultAdminSessionTTL.String()))
+	if err != nil || adminSessionTTL < minAdminSessionTTL || adminSessionTTL > maxAdminSessionTTL {
+		return Config{}, errors.New("ADMIN_SESSION_TTL must be a duration between 1h and 2160h")
+	}
 	appOrigin := get("APP_ORIGIN", "https://"+listenAddr)
 	allowPublicOrigin, err := strconv.ParseBool(get("VITALS_ALLOW_PUBLIC_APP_ORIGIN", "false"))
 	if err != nil {
@@ -133,6 +144,7 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 		AdminUser:                    adminUser,
 		AdminPasswordHash:            passwordHash,
 		AdminTOTPSecret:              totpSecret,
+		AdminSessionTTL:              adminSessionTTL,
 		JWTSigningKey:                jwtKey,
 		RateLimitKey:                 rateKey,
 		AppOrigin:                    appOrigin,

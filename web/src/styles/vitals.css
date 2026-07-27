@@ -229,6 +229,8 @@ tbody tr { border-left: 4px solid var(--green); }
 .danger-button { border-color: #e9b5b8 !important; color: #a3272f !important; }
 .table-skeleton { min-height: 280px; display: grid; place-items: center; color: var(--muted); font: 700 12px var(--mono); }
 .generated-panel { margin: 0 0 18px; border-left: 4px solid var(--amber); }
+.generated-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.generated-heading .section-index { margin: 0; }
 .generated-list { display: flex; flex-wrap: wrap; gap: 8px; }
 .generated-list code { border: 1px solid var(--line); background: #f7faf9; padding: 7px 9px; font: 700 12px var(--mono); }
 .history-note { margin-top: 18px; border-left: 4px solid var(--cyan); }

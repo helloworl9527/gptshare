@@ -31,6 +31,7 @@ func fileHandler(root fs.FS, name, contentType string) gin.HandlerFunc {
 			c.AbortWithStatus(http.StatusNotFound)
 			return
 		}
+		c.Header("Cache-Control", "no-store, max-age=0")
 		c.Data(http.StatusOK, contentType, body)
 	}
 }

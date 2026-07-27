@@ -65,6 +65,7 @@ func run(logger *slog.Logger) error {
 		TOTPSecret:   cfg.AdminTOTPSecret,
 		JWTKey:       cfg.JWTSigningKey,
 		RateLimitKey: cfg.RateLimitKey,
+		SessionTTL:   cfg.AdminSessionTTL,
 	})
 	if err != nil {
 		return errors.New("unified_auth_initialization_failed")
