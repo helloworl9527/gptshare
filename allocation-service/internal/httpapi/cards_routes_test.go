@@ -68,7 +68,12 @@ func TestAdminCardsGenerateListExportAndPermission(t *testing.T) {
 	if custom.StatusCode != http.StatusCreated || !strings.Contains(customBody, `"duration_days":5`) {
 		t.Fatalf("custom duration status=%d body=%s", custom.StatusCode, customBody)
 	}
-	for _, invalidDays := range []int{0, 31, 90} {
+	ninety := postJSON(t, client, server.URL+"/api/admin/cards/generate", csrf, map[string]any{"quantity": 1, "duration_days": 90})
+	ninetyBody := readBody(t, ninety)
+	if ninety.StatusCode != http.StatusCreated || !strings.Contains(ninetyBody, `"duration_days":90`) {
+		t.Fatalf("90-day duration status=%d body=%s", ninety.StatusCode, ninetyBody)
+	}
+	for _, invalidDays := range []int{0, 31, 89, 91} {
 		invalid := postJSON(t, client, server.URL+"/api/admin/cards/generate", csrf, map[string]any{"quantity": 1, "duration_days": invalidDays})
 		if invalid.StatusCode != http.StatusUnprocessableEntity {
 			t.Fatalf("invalid duration=%d status=%d body=%s", invalidDays, invalid.StatusCode, readBody(t, invalid))

@@ -21,7 +21,8 @@ const visible = computed(() => cards.value)
 const maxExtendDays = computed(() => remainingExtensionDays(form.selected))
 
 function validDurationDays(value) {
-  return Number.isInteger(Number(value)) && Number(value) >= 1 && Number(value) <= 30
+  const days = Number(value)
+  return Number.isInteger(days) && ((days >= 1 && days <= 30) || days === 90)
 }
 
 function remainingExtensionDays(card) {
@@ -53,7 +54,7 @@ async function load() {
 
 async function generate() {
   if (!validDurationDays(form.duration_days)) {
-    notice.value = '卡密有效期必须是 1～30 天的整数。'
+    notice.value = '卡密有效期必须是 1～30 天的整数或 90 天。'
     return
   }
   busy.value = true
@@ -87,7 +88,7 @@ async function copyGenerated() {
 
 async function exportBatch() {
   if (!validDurationDays(form.duration_days)) {
-    notice.value = '卡密有效期必须是 1～30 天的整数。'
+    notice.value = '卡密有效期必须是 1～30 天的整数或 90 天。'
     return
   }
   busy.value = true
@@ -271,13 +272,13 @@ onMounted(load)
         <label for="quantity">数量</label>
         <input id="quantity" v-model.number="form.quantity" type="number" min="1" max="1000" required>
         <label for="duration">有效期（天）</label>
-        <input id="duration" v-model.number="form.duration_days" type="number" min="1" max="30" step="1" required>
+        <input id="duration" v-model.number="form.duration_days" type="number" min="1" max="90" step="1" required>
         <div class="duration-shortcuts" role="group" aria-label="常用有效期">
-          <button v-for="days in [7, 14, 30]" :key="days" type="button" @click="form.duration_days = days">
+          <button v-for="days in [7, 14, 30, 90]" :key="days" type="button" @click="form.duration_days = days">
             {{ days }} 天
           </button>
         </div>
-        <small class="field-hint">可输入 1～30 天的任意整数；历史 90 天卡密不受影响。</small>
+        <small class="field-hint">可输入 1～30 天的任意整数，或选择 90 天长期卡密。</small>
         <template v-if="modal === 'export'">
           <label for="format">导出格式</label>
           <select id="format" v-model="form.format">

@@ -74,7 +74,7 @@ func (s *Service) SetNow(now func() time.Time) {
 }
 
 func (s *Service) Generate(ctx context.Context, quantity, durationDays int) (GenerateResult, error) {
-	if quantity < 1 || quantity > 1000 || !validNewDuration(durationDays) {
+	if quantity < 1 || quantity > 1000 || !validGeneratedDuration(durationDays) {
 		return GenerateResult{}, ErrValidation
 	}
 	seen := make(map[string]struct{}, quantity)
@@ -137,7 +137,7 @@ func (s *Service) Revoke(ctx context.Context, id int64) (models.Card, error) {
 }
 
 func (s *Service) Extend(ctx context.Context, id int64, days int) (models.Card, error) {
-	if id <= 0 || !validNewDuration(days) {
+	if id <= 0 || !validExtensionDuration(days) {
 		return models.Card{}, ErrValidation
 	}
 	card, err := s.repo.ExtendCard(ctx, id, days)
@@ -258,12 +258,16 @@ func generateCode() (string, error) {
 	return fmt.Sprintf("%s-%s-%s", chars[0:4], chars[4:8], chars[8:12]), nil
 }
 
-func validNewDuration(days int) bool {
+func validExtensionDuration(days int) bool {
 	return days >= 1 && days <= 30
 }
 
+func validGeneratedDuration(days int) bool {
+	return validExtensionDuration(days) || days == 90
+}
+
 func validStoredDuration(days int) bool {
-	return validNewDuration(days) || days == 90
+	return validGeneratedDuration(days)
 }
 
 func validStatus(status string) bool {

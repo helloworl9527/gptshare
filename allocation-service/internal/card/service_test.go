@@ -71,17 +71,17 @@ func TestGenerateOneHundredUniqueFormatAndHashOnlyStorage(t *testing.T) {
 	}
 }
 
-func TestGenerateAcceptsEveryDayWithinThirtyAndRejectsLegacyNewDurations(t *testing.T) {
+func TestGenerateAcceptsEveryDayWithinThirtyAndNinetyDays(t *testing.T) {
 	database := openCardStore(t)
 	defer database.Close()
 	service := NewService(repository.New(database.DB(), repositoryTestCredentialKeyring(t)))
-	for _, days := range []int{1, 2, 5, 29, 30} {
+	for _, days := range []int{1, 2, 5, 29, 30, 90} {
 		result, err := service.Generate(context.Background(), 1, days)
 		if err != nil || len(result.Cards) != 1 || result.Cards[0].DurationDays != days {
 			t.Fatalf("duration=%d result=%+v err=%v", days, result, err)
 		}
 	}
-	for _, days := range []int{-1, 0, 31, 90} {
+	for _, days := range []int{-1, 0, 31, 89, 91} {
 		if _, err := service.Generate(context.Background(), 1, days); !errors.Is(err, ErrValidation) {
 			t.Fatalf("duration=%d err=%v want validation", days, err)
 		}
