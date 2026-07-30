@@ -45,6 +45,12 @@ test('unified admin covers both domains, credential completion and reveal', asyn
 
   await page.getByRole('link', { name: '卡密', exact: true }).click()
   await expect(page.getByRole('heading', { name: '卡密管理' })).toBeVisible()
+  await page.getByRole('button', { name: '批量生成' }).click()
+  await page.getByLabel('数量').fill('1')
+  await page.getByLabel('有效期（天）').fill('5')
+  await expect(page.getByText('可输入 1～30 天的任意整数')).toBeVisible()
+  await page.getByRole('dialog').getByRole('button', { name: '生成卡密' }).click()
+  await expect(page.getByText('已生成 1 张卡密')).toBeVisible()
   await page.getByRole('row', { name: /ABCD/ }).getByRole('button', { name: '查看' }).click()
   await expect(page.getByText('2345-6789-ABCD')).toBeVisible()
   await expect(page.getByText(/查看明文会写入.*审计/)).toBeVisible()

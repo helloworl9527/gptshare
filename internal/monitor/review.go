@@ -17,6 +17,86 @@ type reviewCandidate struct {
 	epochID                    int64
 }
 
+// finalizeLegacyPendingBans upgrades candidates left by the former
+// confirmation-required policy. New stable ban candidates are finalized in
+// the polling transaction itself.
+func (s *Service) finalizeLegacyPendingBans(ctx context.Context) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx, `SELECT
+			a.id,a.status,a.import_time,a.pending_detected_at,e.id,
+			a.pending_evidence_signature,a.last_check_error_code
+		FROM accounts a
+		JOIN authorization_epochs e ON e.account_id=a.id AND e.ended_at IS NULL
+		WHERE a.polling_paused=1
+		  AND a.pause_reason='evidence_review_required'
+		  AND a.last_check_state='verification_required'
+		  AND a.last_check_error_code IN (
+		    'account_disabled','account_deactivated','token_revoked',
+		    'credential_revoked','refresh_token_reused'
+		  )
+		  AND a.pending_evidence_signature IS NOT NULL
+		  AND a.pending_detected_at IS NOT NULL`)
+	if err != nil {
+		return err
+	}
+	type legacyCandidate struct {
+		accountID, epochID                          int64
+		status, imported, detected, signature, code string
+	}
+	var candidates []legacyCandidate
+	for rows.Next() {
+		var item legacyCandidate
+		if err := rows.Scan(&item.accountID, &item.status, &item.imported, &item.detected, &item.epochID, &item.signature, &item.code); err != nil {
+			rows.Close()
+			return err
+		}
+		candidates = append(candidates, item)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	now := s.now().UTC()
+	for _, item := range candidates {
+		if s.registryLevel(ctx, tx, item.signature) == chatgpt.EvidenceUnverified {
+			continue
+		}
+		detected, err := parseTime(item.detected)
+		if err != nil {
+			return err
+		}
+		imported, err := parseTime(item.imported)
+		if err != nil {
+			return err
+		}
+		days := detected.Sub(imported).Hours() / 24
+		if days < 0 {
+			days = 0
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE accounts SET
+				status='dead_banned',dead_at=?,death_type='abnormal_ban',banned_survival_days=?,
+				last_check_state='ok',last_check_error_code=NULL,polling_paused=0,pause_reason=NULL,
+				pending_evidence_signature=NULL,pending_detected_at=NULL,next_retry_at=NULL,updated_at=?
+			WHERE id=?`, formatTime(detected), days, formatTime(now), item.accountID); err != nil {
+			return err
+		}
+		if err := closeEpoch(tx, item.epochID, StateDeadBanned, detected, &days); err != nil {
+			return err
+		}
+		if err := insertChange(ctx, tx, item.accountID, item.epochID, detected, "status", item.status, StateDeadBanned,
+			item.code, chatgpt.EvidenceContractVerifiedLivePending, item.signature, nil, ""); err != nil {
+			return err
+		}
+		if _, err := insertAlert(ctx, tx, item.accountID, item.epochID, detected); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func (s *Service) ReviewEvidence(ctx context.Context, request ReviewRequest) (ReviewResult, error) {
 	request.Signature = strings.TrimSpace(request.Signature)
 	request.Reason = strings.TrimSpace(request.Reason)

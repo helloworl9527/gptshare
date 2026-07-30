@@ -18,6 +18,25 @@ const revealed = reactive({})
 const form = reactive({ quantity: 10, duration_days: 30, format: 'csv', extend_days: 7, selected: null })
 
 const visible = computed(() => cards.value)
+const maxExtendDays = computed(() => remainingExtensionDays(form.selected))
+
+function validDurationDays(value) {
+  return Number.isInteger(Number(value)) && Number(value) >= 1 && Number(value) <= 30
+}
+
+function remainingExtensionDays(card) {
+  if (!card || card.status !== 'redeemed' || !card.redeemed_at || !card.expires_at) return 0
+  const redeemedAt = new Date(card.redeemed_at).getTime()
+  const expiresAt = new Date(card.expires_at).getTime()
+  if (!Number.isFinite(redeemedAt) || !Number.isFinite(expiresAt)) return 0
+  return Math.max(0, Math.floor((redeemedAt + 30 * 86400000 - expiresAt + 1000) / 86400000))
+}
+
+function openExtend(card) {
+  form.selected = card
+  form.extend_days = Math.min(7, Math.max(1, remainingExtensionDays(card)))
+  modal.value = 'extend'
+}
 
 async function load() {
   loading.value = true
@@ -33,11 +52,16 @@ async function load() {
 }
 
 async function generate() {
+  if (!validDurationDays(form.duration_days)) {
+    notice.value = '卡密有效期必须是 1～30 天的整数。'
+    return
+  }
   busy.value = true
   notice.value = ''
   try {
     const result = await api.generateCards({ quantity: form.quantity, duration_days: form.duration_days })
     generated.value = result.cards || []
+    modal.value = ''
     notice.value = `已生成 ${generated.value.length} 张卡密，明文仅本次可见。`
     await load()
   } catch (reason) {
@@ -62,6 +86,10 @@ async function copyGenerated() {
 }
 
 async function exportBatch() {
+  if (!validDurationDays(form.duration_days)) {
+    notice.value = '卡密有效期必须是 1～30 天的整数。'
+    return
+  }
   busy.value = true
   notice.value = ''
   try {
@@ -107,6 +135,10 @@ function hideReveal(card) {
 }
 
 async function extend() {
+  if (!validDurationDays(form.extend_days) || form.extend_days > maxExtendDays.value) {
+    notice.value = `最多还可延期 ${maxExtendDays.value} 天。`
+    return
+  }
   busy.value = true
   notice.value = ''
   try {
@@ -221,7 +253,7 @@ onMounted(load)
                 <button v-else type="button" :aria-label="`查看尾号 ${card.code_suffix} 的卡密明文`" @click="reveal(card)">
                   查看
                 </button>
-                <button type="button" :disabled="card.status !== 'redeemed'" @click="form.selected = card; modal = 'extend'">
+                <button type="button" :disabled="remainingExtensionDays(card) < 1" :title="remainingExtensionDays(card) < 1 ? '该卡密已达到 30 天有效期上限' : ''" @click="openExtend(card)">
                   延期
                 </button>
                 <button class="danger-button" type="button" :disabled="card.status === 'revoked' || card.status === 'expired'" @click="revoke(card)">
@@ -238,18 +270,14 @@ onMounted(load)
       <form class="modal-form" @submit.prevent="modal === 'generate' ? generate() : exportBatch()">
         <label for="quantity">数量</label>
         <input id="quantity" v-model.number="form.quantity" type="number" min="1" max="1000" required>
-        <label for="duration">时长档位</label>
-        <select id="duration" v-model.number="form.duration_days">
-          <option :value="7">
-            7 天
-          </option><option :value="14">
-            14 天
-          </option><option :value="30">
-            30 天
-          </option><option :value="90">
-            90 天
-          </option>
-        </select>
+        <label for="duration">有效期（天）</label>
+        <input id="duration" v-model.number="form.duration_days" type="number" min="1" max="30" step="1" required>
+        <div class="duration-shortcuts" role="group" aria-label="常用有效期">
+          <button v-for="days in [7, 14, 30]" :key="days" type="button" @click="form.duration_days = days">
+            {{ days }} 天
+          </button>
+        </div>
+        <small class="field-hint">可输入 1～30 天的任意整数；历史 90 天卡密不受影响。</small>
         <template v-if="modal === 'export'">
           <label for="format">导出格式</label>
           <select id="format" v-model="form.format">
@@ -268,8 +296,9 @@ onMounted(load)
     <FocusModal v-if="modal === 'extend'" title="延期卡密" @close="modal = ''">
       <form class="modal-form" @submit.prevent="extend">
         <label for="extend-days">延期天数</label>
-        <input id="extend-days" v-model.number="form.extend_days" type="number" min="1" max="365" required>
-        <button class="primary-action" type="submit" :disabled="busy">
+        <input id="extend-days" v-model.number="form.extend_days" type="number" min="1" :max="maxExtendDays" step="1" required>
+        <small class="field-hint">当前最多还可延期 {{ maxExtendDays }} 天，最终有效期不超过首次兑换后 30 天。</small>
+        <button class="primary-action" type="submit" :disabled="busy || maxExtendDays < 1">
           确认延期
         </button>
       </form>

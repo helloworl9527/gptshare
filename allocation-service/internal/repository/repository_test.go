@@ -658,6 +658,13 @@ func TestCardStateTransitionsRevokeReleaseAndExtend(t *testing.T) {
 	if allocationUntil != formatTime(now.Add(21*24*time.Hour)) {
 		t.Fatalf("allocation valid_until=%s", allocationUntil)
 	}
+	extended, err = repo.ExtendCard(context.Background(), cardID, 9)
+	if err != nil || extended.ExpiresAt == nil || !extended.ExpiresAt.Equal(now.Add(30*24*time.Hour)) {
+		t.Fatalf("extend to maximum card=%+v err=%v", extended, err)
+	}
+	if _, err := repo.ExtendCard(context.Background(), cardID, 1); !errors.Is(err, ErrCardDurationLimit) {
+		t.Fatalf("extend beyond maximum err=%v want=%v", err, ErrCardDurationLimit)
+	}
 	revoked, err := repo.RevokeCard(context.Background(), cardID)
 	if err != nil {
 		t.Fatal(err)
@@ -831,7 +838,7 @@ func TestRedeemSelectsWasteProximityOptimalAccountOQ22(t *testing.T) {
 	}
 }
 
-func TestRedeemOfflineSkipsMonitorFiltering(t *testing.T) {
+func TestRedeemAlwaysExcludesDeadBanned(t *testing.T) {
 	db := openStore(t)
 	defer db.Close()
 	repo := New(db.DB(), testCredentialKeyring(t))
@@ -844,7 +851,7 @@ func TestRedeemOfflineSkipsMonitorFiltering(t *testing.T) {
 		t.Fatal(err)
 	}
 	alive, err := repo.CreateAccount(context.Background(), AccountSeed{
-		DisplayUsername: "alive", DisplayPassword: "secret-password", DisplayTOTPSecret: "secret-totp", AccountExpiry: now.Add(20 * 24 * time.Hour), MaxConcurrentUsers: 1, MonitorStatus: "alive",
+		DisplayUsername: "alive", DisplayPassword: "secret-password", DisplayTOTPSecret: "secret-totp", AccountExpiry: now.Add(20 * 24 * time.Hour), MaxConcurrentUsers: 2, MonitorStatus: "alive",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -860,8 +867,8 @@ func TestRedeemOfflineSkipsMonitorFiltering(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if offline.Account.ID != deadBanned {
-		t.Fatalf("offline should skip monitor filter and choose waste-min account: got=%d dead=%d", offline.Account.ID, deadBanned)
+	if offline.Account.ID != alive || offline.Account.ID == deadBanned {
+		t.Fatalf("offline must also exclude dead_banned: got=%d alive=%d dead=%d", offline.Account.ID, alive, deadBanned)
 	}
 }
 

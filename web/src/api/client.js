@@ -55,7 +55,8 @@ export async function request(path, options = {}) {
   return response.json()
 }
 
-function publicMessage(status) {
+function publicMessage(status, code) {
+  if (code === 'card_duration_limit_exceeded') return '延期后总有效期不能超过首次兑换后的 30 天。'
   if (status === 401) return '登录状态已失效，请重新登录。'
   if (status === 403) return '安全校验未通过，请刷新页面后重试。'
   if (status === 404) return '请求的账号或运行记录不存在。'

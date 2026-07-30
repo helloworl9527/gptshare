@@ -260,6 +260,8 @@ func writeCardError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, cardsvc.ErrValidation):
 		writeError(c, http.StatusUnprocessableEntity, "validation_failed", "request validation failed")
+	case errors.Is(err, cardsvc.ErrDurationLimit):
+		writeError(c, http.StatusUnprocessableEntity, "card_duration_limit_exceeded", "card validity cannot exceed 30 days from redemption")
 	case errors.Is(err, cardsvc.ErrNotFound):
 		writeError(c, http.StatusNotFound, "not_found", "card not found")
 	case errors.Is(err, cardsvc.ErrConflict), errors.Is(err, repository.ErrCardStateConflict):

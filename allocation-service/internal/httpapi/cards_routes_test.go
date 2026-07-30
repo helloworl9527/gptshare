@@ -63,6 +63,17 @@ func TestAdminCardsGenerateListExportAndPermission(t *testing.T) {
 			t.Fatalf("suffix mismatch card=%+v", card)
 		}
 	}
+	custom := postJSON(t, client, server.URL+"/api/admin/cards/generate", csrf, map[string]any{"quantity": 1, "duration_days": 5})
+	customBody := readBody(t, custom)
+	if custom.StatusCode != http.StatusCreated || !strings.Contains(customBody, `"duration_days":5`) {
+		t.Fatalf("custom duration status=%d body=%s", custom.StatusCode, customBody)
+	}
+	for _, invalidDays := range []int{0, 31, 90} {
+		invalid := postJSON(t, client, server.URL+"/api/admin/cards/generate", csrf, map[string]any{"quantity": 1, "duration_days": invalidDays})
+		if invalid.StatusCode != http.StatusUnprocessableEntity {
+			t.Fatalf("invalid duration=%d status=%d body=%s", invalidDays, invalid.StatusCode, readBody(t, invalid))
+		}
+	}
 	list := getRaw(t, client, server.URL+"/api/admin/cards?status=unused&duration_days=30")
 	listBody := readBody(t, list)
 	if list.StatusCode != http.StatusOK {
@@ -193,6 +204,15 @@ func TestCardRevokeBlocksUserQueryAndExtendUpdatesView(t *testing.T) {
 	}
 	if !afterTime.Equal(beforeTime.Add(14 * 24 * time.Hour)) {
 		t.Fatalf("extend did not update user view before=%s after=%s", beforeTime, afterTime)
+	}
+	toLimit := postJSON(t, client, server.URL+"/api/admin/cards/"+strconv.FormatInt(parsed.Cards[0].ID, 10)+"/extend", csrf, map[string]any{"days": 9})
+	if toLimit.StatusCode != http.StatusOK {
+		t.Fatalf("extend to limit status=%d body=%s", toLimit.StatusCode, readBody(t, toLimit))
+	}
+	overLimit := postJSON(t, client, server.URL+"/api/admin/cards/"+strconv.FormatInt(parsed.Cards[0].ID, 10)+"/extend", csrf, map[string]any{"days": 1})
+	overLimitBody := readBody(t, overLimit)
+	if overLimit.StatusCode != http.StatusUnprocessableEntity || !strings.Contains(overLimitBody, `"code":"card_duration_limit_exceeded"`) {
+		t.Fatalf("extend over limit status=%d body=%s", overLimit.StatusCode, overLimitBody)
 	}
 	revoked := postJSON(t, client, server.URL+"/api/admin/cards/"+strconv.FormatInt(parsed.Cards[0].ID, 10)+"/revoke", csrf, map[string]any{})
 	revokedBody := readBody(t, revoked)

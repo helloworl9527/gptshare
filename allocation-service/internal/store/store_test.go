@@ -115,6 +115,99 @@ func TestFixtureDatabaseUpgradeCreatesBackupAndPreservesData(t *testing.T) {
 	}
 }
 
+func TestCardDurationMigrationPreservesLegacyCardsAndForeignKeys(t *testing.T) {
+	dir := secureTempDir(t)
+	path := filepath.Join(dir, "allocation.db")
+	legacy, err := sql.Open("sqlite", "file:"+filepath.ToSlash(path)+"?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacy.Exec(`CREATE TABLE schema_migrations (
+		version INTEGER PRIMARY KEY,
+		name TEXT NOT NULL,
+		applied_at TEXT NOT NULL
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	migrations, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range migrations {
+		if item.version >= 7 {
+			break
+		}
+		if err := applyMigration(context.Background(), legacy, item); err != nil {
+			t.Fatalf("apply legacy migration %d: %v", item.version, err)
+		}
+	}
+	now := "2026-07-30T00:00:00Z"
+	if _, err := legacy.Exec(`INSERT INTO chatgpt_accounts(
+		display_username,display_password_secret,display_password_key_id,
+		display_2fa_secret,display_2fa_key_id,account_expiry,max_concurrent_users,
+		current_allocations,monitor_status,status,created_at,updated_at
+	) VALUES ('legacy@example.test',x'01','key',x'02','key','2026-08-29T00:00:00Z',1,1,'alive','full',?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	result, err := legacy.Exec(`INSERT INTO cards(
+		code_hash,code_suffix,duration_days,status,redeemed_at,expires_at,
+		created_at,updated_at,encrypted_code_key_id,encrypted_code
+	) VALUES (x'0102','OLD9',90,'redeemed',?,'2026-10-28T00:00:00Z',?,?,'key',x'0304')`, now, now, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cardID, _ := result.LastInsertId()
+	if _, err := legacy.Exec(`INSERT INTO allocations(
+		card_id,account_id,allocated_at,valid_until,allocation_state,active,created_at,updated_at
+	) VALUES (?,1,?,'2026-10-28T00:00:00Z','primary',1,?,?)`, cardID, now, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	upgraded, err := Open(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer upgraded.Close()
+	var duration, allocationCardID int
+	var encrypted []byte
+	if err := upgraded.DB().QueryRow("SELECT duration_days,encrypted_code FROM cards WHERE id=?", cardID).Scan(&duration, &encrypted); err != nil {
+		t.Fatal(err)
+	}
+	if duration != 90 || len(encrypted) != 2 {
+		t.Fatalf("legacy card duration=%d encrypted=%x", duration, encrypted)
+	}
+	if err := upgraded.DB().QueryRow("SELECT card_id FROM allocations WHERE card_id=?", cardID).Scan(&allocationCardID); err != nil || int64(allocationCardID) != cardID {
+		t.Fatalf("allocation card=%d err=%v", allocationCardID, err)
+	}
+	var violations int
+	rows, err := upgraded.DB().Query("PRAGMA foreign_key_check")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		violations++
+	}
+	rows.Close()
+	if violations != 0 {
+		t.Fatalf("foreign key violations=%d", violations)
+	}
+	var foreignKeysEnabled int
+	if err := upgraded.DB().QueryRow("PRAGMA foreign_keys").Scan(&foreignKeysEnabled); err != nil || foreignKeysEnabled != 1 {
+		t.Fatalf("foreign keys enabled=%d err=%v", foreignKeysEnabled, err)
+	}
+	if _, err := upgraded.DB().Exec(`INSERT INTO cards(code_hash,code_suffix,duration_days,status,created_at,updated_at)
+		VALUES (x'0506','DAY5',5,'unused',?,?)`, now, now); err != nil {
+		t.Fatalf("custom duration rejected: %v", err)
+	}
+	if _, err := upgraded.DB().Exec(`INSERT INTO cards(code_hash,code_suffix,duration_days,status,created_at,updated_at)
+		VALUES (x'0708','BAD3',31,'unused',?,?)`, now, now); err == nil {
+		t.Fatal("duration above 30 unexpectedly accepted")
+	}
+}
+
 func TestAllocationConstraintsRejectInvalidRows(t *testing.T) {
 	store, cleanup := openTestStore(t)
 	defer cleanup.Close()

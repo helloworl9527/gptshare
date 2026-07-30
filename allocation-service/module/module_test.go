@@ -199,7 +199,7 @@ func TestFacadeTypedFaultInjectionPreservesPullAndBatchBranches(t *testing.T) {
 	}
 }
 
-func TestRedeemExcludesDeadBannedAndDegradesWhenFacadeUnavailable(t *testing.T) {
+func TestRedeemExcludesDeadBannedEvenWhenFacadeUnavailable(t *testing.T) {
 	monitor := &memoryMonitor{available: true}
 	opened := openModule(t, monitor)
 	defer opened.Close()
@@ -212,7 +212,7 @@ func TestRedeemExcludesDeadBannedAndDegradesWhenFacadeUnavailable(t *testing.T) 
 		t.Fatal(err)
 	}
 	aliveID, err := opened.repo.CreateAccount(context.Background(), repository.AccountSeed{
-		DisplayUsername: "alive", DisplayPassword: "password", DisplayTOTPSecret: "totp", AccountExpiry: now.Add(20 * 24 * time.Hour), MaxConcurrentUsers: 1, MonitorStatus: "alive", Status: "available",
+		DisplayUsername: "alive", DisplayPassword: "password", DisplayTOTPSecret: "totp", AccountExpiry: now.Add(20 * 24 * time.Hour), MaxConcurrentUsers: 2, MonitorStatus: "alive", Status: "available",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -225,7 +225,7 @@ func TestRedeemExcludesDeadBannedAndDegradesWhenFacadeUnavailable(t *testing.T) 
 	monitor.setAvailable(false)
 	createCard(t, opened, "3456-789A-BCDE")
 	offline, err := opened.allocator.Redeem(context.Background(), "3456-789A-BCDE")
-	if err != nil || len(offline.Warnings) != 1 || offline.Warnings[0] != "monitor_unavailable" || offline.Account.ID != bannedID {
+	if err != nil || len(offline.Warnings) != 1 || offline.Warnings[0] != "monitor_unavailable" || offline.Account.ID != aliveID || offline.Account.ID == bannedID {
 		t.Fatalf("offline redeem = %+v, %v", offline, err)
 	}
 }
@@ -306,6 +306,18 @@ func TestBatchStatusDeadBannedDrivesReplacement(t *testing.T) {
 	}
 	if _, err := opened.accounts.SyncAll(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+	banned, err := opened.repo.Account(context.Background(), oldID)
+	if err != nil || banned.MonitorStatus != "dead_banned" || banned.Status != "banned" {
+		t.Fatalf("synced banned account = %+v, %v", banned, err)
+	}
+	monitor.batch["old-monitor"] = monitorfacade.StatusResult{MonitorAccountID: "old-monitor", MonitorStatus: "alive"}
+	if _, err := opened.accounts.SyncAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	stillBanned, err := opened.repo.Account(context.Background(), oldID)
+	if err != nil || stillBanned.MonitorStatus != "alive" || stillBanned.Status != "banned" {
+		t.Fatalf("alive observation automatically restored banned account = %+v, %v", stillBanned, err)
 	}
 	opened.replacements.SetNow(func() time.Time { return now.Add(time.Hour) })
 	run, err := opened.replacements.RunOnce(context.Background())

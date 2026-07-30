@@ -24,6 +24,7 @@ var (
 	ErrNotFound        = errors.New("card not found")
 	ErrConflict        = errors.New("card state conflict")
 	ErrCodeUnavailable = errors.New("card plaintext unavailable")
+	ErrDurationLimit   = errors.New("card duration limit exceeded")
 )
 
 type Repository interface {
@@ -73,7 +74,7 @@ func (s *Service) SetNow(now func() time.Time) {
 }
 
 func (s *Service) Generate(ctx context.Context, quantity, durationDays int) (GenerateResult, error) {
-	if quantity < 1 || quantity > 1000 || !validDuration(durationDays) {
+	if quantity < 1 || quantity > 1000 || !validNewDuration(durationDays) {
 		return GenerateResult{}, ErrValidation
 	}
 	seen := make(map[string]struct{}, quantity)
@@ -114,7 +115,7 @@ func (s *Service) List(ctx context.Context, filter repository.CardFilter) ([]mod
 	if filter.Status != "" && !validStatus(filter.Status) {
 		return nil, ErrValidation
 	}
-	if filter.DurationDays != 0 && !validDuration(filter.DurationDays) {
+	if filter.DurationDays != 0 && !validStoredDuration(filter.DurationDays) {
 		return nil, ErrValidation
 	}
 	return s.repo.ListCards(ctx, filter)
@@ -136,12 +137,15 @@ func (s *Service) Revoke(ctx context.Context, id int64) (models.Card, error) {
 }
 
 func (s *Service) Extend(ctx context.Context, id int64, days int) (models.Card, error) {
-	if id <= 0 || !validDuration(days) {
+	if id <= 0 || !validNewDuration(days) {
 		return models.Card{}, ErrValidation
 	}
 	card, err := s.repo.ExtendCard(ctx, id, days)
 	if errors.Is(err, sql.ErrNoRows) {
 		return models.Card{}, ErrNotFound
+	}
+	if errors.Is(err, repository.ErrCardDurationLimit) {
+		return models.Card{}, ErrDurationLimit
 	}
 	if err != nil {
 		return models.Card{}, err
@@ -254,13 +258,12 @@ func generateCode() (string, error) {
 	return fmt.Sprintf("%s-%s-%s", chars[0:4], chars[4:8], chars[8:12]), nil
 }
 
-func validDuration(days int) bool {
-	switch days {
-	case 7, 14, 30, 90:
-		return true
-	default:
-		return false
-	}
+func validNewDuration(days int) bool {
+	return days >= 1 && days <= 30
+}
+
+func validStoredDuration(days int) bool {
+	return validNewDuration(days) || days == 90
 }
 
 func validStatus(status string) bool {

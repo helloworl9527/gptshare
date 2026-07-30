@@ -107,9 +107,11 @@ func (s *Service) SetBaseContext(ctx context.Context) {
 
 func (s *Service) RecoverInterrupted(ctx context.Context) error {
 	now := s.now().UTC().Format(time.RFC3339Nano)
-	_, err := s.db.ExecContext(ctx, `UPDATE poll_runs SET state='failed',finished_at=?,error_code='startup_interrupted'
-		WHERE state='running'`, now)
-	return err
+	if _, err := s.db.ExecContext(ctx, `UPDATE poll_runs SET state='failed',finished_at=?,error_code='startup_interrupted'
+		WHERE state='running'`, now); err != nil {
+		return err
+	}
+	return s.finalizeLegacyPendingBans(ctx)
 }
 
 func (s *Service) RunScheduled(ctx context.Context) (Run, error) {

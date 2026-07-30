@@ -246,6 +246,9 @@ tbody tr { border-left: 4px solid var(--green); }
 .modal-form { display: grid; gap: 10px; margin-top: 18px; }
 .modal-form label { color: #3d4c45; font-size: 13px; font-weight: 650; }
 .modal-form input, .modal-form select { width: 100%; min-height: 44px; border: 1px solid #cdd7d2; border-radius: 3px; background: #fff; color: var(--ink); padding: 10px 12px; }
+.duration-shortcuts { display: flex; flex-wrap: wrap; gap: 8px; }
+.duration-shortcuts button { min-width: 64px; }
+.field-hint { color: var(--muted); line-height: 1.5; }
 .check-row { display: flex; align-items: center; gap: 8px; }.check-row input { width: auto; min-height: auto; }
 
 /* Detail, import, and settings */

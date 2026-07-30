@@ -20,9 +20,10 @@ import (
 var migrationFiles embed.FS
 
 type migration struct {
-	version int
-	name    string
-	sql     string
+	version        int
+	name           string
+	sql            string
+	foreignKeysOff bool
 }
 
 func migrate(ctx context.Context, db *sql.DB, dbPath string) error {
@@ -86,7 +87,13 @@ func loadMigrations() ([]migration, error) {
 		if err != nil {
 			return nil, fmt.Errorf("read migration %s: %w", entry.Name(), err)
 		}
-		migrations = append(migrations, migration{version: version, name: entry.Name(), sql: string(contents)})
+		sql := string(contents)
+		migrations = append(migrations, migration{
+			version:        version,
+			name:           entry.Name(),
+			sql:            sql,
+			foreignKeysOff: strings.HasPrefix(sql, "-- migrate:foreign-keys-off\n"),
+		})
 	}
 	sort.Slice(migrations, func(i, j int) bool { return migrations[i].version < migrations[j].version })
 	for i := 1; i < len(migrations); i++ {
@@ -109,6 +116,14 @@ func currentVersion(ctx context.Context, db *sql.DB) (int, error) {
 }
 
 func applyMigration(ctx context.Context, db *sql.DB, item migration) error {
+	if item.foreignKeysOff {
+		if _, err := db.ExecContext(ctx, "PRAGMA foreign_keys=OFF"); err != nil {
+			return fmt.Errorf("disable foreign keys for migration %s: %w", item.name, err)
+		}
+		defer func() {
+			_, _ = db.ExecContext(context.Background(), "PRAGMA foreign_keys=ON")
+		}()
+	}
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin migration %s: %w", item.name, err)
@@ -117,11 +132,40 @@ func applyMigration(ctx context.Context, db *sql.DB, item migration) error {
 	if _, err := tx.ExecContext(ctx, item.sql); err != nil {
 		return fmt.Errorf("apply migration %s: %w", item.name, err)
 	}
+	if item.foreignKeysOff {
+		rows, err := tx.QueryContext(ctx, "PRAGMA foreign_key_check")
+		if err != nil {
+			return fmt.Errorf("check foreign keys for migration %s: %w", item.name, err)
+		}
+		if rows.Next() {
+			_ = rows.Close()
+			return fmt.Errorf("check foreign keys for migration %s: violation detected", item.name)
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("check foreign keys for migration %s: %w", item.name, err)
+		}
+		if err := rows.Close(); err != nil {
+			return fmt.Errorf("close foreign key check for migration %s: %w", item.name, err)
+		}
+	}
 	if _, err := tx.ExecContext(ctx, "INSERT INTO schema_migrations(version,name,applied_at) VALUES (?,?,?)", item.version, item.name, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		return fmt.Errorf("record migration %s: %w", item.name, err)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration %s: %w", item.name, err)
+	}
+	if item.foreignKeysOff {
+		if _, err := db.ExecContext(ctx, "PRAGMA foreign_keys=ON"); err != nil {
+			return fmt.Errorf("enable foreign keys after migration %s: %w", item.name, err)
+		}
+		var enabled int
+		if err := db.QueryRowContext(ctx, "PRAGMA foreign_keys").Scan(&enabled); err != nil {
+			return fmt.Errorf("verify foreign keys after migration %s: %w", item.name, err)
+		}
+		if enabled != 1 {
+			return fmt.Errorf("verify foreign keys after migration %s: enabled=%d", item.name, enabled)
+		}
 	}
 	return nil
 }

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -88,7 +89,7 @@ func (f *fakeClient) FetchStatus(ctx context.Context, access string) (chatgpt.St
 	return status, nil
 }
 
-func TestCandidatePreservesStateThenConfirmReplaysAndDeduplicates(t *testing.T) {
+func TestStableBanCandidatesAutomaticallyFinalizeAndDeduplicate(t *testing.T) {
 	s, db, keyring, client, now := newTestService(t)
 	client.errors = map[string]*chatgpt.TypedError{"acct-a": candidate("credential_revoked")}
 	id := seedAccount(t, db, keyring, "acct-a", now.Add(10*24*time.Hour), now.Add(-2*24*time.Hour))
@@ -96,23 +97,12 @@ func TestCandidatePreservesStateThenConfirmReplaysAndDeduplicates(t *testing.T) 
 	if err != nil || !done || run.State != "completed" {
 		t.Fatalf("refresh run=%+v done=%v err=%v", run, done, err)
 	}
-	assertAccountState(t, db, id, StateAlive, CheckVerificationRequired, true)
-	assertCount(t, db, "SELECT count(*) FROM alert_events", 0)
-	signature := EvidenceSignature("credential_revoked", "status-v1")
-	result, err := s.ReviewEvidence(context.Background(), ReviewRequest{Signature: signature, Decision: ReviewConfirm, Reason: "ground truth confirmed disabled test account", Operator: "service-user"})
-	if err != nil || result.AccountsAffected != 1 || result.AlertsCreated != 1 {
-		t.Fatalf("review=%+v err=%v", result, err)
-	}
-	assertCount(t, db, "SELECT count(*) FROM status_change_log WHERE review_operator='service-user' AND review_reason='ground truth confirmed disabled test account' AND review_decision='confirmed'", 2)
 	assertAccountState(t, db, id, StateDeadBanned, CheckOK, false)
+	assertCount(t, db, "SELECT count(*) FROM alert_events", 1)
 	var days float64
 	if err := db.QueryRow("SELECT banned_survival_days FROM accounts WHERE id=?", id).Scan(&days); err != nil || days != 2 {
 		t.Fatalf("survival=%v err=%v", days, err)
 	}
-	if _, err := s.ReviewEvidence(context.Background(), ReviewRequest{Signature: signature, Decision: ReviewConfirm, Reason: "duplicate", Operator: "service-user"}); err == nil {
-		t.Fatal("review replay unexpectedly succeeded")
-	}
-	assertCount(t, db, "SELECT count(*) FROM alert_events", 1)
 
 	second := seedAccount(t, db, keyring, "acct-b", now.Add(10*24*time.Hour), now.Add(-time.Hour))
 	client.errors["acct-b"] = candidate("credential_revoked")
@@ -126,8 +116,18 @@ func TestCandidatePreservesStateThenConfirmReplaysAndDeduplicates(t *testing.T) 
 	if _, done, err := s.RefreshNow(context.Background(), third); err != nil || !done {
 		t.Fatalf("third refresh done=%v err=%v", done, err)
 	}
-	assertAccountState(t, db, third, StateAlive, CheckVerificationRequired, true)
-	assertCount(t, db, "SELECT count(*) FROM alert_events", 2)
+	assertAccountState(t, db, third, StateDeadBanned, CheckOK, false)
+	assertCount(t, db, "SELECT count(*) FROM alert_events", 3)
+
+	for _, code := range []string{"account_deactivated", "token_revoked", "refresh_token_reused"} {
+		accountID := seedAccount(t, db, keyring, "acct-"+code, now.Add(10*24*time.Hour), now.Add(-time.Hour))
+		client.errors["acct-"+code] = candidate(code)
+		if _, done, err := s.RefreshNow(context.Background(), accountID); err != nil || !done {
+			t.Fatalf("%s refresh done=%v err=%v", code, done, err)
+		}
+		assertAccountState(t, db, accountID, StateDeadBanned, CheckOK, false)
+	}
+	assertCount(t, db, "SELECT count(*) FROM alert_events", 6)
 }
 
 func TestRejectAndUnverifiedRemainFailClosed(t *testing.T) {
@@ -137,10 +137,14 @@ func TestRejectAndUnverifiedRemainFailClosed(t *testing.T) {
 		"acct-unknown": {Kind: chatgpt.ErrorContractChanged, EvidenceCode: "unexpected_http_418", EvidenceLevel: chatgpt.EvidenceUnverified, PreserveBusinessState: true},
 	}
 	rejected := seedAccount(t, db, keyring, "acct-reject", now.Add(24*time.Hour), now.Add(-time.Hour))
-	if _, _, err := s.RefreshNow(context.Background(), rejected); err != nil {
+	signature := EvidenceSignature("account_disabled", "status-v1")
+	if _, err := db.Exec(`UPDATE accounts SET
+		last_check_state='verification_required',last_check_error_code='account_disabled',
+		polling_paused=1,pause_reason='evidence_review_required',
+		pending_evidence_signature=?,pending_detected_at=?
+		WHERE id=?`, signature, formatTime(now), rejected); err != nil {
 		t.Fatal(err)
 	}
-	signature := EvidenceSignature("account_disabled", "status-v1")
 	if _, err := s.ReviewEvidence(context.Background(), ReviewRequest{Signature: signature, Decision: ReviewReject, Reason: "ground truth did not confirm terminal status", Operator: "service-user"}); err != nil {
 		t.Fatal(err)
 	}
@@ -167,6 +171,66 @@ func TestRejectAndUnverifiedRemainFailClosed(t *testing.T) {
 	if err := db.QueryRow("SELECT plan FROM accounts WHERE id=?", positiveUnknown).Scan(&preservedPlan); err != nil || preservedPlan != "plus" {
 		t.Fatalf("preserved plan=%s err=%v", preservedPlan, err)
 	}
+	assertCount(t, db, "SELECT count(*) FROM alert_events", 0)
+}
+
+func TestRecoverInterruptedFinalizesLegacyPendingBan(t *testing.T) {
+	s, db, keyring, _, now := newTestService(t)
+	id := seedAccount(t, db, keyring, "acct-legacy-pending", now.Add(24*time.Hour), now.Add(-2*24*time.Hour))
+	signature := EvidenceSignature("account_deactivated", "status-v1")
+	detected := now.Add(-time.Hour)
+	if _, err := db.Exec(`UPDATE accounts SET
+		last_check_state='verification_required',last_check_error_code='account_deactivated',
+		polling_paused=1,pause_reason='evidence_review_required',
+		pending_evidence_signature=?,pending_detected_at=?
+		WHERE id=?`, signature, formatTime(detected), id); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecoverInterrupted(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecoverInterrupted(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	assertAccountState(t, db, id, StateDeadBanned, CheckOK, false)
+	assertCount(t, db, "SELECT count(*) FROM alert_events WHERE account_id="+strconv.FormatInt(id, 10), 1)
+	var deadAt, deathType string
+	if err := db.QueryRow("SELECT dead_at,death_type FROM accounts WHERE id=?", id).Scan(&deadAt, &deathType); err != nil {
+		t.Fatal(err)
+	}
+	if deadAt != formatTime(detected) || deathType != "abnormal_ban" {
+		t.Fatalf("dead_at=%s death_type=%s", deadAt, deathType)
+	}
+}
+
+func TestRecoverInterruptedSkipsUnknownAndRejectedLegacyEvidence(t *testing.T) {
+	s, db, keyring, _, now := newTestService(t)
+	rejected := seedAccount(t, db, keyring, "acct-legacy-rejected", now.Add(24*time.Hour), now.Add(-2*24*time.Hour))
+	unknown := seedAccount(t, db, keyring, "acct-legacy-unknown-code", now.Add(24*time.Hour), now.Add(-2*24*time.Hour))
+	detected := formatTime(now.Add(-time.Hour))
+	rejectedSignature := EvidenceSignature("account_disabled", "status-v1")
+	for id, values := range map[int64][2]string{
+		rejected: {rejectedSignature, "account_disabled"},
+		unknown:  {EvidenceSignature("http_403", "status-v1"), "http_403"},
+	} {
+		if _, err := db.Exec(`UPDATE accounts SET
+			last_check_state='verification_required',last_check_error_code=?,
+			polling_paused=1,pause_reason='evidence_review_required',
+			pending_evidence_signature=?,pending_detected_at=?
+			WHERE id=?`, values[1], values[0], detected, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rejectedEntry := `{"level":"unverified","decision":"rejected"}`
+	if _, err := db.Exec(`INSERT INTO settings(key,value,is_secret,updated_at) VALUES (?, ?,0,?)`,
+		"internal.evidence."+rejectedSignature, []byte(rejectedEntry), formatTime(now)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecoverInterrupted(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	assertAccountState(t, db, rejected, StateAlive, CheckVerificationRequired, true)
+	assertAccountState(t, db, unknown, StateAlive, CheckVerificationRequired, true)
 	assertCount(t, db, "SELECT count(*) FROM alert_events", 0)
 }
 
@@ -526,7 +590,7 @@ func TestEvidenceSignatureBindsEndpointCodeAndParserVersion(t *testing.T) {
 
 func candidate(code string) *chatgpt.TypedError {
 	kind := chatgpt.ErrorCredentialRevoked
-	if code == "account_disabled" {
+	if code == "account_disabled" || code == "account_deactivated" {
 		kind = chatgpt.ErrorAccountDisabled
 	}
 	return &chatgpt.TypedError{Kind: kind, EvidenceCode: code, EvidenceLevel: chatgpt.EvidenceContractVerifiedLivePending, BannedCandidate: true, PreserveBusinessState: true}

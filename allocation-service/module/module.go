@@ -119,6 +119,16 @@ func (m *Module) RunFacadeSync(ctx context.Context, interval time.Duration) erro
 	if interval <= 0 {
 		interval = time.Hour
 	}
+	syncOnce := func() {
+		if err := m.syncFacade(ctx); err != nil {
+			kind, ok := monitorfacade.FaultKindOf(err)
+			if !ok {
+				kind = monitorfacade.FaultUnavailable
+			}
+			m.logger.Error("allocation monitor facade sync failed", "module", "allocation", "task", "facade-sync", "error_code", "monitor_facade_"+string(kind))
+		}
+	}
+	syncOnce()
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -126,13 +136,7 @@ func (m *Module) RunFacadeSync(ctx context.Context, interval time.Duration) erro
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
-			if err := m.syncFacade(ctx); err != nil {
-				kind, ok := monitorfacade.FaultKindOf(err)
-				if !ok {
-					kind = monitorfacade.FaultUnavailable
-				}
-				m.logger.Error("allocation monitor facade sync failed", "module", "allocation", "task", "facade-sync", "error_code", "monitor_facade_"+string(kind))
-			}
+			syncOnce()
 		}
 	}
 }

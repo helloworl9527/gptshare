@@ -164,7 +164,10 @@ func (s *Service) applyResult(ctx context.Context, runID string, record accountR
 	} else if outcome.typed == nil && outcome.status != nil {
 		level = outcome.status.EvidenceLevel
 		if level == chatgpt.EvidenceLiveVerified {
-			newStatus, newCheck = StateAlive, CheckOK
+			newCheck = CheckOK
+			if currentStatus != StateDeadBanned {
+				newStatus = StateAlive
+			}
 			newPlan = string(outcome.status.Plan)
 			newRawPlan = outcome.status.RawPlan
 			newExpiry = ""
@@ -183,10 +186,9 @@ func (s *Service) applyResult(ctx context.Context, runID string, record accountR
 		}
 	} else {
 		level = outcome.typed.EvidenceLevel
-		candidate := outcome.typed.BannedCandidate && (outcome.typed.Kind == chatgpt.ErrorCredentialRevoked || outcome.typed.Kind == chatgpt.ErrorAccountDisabled)
+		candidate := isStableBanCandidate(outcome.typed)
 		registryLevel := s.registryLevel(ctx, tx, signature)
-		if candidate && registryLevel == chatgpt.EvidenceLiveVerified {
-			level = chatgpt.EvidenceLiveVerified
+		if candidate && registryLevel != chatgpt.EvidenceUnverified {
 			newStatus, newCheck = StateDeadBanned, CheckOK
 			deadAt, deathType = formatTime(now), "abnormal_ban"
 			days := now.Sub(record.ImportTime).Hours() / 24
@@ -197,12 +199,9 @@ func (s *Service) applyResult(ctx context.Context, runID string, record accountR
 			if err := closeEpoch(tx, record.EpochID, StateDeadBanned, now, &days); err != nil {
 				return err
 			}
-		} else if candidate && registryLevel == chatgpt.EvidenceUnverified {
+		} else if candidate {
 			newCheck, pollingPaused = CheckContractChanged, 1
 			pauseReason, pendingSignature, pendingDetected = "evidence_signature_rejected", signature, formatTime(now)
-		} else if candidate && level == chatgpt.EvidenceContractVerifiedLivePending {
-			newCheck, pollingPaused = CheckVerificationRequired, 1
-			pauseReason, pendingSignature, pendingDetected, reviewDecision = "evidence_review_required", signature, formatTime(now), "pending"
 		} else if level == chatgpt.EvidenceUnverified || outcome.typed.Kind == chatgpt.ErrorContractChanged {
 			newCheck, pollingPaused = CheckContractChanged, 1
 			pauseReason, pendingSignature, pendingDetected = "contract_changed", signature, formatTime(now)
@@ -254,6 +253,20 @@ func (s *Service) applyResult(ctx context.Context, runID string, record accountR
 	return tx.Commit()
 }
 
+func isStableBanCandidate(typed *chatgpt.TypedError) bool {
+	if typed == nil || !typed.BannedCandidate {
+		return false
+	}
+	switch typed.EvidenceCode {
+	case "account_disabled", "account_deactivated":
+		return typed.Kind == chatgpt.ErrorAccountDisabled
+	case "token_revoked", "credential_revoked", "refresh_token_reused":
+		return typed.Kind == chatgpt.ErrorCredentialRevoked
+	default:
+		return false
+	}
+}
+
 func closeEpoch(tx *sql.Tx, epochID int64, terminal string, deadAt time.Time, survival *float64) error {
 	_, err := tx.Exec(`UPDATE authorization_epochs SET ended_at=?,terminal_status=?,dead_at=?,banned_survival_days=? WHERE id=? AND ended_at IS NULL`, formatTime(deadAt), terminal, formatTime(deadAt), survival, epochID)
 	return err
@@ -261,7 +274,7 @@ func closeEpoch(tx *sql.Tx, epochID int64, terminal string, deadAt time.Time, su
 
 func insertChange(ctx context.Context, tx *sql.Tx, accountID, epochID int64, at time.Time, field, from, to, code string, level chatgpt.EvidenceLevel, signature string, review any, runID string) error {
 	_, err := tx.ExecContext(ctx, `INSERT INTO status_change_log(account_id,epoch_id,at,field,from_value,to_value,evidence_code,evidence_level,evidence_signature,review_decision,run_id)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?)`, accountID, epochID, formatTime(at), field, nullable(from), nullable(to), code, string(level), signature, review, runID)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?)`, accountID, epochID, formatTime(at), field, nullable(from), nullable(to), code, string(level), signature, review, nullable(runID))
 	return err
 }
 

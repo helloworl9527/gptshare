@@ -47,7 +47,7 @@ func TestDeploymentEndToEndFlow(t *testing.T) {
 	csrf := getCSRF(t, client, server.URL)
 
 	accountID := createDeploymentAccount(t, client, server.URL, csrf, "e2e-primary", "e2e-password", "JBSWY3DPEHPK3PXP", 1, false)
-	generated := postJSON(t, client, server.URL+"/api/admin/cards/generate", csrf, map[string]any{"quantity": 1, "duration_days": 90})
+	generated := postJSON(t, client, server.URL+"/api/admin/cards/generate", csrf, map[string]any{"quantity": 1, "duration_days": 30})
 	generatedBody := readBody(t, generated)
 	if generated.StatusCode != http.StatusCreated {
 		t.Fatalf("generate card status=%d body=%s", generated.StatusCode, generatedBody)

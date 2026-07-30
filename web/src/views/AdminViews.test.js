@@ -153,13 +153,14 @@ describe('P2 admin views', () => {
       .mockResolvedValueOnce(response({ cards }))
       .mockResolvedValueOnce(response({ csrf_token: 'c'.repeat(43) }))
       .mockResolvedValueOnce(response({ cards: [
-        { id: 5, code: '2345-6789-ABCD', code_suffix: 'ABCD', duration_days: 30, status: 'unused' },
-        { id: 6, code: '2345-6789-EFGH', code_suffix: 'EFGH', duration_days: 30, status: 'unused' },
+        { id: 5, code: '2345-6789-ABCD', code_suffix: 'ABCD', duration_days: 5, status: 'unused' },
+        { id: 6, code: '2345-6789-EFGH', code_suffix: 'EFGH', duration_days: 5, status: 'unused' },
       ] }, 201))
       .mockResolvedValueOnce(response({ cards }))
     const wrapper = await render(Cards, fetchMock)
     await wrapper.get('button.compact-action').trigger('click')
     await wrapper.find('#quantity').setValue(1)
+    await wrapper.find('#duration').setValue(5)
     await wrapper.find('.modal-form').trigger('submit')
     await flushPromises()
     expect(wrapper.text()).toContain('2345-6789-ABCD')
@@ -167,7 +168,42 @@ describe('P2 admin views', () => {
     await flushPromises()
     expect(writeText).toHaveBeenCalledWith('2345-6789-ABCD\n2345-6789-EFGH')
     expect(wrapper.text()).toContain('已复制 2 张卡密，每行一个。')
-    expect(fetchMock.mock.calls.map(([url]) => String(url))).toContain('/api/admin/cards/generate')
+    const generateCall = fetchMock.mock.calls.find(([url]) => String(url) === '/api/admin/cards/generate')
+    expect(JSON.parse(generateCall[1].body)).toMatchObject({ quantity: 1, duration_days: 5 })
+    wrapper.unmount()
+  })
+
+  it('validates custom duration and caps extension at thirty days from redemption', async () => {
+    const extendable = [{
+      id: 8,
+      code_suffix: 'EXT5',
+      duration_days: 5,
+      status: 'redeemed',
+      redeemed_at: '2026-07-24T00:00:00Z',
+      expires_at: '2026-07-29T00:00:00Z',
+    }]
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(response({ cards: extendable }))
+      .mockResolvedValueOnce(response({ csrf_token: 'c'.repeat(43) }))
+      .mockResolvedValueOnce(response({ card: { ...extendable[0], expires_at: '2026-08-23T00:00:00Z' } }))
+      .mockResolvedValueOnce(response({ cards: extendable }))
+    const wrapper = await render(Cards, fetchMock)
+
+    await wrapper.get('button.compact-action').trigger('click')
+    await wrapper.find('#duration').setValue(31)
+    await wrapper.find('.modal-form').trigger('submit')
+    await flushPromises()
+    expect(wrapper.text()).toContain('卡密有效期必须是 1～30 天的整数')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+
+    await wrapper.find('[role="dialog"] .icon-button').trigger('click')
+    await wrapper.findAll('button').find((button) => button.text() === '延期').trigger('click')
+    expect(wrapper.find('#extend-days').attributes('max')).toBe('25')
+    await wrapper.find('#extend-days').setValue(25)
+    await wrapper.find('.modal-form').trigger('submit')
+    await flushPromises()
+    const extendCall = fetchMock.mock.calls.find(([url]) => String(url) === '/api/admin/cards/8/extend')
+    expect(JSON.parse(extendCall[1].body)).toEqual({ days: 25 })
     wrapper.unmount()
   })
 

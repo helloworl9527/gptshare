@@ -22,6 +22,7 @@ var (
 	ErrAccountAllocated     = errors.New("account has active allocations")
 	ErrCapacityTooSmall     = errors.New("max concurrent users is below current allocations")
 	ErrCardStateConflict    = errors.New("card state does not allow this operation")
+	ErrCardDurationLimit    = errors.New("card duration cannot exceed 30 days from redemption")
 	ErrNoAccountCapacity    = errors.New("no account capacity")
 	ErrCaptchaRequired      = errors.New("captcha required")
 	ErrCaptchaInvalid       = errors.New("captcha invalid")
@@ -289,9 +290,13 @@ func (r *Repository) UpsertSyncedAccount(ctx context.Context, seed SyncedAccount
 	}
 	if existingID > 0 {
 		result, err := r.db.ExecContext(ctx, `UPDATE chatgpt_accounts
-			SET display_username=?, account_expiry=?, monitor_status=?, updated_at=?
+			SET display_username=?, account_expiry=?, monitor_status=?,
+			    status=CASE WHEN ?='dead_banned' THEN 'banned' ELSE status END,
+			    updated_at=?
 			WHERE id=?`,
-			strings.TrimSpace(seed.DisplayUsername), formatTime(seed.AccountExpiry.UTC()), defaultString(seed.MonitorStatus, "unknown"), formatTime(now), existingID)
+			strings.TrimSpace(seed.DisplayUsername), formatTime(seed.AccountExpiry.UTC()),
+			defaultString(seed.MonitorStatus, "unknown"), defaultString(seed.MonitorStatus, "unknown"),
+			formatTime(now), existingID)
 		if err != nil {
 			return models.Account{}, false, err
 		}
@@ -305,11 +310,16 @@ func (r *Repository) UpsertSyncedAccount(ctx context.Context, seed SyncedAccount
 	if r.credentials == nil {
 		return models.Account{}, false, credential.ErrInvalidKeyring
 	}
+	status := "pending_credentials"
+	if seed.MonitorStatus == "dead_banned" {
+		status = "banned"
+	}
 	result, err := r.db.ExecContext(ctx, `INSERT INTO chatgpt_accounts
 		(display_username,display_password_secret,display_password_key_id,display_2fa_secret,display_2fa_key_id,account_expiry,max_concurrent_users,monitor_account_id,monitor_status,status,created_at,updated_at)
-		VALUES (?,?,?,?,?,?,?,?,?,'pending_credentials',?,?)`,
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
 		strings.TrimSpace(seed.DisplayUsername), []byte{}, r.credentials.ActiveKeyID(), []byte{}, r.credentials.ActiveKeyID(),
-		formatTime(seed.AccountExpiry.UTC()), capacity, seed.MonitorAccountID, defaultString(seed.MonitorStatus, "unknown"), formatTime(now), formatTime(now))
+		formatTime(seed.AccountExpiry.UTC()), capacity, seed.MonitorAccountID, defaultString(seed.MonitorStatus, "unknown"),
+		status, formatTime(now), formatTime(now))
 	if err != nil {
 		return models.Account{}, false, err
 	}
@@ -468,18 +478,25 @@ func (r *Repository) ExtendCard(ctx context.Context, cardID int64, days int) (mo
 	defer tx.Rollback()
 	now := r.now().UTC()
 	var status string
-	var expiresRaw sql.NullString
-	if err := tx.QueryRowContext(ctx, "SELECT status,expires_at FROM cards WHERE id=?", cardID).Scan(&status, &expiresRaw); err != nil {
+	var redeemedRaw, expiresRaw sql.NullString
+	if err := tx.QueryRowContext(ctx, "SELECT status,redeemed_at,expires_at FROM cards WHERE id=?", cardID).Scan(&status, &redeemedRaw, &expiresRaw); err != nil {
 		return models.Card{}, err
 	}
-	if status != "redeemed" || !expiresRaw.Valid {
+	if status != "redeemed" || !redeemedRaw.Valid || !expiresRaw.Valid {
 		return models.Card{}, ErrCardStateConflict
+	}
+	redeemedAt, err := parseTime(redeemedRaw.String)
+	if err != nil {
+		return models.Card{}, err
 	}
 	expiresAt, err := parseTime(expiresRaw.String)
 	if err != nil {
 		return models.Card{}, err
 	}
 	extended := expiresAt.Add(time.Duration(days) * 24 * time.Hour)
+	if extended.After(redeemedAt.Add(30 * 24 * time.Hour)) {
+		return models.Card{}, ErrCardDurationLimit
+	}
 	if _, err := tx.ExecContext(ctx, `UPDATE cards SET expires_at=?, updated_at=? WHERE id=?`, formatTime(extended), formatTime(now), cardID); err != nil {
 		return models.Card{}, err
 	}
@@ -594,7 +611,7 @@ func (r *Repository) ProcessReplacements(ctx context.Context, now time.Time) (Re
 	}
 	run.GraceExpired = expiredGrace
 	rows, err := tx.QueryContext(ctx, `SELECT
-			a.id,a.card_id,a.account_id,a.valid_until,c.expires_at,acct.account_expiry,acct.monitor_status
+			a.id,a.card_id,a.account_id,a.valid_until,c.expires_at,acct.account_expiry,acct.monitor_status,acct.status
 		FROM allocations a
 		JOIN cards c ON c.id=a.card_id
 		JOIN chatgpt_accounts acct ON acct.id=a.account_id
@@ -604,6 +621,7 @@ func (r *Repository) ProcessReplacements(ctx context.Context, now time.Time) (Re
 		  AND datetime(c.expires_at) > datetime(?)
 		  AND (
 		    acct.monitor_status='dead_banned'
+		    OR acct.status='banned'
 		    OR datetime(acct.account_expiry) <= datetime(?, '+24 hours')
 		  )
 		ORDER BY CASE WHEN acct.monitor_status='dead_banned' THEN 0 ELSE 1 END, datetime(acct.account_expiry) ASC, a.id ASC`,
@@ -614,8 +632,8 @@ func (r *Repository) ProcessReplacements(ctx context.Context, now time.Time) (Re
 	var due []replacementDueAllocation
 	for rows.Next() {
 		var item replacementDueAllocation
-		var allocationValidRaw, cardExpiresRaw, accountExpiryRaw, monitorStatus string
-		if err := rows.Scan(&item.allocationID, &item.cardID, &item.oldAccountID, &allocationValidRaw, &cardExpiresRaw, &accountExpiryRaw, &monitorStatus); err != nil {
+		var allocationValidRaw, cardExpiresRaw, accountExpiryRaw, monitorStatus, accountStatus string
+		if err := rows.Scan(&item.allocationID, &item.cardID, &item.oldAccountID, &allocationValidRaw, &cardExpiresRaw, &accountExpiryRaw, &monitorStatus, &accountStatus); err != nil {
 			rows.Close()
 			return ReplacementRun{}, err
 		}
@@ -625,7 +643,7 @@ func (r *Repository) ProcessReplacements(ctx context.Context, now time.Time) (Re
 			return ReplacementRun{}, err
 		}
 		item.cardExpiresAt = cardExpiresAt
-		if monitorStatus == "dead_banned" {
+		if monitorStatus == "dead_banned" || accountStatus == "banned" {
 			item.reason = "banned"
 		} else {
 			item.reason = "account_expiring"
@@ -1046,9 +1064,12 @@ func (r *Repository) ApplyDefaultAccountCapacity(ctx context.Context) (ApplyDefa
 func (r *Repository) UpdateAccountMonitorStatus(ctx context.Context, accountID int64, monitorAccountID, monitorStatus string) (models.Account, error) {
 	now := r.now().UTC()
 	result, err := r.db.ExecContext(ctx, `UPDATE chatgpt_accounts
-		SET monitor_account_id=?, monitor_status=?, updated_at=?
+		SET monitor_account_id=?, monitor_status=?,
+		    status=CASE WHEN ?='dead_banned' THEN 'banned' ELSE status END,
+		    updated_at=?
 		WHERE id=?`,
-		nullable(monitorAccountID), defaultString(monitorStatus, "unknown_monitor"), formatTime(now), accountID)
+		nullable(monitorAccountID), defaultString(monitorStatus, "unknown_monitor"),
+		defaultString(monitorStatus, "unknown_monitor"), formatTime(now), accountID)
 	if err != nil {
 		return models.Account{}, err
 	}
@@ -1407,15 +1428,11 @@ func selectCandidateAccount(ctx context.Context, tx *sql.Tx, now, cardExpiresAt 
 }
 
 func selectCandidateAccountExcluding(ctx context.Context, tx *sql.Tx, now, cardExpiresAt time.Time, monitorAvailable bool, excludedAccountID int64) (int64, error) {
-	monitorFilter := ""
-	if monitorAvailable {
-		monitorFilter = " AND monitor_status != 'dead_banned'"
-	}
 	row := tx.QueryRowContext(ctx, `SELECT id FROM chatgpt_accounts
 		WHERE datetime(account_expiry) > datetime(?)
 		  AND status='available'
 		  AND current_allocations < max_concurrent_users
-		  `+monitorFilter+`
+		  AND monitor_status != 'dead_banned'
 		  AND (? = 0 OR id != ?)
 		ORDER BY
 		  CASE WHEN ? = 0 THEN 1 ELSE CASE monitor_status WHEN 'alive' THEN 0 WHEN 'unknown' THEN 1 WHEN 'unknown_monitor' THEN 1 WHEN 'dead_normal' THEN 2 ELSE 3 END END ASC,
