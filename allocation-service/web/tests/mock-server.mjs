@@ -99,6 +99,16 @@ const server = http.createServer(async (request, response) => {
   if (url.pathname === '/api/me') return authenticated(request) ? send(response, 200, { username: 'admin' }) : send(response, 401, { code: 'unauthorized' })
   if (url.pathname === '/api/admin/ping') { if (!protect(request, response)) return; return send(response, 200, { status: 'ok' }) }
   if (url.pathname === '/api/admin/dashboard' && request.method === 'GET') { if (!protect(request, response)) return; if (scenario === 'empty') return send(response, 200, { dashboard: dashboardPayload([], []) }); if (scenario === 'error') return send(response, 503, { code: 'temporary_unavailable' }); return send(response, 200, { dashboard: dashboardPayload() }) }
+  if (url.pathname === '/api/admin/allocations' && request.method === 'GET') {
+    if (!protect(request, response)) return
+    if (scenario === 'empty') return send(response, 200, { allocations: [] })
+    if (scenario === 'error') return send(response, 503, { code: 'temporary_unavailable' })
+    return send(response, 200, { allocations: [{
+      id: 1, card_id: 2, code_suffix: 'EFGH', duration_days: 30,
+      account_id: 1, display_username: 'north@example.test', account_expiry: '2026-08-19T00:00:00Z',
+      allocation_state: 'primary', active: true, allocated_at: '2026-07-24T01:00:00Z', valid_until: '2026-08-23T00:00:00Z',
+    }] })
+  }
   if (url.pathname === '/api/admin/accounts' && request.method === 'GET') { if (!protect(request, response)) return; if (scenario === 'empty') return send(response, 200, { accounts: [] }); if (scenario === 'error') return send(response, 503, { code: 'temporary_unavailable' }); return send(response, 200, { accounts }) }
   if (url.pathname === '/api/admin/account-settings' && request.method === 'GET') { if (!protect(request, response)) return; return send(response, 200, { settings: { default_account_capacity: defaultAccountCapacity } }) }
   if (url.pathname === '/api/admin/account-settings' && request.method === 'PUT') { if (!protect(request, response)) return; const body = await readJSON(request); defaultAccountCapacity = Number(body.default_account_capacity); return send(response, 200, { settings: { default_account_capacity: defaultAccountCapacity } }) }

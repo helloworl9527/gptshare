@@ -161,6 +161,14 @@ type UserAllocationView struct {
 	Credentials AccountCredentials
 }
 
+// AdminAllocationView contains only the non-secret fields needed by the
+// administrator allocation table.
+type AdminAllocationView struct {
+	Allocation models.Allocation
+	Card       models.Card
+	Account    models.Account
+}
+
 type CaptchaChallenge struct {
 	ID        int64
 	Question  string
@@ -785,6 +793,66 @@ func (r *Repository) ActiveAllocationCount(ctx context.Context, accountID int64)
 	var count int
 	err := r.db.QueryRowContext(ctx, `SELECT count(*) FROM allocations WHERE account_id=? AND active=1 AND allocation_state IN ('primary','grace')`, accountID).Scan(&count)
 	return count, err
+}
+
+func (r *Repository) ListActiveAllocations(ctx context.Context) ([]AdminAllocationView, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT
+			a.id,a.card_id,a.account_id,a.allocated_at,a.valid_until,a.grace_until,a.allocation_state,a.active,a.superseded_by_allocation_id,
+			c.code_suffix,c.duration_days,
+			ac.display_username,ac.account_expiry
+		FROM allocations a
+		JOIN cards c ON c.id=a.card_id
+		JOIN chatgpt_accounts ac ON ac.id=a.account_id
+		WHERE a.active=1 AND a.allocation_state IN ('primary','grace')
+		ORDER BY datetime(a.allocated_at) DESC, a.id DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	views := make([]AdminAllocationView, 0)
+	for rows.Next() {
+		var view AdminAllocationView
+		var allocatedAt, validUntil, graceUntil, accountExpiry sql.NullString
+		var active int
+		var superseded sql.NullInt64
+		if err := rows.Scan(
+			&view.Allocation.ID, &view.Allocation.CardID, &view.Allocation.AccountID,
+			&allocatedAt, &validUntil, &graceUntil, &view.Allocation.AllocationState,
+			&active, &superseded, &view.Card.CodeSuffix, &view.Card.DurationDays,
+			&view.Account.DisplayUsername, &accountExpiry,
+		); err != nil {
+			return nil, err
+		}
+		view.Allocation.Active = active == 1
+		view.Allocation.AllocatedAt, err = parseTime(allocatedAt.String)
+		if err != nil {
+			return nil, err
+		}
+		view.Allocation.ValidUntil, err = parseTime(validUntil.String)
+		if err != nil {
+			return nil, err
+		}
+		if graceUntil.Valid {
+			value, err := parseTime(graceUntil.String)
+			if err != nil {
+				return nil, err
+			}
+			view.Allocation.GraceUntil = &value
+		}
+		if superseded.Valid {
+			value := superseded.Int64
+			view.Allocation.SupersededByAllocationID = &value
+		}
+		view.Card.ID = view.Allocation.CardID
+		view.Account.ID = view.Allocation.AccountID
+		view.Account.AccountExpiry, err = parseTime(accountExpiry.String)
+		if err != nil {
+			return nil, err
+		}
+		views = append(views, view)
+	}
+	return views, rows.Err()
 }
 
 func (r *Repository) Account(ctx context.Context, accountID int64) (models.Account, error) {

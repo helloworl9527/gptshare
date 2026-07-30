@@ -94,21 +94,3 @@ function timestamp(value) {
   const time = new Date(value).getTime()
   return Number.isFinite(time) ? time : Number.MAX_SAFE_INTEGER
 }
-
-export function derivedAllocations(accounts = [], cards = []) {
-  const activeAccounts = accounts.filter((item) => Number(item.current_allocations || 0) > 0)
-  return cards
-    .filter((card) => card.status === 'redeemed')
-    .map((card, index) => {
-      const account = activeAccounts[index % Math.max(1, activeAccounts.length)]
-      return {
-        id: card.id,
-        card_id: card.id,
-        account: account?.display_username || '容量占用账号',
-        state: 'primary',
-        allocated_at: card.redeemed_at,
-        valid_until: cardValidUntil(card),
-        code_suffix: card.code_suffix,
-      }
-    })
-}

@@ -90,6 +90,7 @@ export const api = {
   clearChannelSecret: (channel) => request(`/api/settings/channels/${encodeURIComponent(channel)}/secret`, { method: 'DELETE' }),
 	securityBoundaries: () => request('/api/admin/config/security-boundaries'),
 	allocationDashboard: () => request('/api/admin/dashboard'),
+	allocations: () => request('/api/admin/allocations'),
 	allocationAccounts: () => request('/api/admin/accounts'),
 	allocationAccount: (id) => request(`/api/admin/accounts/${encodeURIComponent(id)}`),
 	accountSettings: () => request('/api/admin/account-settings'),

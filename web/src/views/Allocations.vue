@@ -3,23 +3,21 @@ import { computed, onMounted, ref } from 'vue'
 import { api } from '../api/client.js'
 import AdminShell from '../components/AdminShell.vue'
 import StatePanel from '../components/StatePanel.vue'
-import { derivedAllocations, formatDateTime } from '../lib/vitals.js'
+import { formatDateTime } from '../lib/vitals.js'
 
-const accounts = ref([])
-const cards = ref([])
+const records = ref([])
 const loading = ref(true)
 const error = ref('')
 const state = ref('')
 
-const allocations = computed(() => derivedAllocations(accounts.value, cards.value).filter((item) => !state.value || item.state === state.value))
+const allocations = computed(() => records.value.filter((item) => !state.value || item.allocation_state === state.value))
 
 async function load() {
   loading.value = true
   error.value = ''
   try {
-		const [accountResult, cardResult] = await Promise.all([api.allocationAccounts(), api.cards({ status: 'redeemed' })])
-    accounts.value = accountResult.accounts || []
-    cards.value = cardResult.cards || []
+    const result = await api.allocations()
+    records.value = result.allocations || []
   } catch (reason) {
     error.value = reason.message || '分配记录暂时无法读取。'
   } finally {
@@ -38,7 +36,7 @@ onMounted(load)
           ALLOCATIONS
         </p>
         <h1>分配记录</h1>
-        <p>基于已兑换卡密与账号容量生成当前分配运营视图。</p>
+        <p>展示数据库中当前生效的卡密与账号分配关系。</p>
       </div>
       <button class="refresh-button" type="button" :disabled="loading" @click="load">
         刷新
@@ -81,9 +79,9 @@ onMounted(load)
                 **** {{ allocation.code_suffix }}
               </td>
               <td class="mono-cell">
-                {{ allocation.account }}
+                {{ allocation.display_username }}
               </td>
-              <td><span class="status-badge status-redeemed">{{ allocation.state }}</span></td>
+              <td><span class="status-badge status-redeemed">{{ allocation.allocation_state }}</span></td>
               <td>{{ formatDateTime(allocation.allocated_at) }}</td>
               <td>{{ formatDateTime(allocation.valid_until) }}</td>
             </tr>
@@ -98,7 +96,7 @@ onMounted(load)
       <h2 id="history-title">
         替换历史
       </h2>
-      <p>本步不新增后端历史接口；当前页面只展示可由已批准管理端 API 推导的 active 运营视图。完整长期替换历史按计划在后续自动替换步骤落地。</p>
+      <p>当前页面展示数据库中的 active 分配；完整长期替换历史按计划在后续步骤落地。</p>
     </section>
   </AdminShell>
 </template>

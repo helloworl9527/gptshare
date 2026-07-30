@@ -20,6 +20,7 @@ var (
 
 type Repository interface {
 	RedeemCode(context.Context, []byte, bool) (repository.RedeemResult, error)
+	ListActiveAllocations(context.Context) ([]repository.AdminAllocationView, error)
 	Audit(context.Context, string, string, int64, map[string]any) error
 }
 
@@ -39,6 +40,12 @@ type RedeemResult struct {
 	Account    models.Account
 	Warnings   []string
 	Elapsed    time.Duration
+}
+
+type AdminAllocation struct {
+	Allocation models.Allocation
+	Card       models.Card
+	Account    models.Account
 }
 
 func NewService(repo Repository, monitor MonitorAvailability) *Service {
@@ -74,4 +81,20 @@ func (s *Service) Redeem(ctx context.Context, code string) (RedeemResult, error)
 	}
 	_ = s.repo.Audit(ctx, "cards.redeem", "card", result.Card.ID, map[string]any{"account_id": result.Account.ID, "monitor_available": monitorAvailable})
 	return RedeemResult{Allocation: result.Allocation, Card: result.Card, Account: result.Account, Warnings: warnings, Elapsed: s.now().Sub(started)}, nil
+}
+
+func (s *Service) ListActive(ctx context.Context) ([]AdminAllocation, error) {
+	views, err := s.repo.ListActiveAllocations(ctx)
+	if err != nil {
+		return nil, err
+	}
+	allocations := make([]AdminAllocation, 0, len(views))
+	for _, view := range views {
+		allocations = append(allocations, AdminAllocation{
+			Allocation: view.Allocation,
+			Card:       view.Card,
+			Account:    view.Account,
+		})
+	}
+	return allocations, nil
 }

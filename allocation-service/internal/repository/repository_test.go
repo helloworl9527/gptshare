@@ -94,6 +94,84 @@ func TestRedeemThirtyConcurrentNoLocksNoOversell(t *testing.T) {
 	}
 }
 
+func TestListActiveAllocationsUsesStoredRelationshipsAndOrdering(t *testing.T) {
+	db := openStore(t)
+	defer db.Close()
+	repo := New(db.DB(), testCredentialKeyring(t))
+	ctx := context.Background()
+	base := time.Date(2026, 7, 24, 0, 0, 0, 0, time.UTC)
+	repo.SetNow(func() time.Time { return base })
+
+	accountIDs := make([]int64, 4)
+	for i, username := range []string{"first-account", "fund-outlier", "flagon_snap", "revoked-account"} {
+		id, err := repo.CreateAccount(ctx, AccountSeed{
+			DisplayUsername: username, DisplayPassword: "secret-password", DisplayTOTPSecret: "secret-totp",
+			AccountExpiry: base.Add(20 * 24 * time.Hour), MaxConcurrentUsers: 4, MonitorStatus: "alive", Status: "available",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		accountIDs[i] = id
+	}
+	cardIDs := make([]int64, 4)
+	for i := range cardIDs {
+		id, err := repo.CreateCard(ctx, CardSeed{CodeHash: hashFor(700 + i), CodeSuffix: suffixFor(700 + i), DurationDays: 7})
+		if err != nil {
+			t.Fatal(err)
+		}
+		cardIDs[i] = id
+	}
+
+	insert := func(cardID, accountID int64, allocatedAt time.Time, state string, active int, graceUntil any, superseded any) int64 {
+		t.Helper()
+		result, err := db.DB().ExecContext(ctx, `INSERT INTO allocations
+			(card_id,account_id,allocated_at,valid_until,grace_until,allocation_state,active,superseded_by_allocation_id,created_at,updated_at)
+			VALUES (?,?,?,?,?,?,?,?,?,?)`,
+			cardID, accountID, formatTime(allocatedAt), formatTime(allocatedAt.Add(7*24*time.Hour)), graceUntil,
+			state, active, superseded, formatTime(allocatedAt), formatTime(allocatedAt))
+		if err != nil {
+			t.Fatal(err)
+		}
+		id, err := result.LastInsertId()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+
+	revokedID := insert(cardIDs[3], accountIDs[3], base.Add(4*time.Hour), "revoked", 0, nil, nil)
+	primaryOld := insert(cardIDs[0], accountIDs[0], base.Add(time.Hour), "primary", 1, nil, nil)
+	primaryNew := insert(cardIDs[2], accountIDs[2], base.Add(3*time.Hour), "primary", 1, nil, nil)
+	graceTime := base.Add(10 * time.Hour)
+	graceID := insert(cardIDs[1], accountIDs[1], base.Add(2*time.Hour), "grace", 1, formatTime(graceTime), primaryNew)
+
+	views, err := repo.ListActiveAllocations(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(views) != 3 {
+		t.Fatalf("active allocations=%d want 3: %+v", len(views), views)
+	}
+	wantIDs := []int64{primaryNew, graceID, primaryOld}
+	wantAccounts := []int64{accountIDs[2], accountIDs[1], accountIDs[0]}
+	for i, view := range views {
+		if view.Allocation.ID != wantIDs[i] || view.Allocation.AccountID != wantAccounts[i] || view.Account.ID != wantAccounts[i] {
+			t.Fatalf("view[%d]=%+v want allocation=%d account=%d", i, view, wantIDs[i], wantAccounts[i])
+		}
+		if view.Card.ID != view.Allocation.CardID || view.Card.CodeSuffix == "" || view.Account.DisplayUsername == "" {
+			t.Fatalf("incomplete joined view[%d]=%+v", i, view)
+		}
+	}
+	if views[1].Allocation.GraceUntil == nil || views[1].Allocation.AllocationState != "grace" {
+		t.Fatalf("grace view=%+v", views[1])
+	}
+	for _, view := range views {
+		if view.Allocation.ID == revokedID || !view.Allocation.Active {
+			t.Fatalf("terminal allocation leaked into active list: %+v", view)
+		}
+	}
+}
+
 func TestConcurrentQueriesNoLocks(t *testing.T) {
 	db := openStore(t)
 	defer db.Close()

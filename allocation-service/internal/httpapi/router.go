@@ -165,6 +165,9 @@ func registerProtectedAdminRoutes(router *gin.Engine, cfg Config, boundary Admin
 		admin.POST("/cards/:id/revoke", boundary.RequireOrigin, boundary.RequireCSRF, revokeCardHandler(cfg.Cards))
 		admin.POST("/cards/:id/extend", boundary.RequireOrigin, boundary.RequireCSRF, extendCardHandler(cfg.Cards))
 	}
+	if cfg.Allocator != nil {
+		admin.GET("/allocations", listAllocationsHandler(cfg.Allocator))
+	}
 }
 
 func healthHandler(health HealthChecker, logger *slog.Logger) gin.HandlerFunc {
@@ -558,6 +561,21 @@ func listCardsHandler(service *cardsvc.Service) gin.HandlerFunc {
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"cards": serializeCards(cards), "request_id": c.GetString("request_id")})
+	}
+}
+
+func listAllocationsHandler(service *allocatorsvc.Service) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		allocations, err := service.ListActive(c.Request.Context())
+		if err != nil {
+			writeError(c, http.StatusInternalServerError, "internal_error", "request could not be processed")
+			return
+		}
+		out := make([]gin.H, 0, len(allocations))
+		for _, allocation := range allocations {
+			out = append(out, serializeAdminAllocation(allocation))
+		}
+		c.JSON(http.StatusOK, gin.H{"allocations": out, "request_id": c.GetString("request_id")})
 	}
 }
 
@@ -1106,6 +1124,26 @@ func serializeAllocation(allocation models.Allocation) gin.H {
 	}
 	if allocation.GraceUntil != nil {
 		body["grace_until"] = allocation.GraceUntil.UTC().Format(time.RFC3339Nano)
+	}
+	return body
+}
+
+func serializeAdminAllocation(view allocatorsvc.AdminAllocation) gin.H {
+	body := gin.H{
+		"id":               view.Allocation.ID,
+		"allocation_state": view.Allocation.AllocationState,
+		"active":           view.Allocation.Active,
+		"allocated_at":     view.Allocation.AllocatedAt.UTC().Format(time.RFC3339Nano),
+		"valid_until":      view.Allocation.ValidUntil.UTC().Format(time.RFC3339Nano),
+		"card_id":          view.Card.ID,
+		"code_suffix":      view.Card.CodeSuffix,
+		"duration_days":    view.Card.DurationDays,
+		"account_id":       view.Account.ID,
+		"display_username": view.Account.DisplayUsername,
+		"account_expiry":   view.Account.AccountExpiry.UTC().Format(time.RFC3339Nano),
+	}
+	if view.Allocation.GraceUntil != nil {
+		body["grace_until"] = view.Allocation.GraceUntil.UTC().Format(time.RFC3339Nano)
 	}
 	return body
 }

@@ -96,9 +96,10 @@ func (m *Module) RegisterPublicRoutes(router *gin.Engine) {
 
 func (m *Module) RegisterAdminRoutes(router *gin.Engine, boundary AdminBoundary) error {
 	return httpapi.RegisterAdminRoutes(router, httpapi.Config{
-		Accounts: m.accounts,
-		Cards:    m.cards,
-		Metrics:  m.metrics,
+		Accounts:  m.accounts,
+		Cards:     m.cards,
+		Allocator: m.allocator,
+		Metrics:   m.metrics,
 	}, httpapi.AdminBoundary{
 		RequireSession: boundary.RequireSession,
 		RequireCSRF:    boundary.RequireCSRF,

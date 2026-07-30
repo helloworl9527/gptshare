@@ -72,6 +72,7 @@ export const api = {
   logout: () => request('/api/auth/logout', { method: 'POST' }),
   adminPing: () => request('/api/admin/ping'),
   dashboard: () => request('/api/admin/dashboard'),
+  allocations: () => request('/api/admin/allocations'),
   accounts: () => request('/api/admin/accounts'),
   account: (id) => request(`/api/admin/accounts/${encodeURIComponent(id)}`),
   accountSettings: () => request('/api/admin/account-settings'),

@@ -180,14 +180,18 @@ describe('P2 admin views', () => {
     wrapper.unmount()
   })
 
-  it('renders allocation records from approved admin data without requesting unknown endpoints', async () => {
-    const fetchMock = vi.fn()
-      .mockResolvedValueOnce(response({ accounts }))
-      .mockResolvedValueOnce(response({ cards: cards.filter((item) => item.status === 'redeemed') }))
+  it('renders the real allocation relationships from the dedicated endpoint', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(response({ allocations: [
+      { id: 28, card_id: 12, code_suffix: 'JUL28', duration_days: 8, account_id: 7, display_username: 'fund-outlier@example.test', account_expiry: '2026-08-20T00:00:00Z', allocation_state: 'primary', active: true, allocated_at: '2026-07-28T15:11:00Z', valid_until: '2026-08-05T15:11:00Z' },
+      { id: 30, card_id: 14, code_suffix: 'JUL30', duration_days: 8, account_id: 9, display_username: 'flagon_snap@example.test', account_expiry: '2026-08-22T00:00:00Z', allocation_state: 'primary', active: true, allocated_at: '2026-07-30T13:48:00Z', valid_until: '2026-08-07T13:48:00Z' },
+    ] }))
     const wrapper = await render(Allocations, fetchMock)
-    expect(wrapper.text()).toContain('**** EFGH')
+    expect(wrapper.text()).toContain('**** JUL28')
+    expect(wrapper.text()).toContain('fund-outlier@example.test')
+    expect(wrapper.text()).toContain('**** JUL30')
+    expect(wrapper.text()).toContain('flagon_snap@example.test')
     expect(wrapper.text()).toContain('替换历史')
-    expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual(['/api/admin/accounts', '/api/admin/cards?status=redeemed'])
+    expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual(['/api/admin/allocations'])
     wrapper.unmount()
   })
 })
