@@ -26,7 +26,7 @@ func TestDeviceStartEncryptsSessionAndRejectsHighFrequencyPolls(t *testing.T) {
 	client.devicePolls = []chatgpt.DevicePollResult{
 		{State: chatgpt.DevicePollPending, RetryAfter: 5 * time.Second},
 		{State: chatgpt.DevicePollSlowDown, RetryAfter: 10 * time.Second},
-		{State: chatgpt.DevicePollAuthorized, Tokens: chatgpt.TokenSet{AccessToken: "device-access-plaintext", RefreshToken: "device-refresh-plaintext"}},
+		{State: chatgpt.DevicePollAuthorized, Tokens: chatgpt.TokenSet{AccessToken: "device-access-plaintext", RefreshToken: "device-refresh-plaintext", IDToken: "device-id-plaintext"}},
 	}
 	started, err := service.StartDeviceImport(context.Background(), "Device account")
 	if err != nil {
@@ -82,6 +82,22 @@ func TestDeviceStartEncryptsSessionAndRejectsHighFrequencyPolls(t *testing.T) {
 		t.Fatalf("authorized poll=%+v calls=%d err=%v", poll, client.pollCalls, err)
 	}
 	accountID := poll.Account.ID
+	var credentialEnvelope []byte
+	if err := database.DB().QueryRow("SELECT enc_credentials FROM accounts WHERE id=?", accountID).Scan(&credentialEnvelope); err != nil {
+		t.Fatal(err)
+	}
+	credentialPlaintext, err := keyring.Open(credentialEnvelope, credentialcrypto.CredentialAAD(accountID, "device"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var credential credentialPayload
+	if err := json.Unmarshal(credentialPlaintext, &credential); err != nil {
+		t.Fatal(err)
+	}
+	zero(credentialPlaintext)
+	if credential.IDToken != "device-id-plaintext" || credential.OAuthSource != "device" {
+		t.Fatalf("device credential metadata=%+v", credential)
+	}
 	poll, err = restarted.PollDevice(context.Background(), started.SessionID)
 	if err != nil || poll.Account == nil || poll.Account.ID != accountID || client.pollCalls != 3 {
 		t.Fatalf("replay=%+v calls=%d err=%v", poll, client.pollCalls, err)

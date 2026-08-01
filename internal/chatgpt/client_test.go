@@ -1,11 +1,13 @@
 package chatgpt
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -50,8 +52,11 @@ func TestFetchStatusPlansAndExpiry(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Header.Get("Authorization") == "" || r.Header.Get("X-Authorization") == "" {
-					t.Fatal("missing authorization headers")
+				if r.Header.Get("Authorization") == "" || r.Header.Get("Origin") != "https://chatgpt.com" || r.Header.Get("Referer") != "https://chatgpt.com/" || r.Header.Get("Accept") != "application/json" || r.Header.Get("User-Agent") != statusUserAgent {
+					t.Fatalf("status request headers are incompatible: %#v", r.Header)
+				}
+				if r.Header.Get("X-Authorization") != "" || r.Header.Get("Chatgpt-Account-Id") != "" {
+					t.Fatalf("status request sent legacy headers: %#v", r.Header)
 				}
 				_ = json.NewEncoder(w).Encode(map[string]any{"accounts": map[string]any{"acct-test": map[string]any{
 					"account":     map[string]any{"account_id": "acct-test"},
@@ -322,11 +327,49 @@ func TestParseTimeFormats(t *testing.T) {
 	}
 }
 
+func TestDecodeTokenSetCapturesAccessExpiry(t *testing.T) {
+	expiry := time.Date(2026, 8, 1, 18, 0, 0, 0, time.UTC)
+	access := testJWTWithExp(t, "acct-test", "plus", nil, expiry)
+	body, err := json.Marshal(map[string]string{"access_token": access, "refresh_token": "rotated", "id_token": "id"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokens, err := decodeTokenSet(body, "refresh")
+	if err != nil || tokens.AccessExpiresAt == nil || !tokens.AccessExpiresAt.Equal(expiry) {
+		t.Fatalf("tokens=%+v err=%v", tokens, err)
+	}
+}
+
 func TestNoRawJSONInErrors(t *testing.T) {
 	secretMarker := "sensitive-marker-must-not-escape"
 	err := classifyHTTP(401, []byte(fmt.Sprintf(`{"error":{"code":"invalid_token","message":%q}}`, secretMarker)))
 	if strings.Contains(err.Error(), secretMarker) {
 		t.Fatal("raw upstream content escaped through error")
+	}
+}
+
+func TestGenericStatusDenialDebugLogContainsOnlySafeDiagnostics(t *testing.T) {
+	secretMarker := "sensitive-response-marker"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(fmt.Sprintf(`{"error":{"code":"invalid_token","message":%q}}`, secretMarker)))
+	}))
+	defer server.Close()
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(previous)
+	client := NewClient(Config{StatusURL: server.URL})
+	result, err := client.FetchStatus(context.Background(), testJWT(t, "acct-test", "plus", nil))
+	if err == nil || result.ResponseHash == "" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	logged := logs.String()
+	if !strings.Contains(logged, "endpoint=accounts_check") || !strings.Contains(logged, "status_code=401") || !strings.Contains(logged, "response_hash="+result.ResponseHash) {
+		t.Fatalf("safe diagnostics missing: %s", logged)
+	}
+	if strings.Contains(logged, secretMarker) || strings.Contains(logged, "Bearer ") {
+		t.Fatalf("sensitive response data reached logs: %s", logged)
 	}
 }
 

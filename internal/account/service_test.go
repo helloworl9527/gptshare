@@ -146,6 +146,19 @@ func TestImportAcceptsEachDirectCredentialPath(t *testing.T) {
 	}
 }
 
+func TestManualAccessImportStillRequiresOnlineStatusValidation(t *testing.T) {
+	service, _, _, closeDB := testService(t, "acct-forged-access")
+	defer closeDB()
+	client := service.client.(*fakeClient)
+	client.tokens = chatgpt.TokenSet{AccessToken: "locally-forged-access"}
+	client.statusErr = &chatgpt.TypedError{Kind: chatgpt.ErrorPermissionDenied, StatusCode: 401, EvidenceCode: "http_401", EvidenceLevel: chatgpt.EvidenceContractVerifiedLivePending, PreserveBusinessState: true}
+	_, err := service.ImportByToken(context.Background(), &TokenInput{AccessToken: "locally-forged-access"})
+	var serviceErr *ServiceError
+	if !errors.As(err, &serviceErr) || serviceErr.Kind != ErrorInvalid || serviceErr.Code != "http_401" {
+		t.Fatalf("manual access import error=%v", err)
+	}
+}
+
 func TestImportEmailDefaultLabelAndReauthorizeFillOnly(t *testing.T) {
 	service, database, _, closeDB := testService(t, "acct-email")
 	defer closeDB()

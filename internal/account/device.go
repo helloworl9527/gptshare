@@ -247,7 +247,7 @@ func (s *Service) prepareDeviceTokens(ctx context.Context, tokens chatgpt.TokenS
 		return preparedImport{}, &ServiceError{Kind: ErrorInvalid, Code: "device_access_token_missing"}
 	}
 	status, err := s.client.FetchStatus(ctx, tokens.AccessToken)
-	if err != nil {
+	if err != nil && !acceptTrustedSupplementalFailure(&status, err, "device") {
 		return preparedImport{}, classifyUpstream(err)
 	}
 	if status.EvidenceLevel != chatgpt.EvidenceLiveVerified || status.ProviderAccountID == "" || status.SubscriptionExpiry == nil || status.Plan == chatgpt.PlanUnknown || status.AccountState != chatgpt.StateActive {
@@ -256,7 +256,7 @@ func (s *Service) prepareDeviceTokens(ctx context.Context, tokens chatgpt.TokenS
 	if email := chatgpt.ExtractEmail(tokens.AccessToken, tokens.IDToken, status.ProviderAccountID); email != "" {
 		status.Email = email
 	}
-	plaintext, err := json.Marshal(credentialPayload{Access: tokens.AccessToken, Refresh: tokens.RefreshToken})
+	plaintext, err := json.Marshal(newCredentialPayload(tokens, "", "device"))
 	tokens = chatgpt.TokenSet{}
 	if err != nil {
 		return preparedImport{}, internalError("credential_encode")

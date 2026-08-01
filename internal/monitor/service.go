@@ -33,9 +33,12 @@ type Service struct {
 }
 
 type credentialPayload struct {
-	Access  string `json:"access,omitempty"`
-	Refresh string `json:"refresh,omitempty"`
-	Session string `json:"session,omitempty"`
+	Access          string     `json:"access,omitempty"`
+	Refresh         string     `json:"refresh,omitempty"`
+	Session         string     `json:"session,omitempty"`
+	IDToken         string     `json:"id_token,omitempty"`
+	OAuthSource     string     `json:"oauth_source,omitempty"`
+	AccessExpiresAt *time.Time `json:"access_expires_at,omitempty"`
 }
 
 type accountRecord struct {
@@ -52,11 +55,12 @@ type accountRecord struct {
 }
 
 type pollResult struct {
-	status   *chatgpt.StatusResult
-	typed    *chatgpt.TypedError
-	envelope []byte
-	endpoint string
-	code     string
+	status                  *chatgpt.StatusResult
+	typed                   *chatgpt.TypedError
+	envelope                []byte
+	supplementalUnavailable bool
+	endpoint                string
+	code                    string
 }
 
 func New(db *sql.DB, client Client, cipher Cipher, cfg Config) (*Service, error) {
@@ -300,7 +304,7 @@ func (s *Service) pollWithRetry(ctx context.Context, record accountRecord) pollR
 		return internalPollError("credential_decode")
 	}
 	access := credentials.Access
-	if accessNeedsRefresh(access, now.Add(s.cfg.RefreshBefore)) {
+	if credentialNeedsRefresh(credentials, now.Add(s.cfg.RefreshBefore)) {
 		var tokens chatgpt.TokenSet
 		var exchangeErr error
 		for attempt := 0; attempt <= s.cfg.MaxRetries; attempt++ {
@@ -327,7 +331,22 @@ func (s *Service) pollWithRetry(ctx context.Context, record accountRecord) pollR
 		if tokens.RefreshToken != "" {
 			credentials.Refresh = tokens.RefreshToken
 		}
+		if tokens.IDToken != "" {
+			credentials.IDToken = tokens.IDToken
+		}
+		credentials.AccessExpiresAt = tokens.AccessExpiresAt
+		if credentials.AccessExpiresAt == nil {
+			if expiry, ok := chatgpt.AccessTokenExpiry(tokens.AccessToken); ok {
+				credentials.AccessExpiresAt = &expiry
+			}
+		}
+		if credentials.OAuthSource == "" && credentials.Refresh != "" {
+			credentials.OAuthSource = "refresh"
+		}
 		access = tokens.AccessToken
+		if err := s.persistCredentials(ctx, record, credentials); err != nil {
+			return internalPollError("credential_persist")
+		}
 	}
 	var status chatgpt.StatusResult
 	for attempt := 0; attempt <= s.cfg.MaxRetries; attempt++ {
@@ -339,6 +358,9 @@ func (s *Service) pollWithRetry(ctx context.Context, record accountRecord) pollR
 			break
 		}
 		outcome := errorPollResult("accounts_check", statusErr)
+		if credentials.OAuthSource != "" && isGenericSupplementalDenial(outcome.typed) {
+			return pollResult{supplementalUnavailable: true, endpoint: "accounts_check", code: outcome.code}
+		}
 		if outcome.typed == nil || !outcome.typed.Retryable || attempt == s.cfg.MaxRetries || s.retryPause(ctx, outcome.typed, attempt) != nil {
 			return outcome
 		}
@@ -357,6 +379,44 @@ func (s *Service) pollWithRetry(ctx context.Context, record accountRecord) pollR
 	}
 	credentials.Access, credentials.Refresh, credentials.Session = "", "", ""
 	return pollResult{status: &status, envelope: envelope, endpoint: "accounts_check", code: status.EvidenceCode}
+}
+
+func credentialNeedsRefresh(credentials credentialPayload, threshold time.Time) bool {
+	if credentials.AccessExpiresAt != nil {
+		return !credentials.AccessExpiresAt.After(threshold)
+	}
+	return accessNeedsRefresh(credentials.Access, threshold)
+}
+
+func isGenericSupplementalDenial(typed *chatgpt.TypedError) bool {
+	return typed != nil && typed.Kind == chatgpt.ErrorPermissionDenied &&
+		(typed.EvidenceCode == "http_401" || typed.EvidenceCode == "http_403")
+}
+
+func (s *Service) persistCredentials(ctx context.Context, record accountRecord, credentials credentialPayload) error {
+	encoded, err := json.Marshal(credentials)
+	if err != nil {
+		return err
+	}
+	defer zero(encoded)
+	envelope, err := s.cipher.Seal(encoded, credentialcrypto.CredentialAAD(record.ID, record.TokenType))
+	if err != nil {
+		return err
+	}
+	for attempt := 0; attempt < 6; attempt++ {
+		_, err = s.db.ExecContext(ctx, "UPDATE accounts SET enc_credentials=?,credential_key_id=? WHERE id=? AND deleted_at IS NULL", envelope, s.cipher.ActiveKeyID(), record.ID)
+		if err == nil {
+			return nil
+		}
+		lower := strings.ToLower(err.Error())
+		if !strings.Contains(lower, "locked") && !strings.Contains(lower, "busy") {
+			return err
+		}
+		if sleepContext(ctx, time.Duration(1<<attempt)*10*time.Millisecond) != nil {
+			return err
+		}
+	}
+	return err
 }
 
 func (s *Service) retryPause(ctx context.Context, typed *chatgpt.TypedError, attempt int) error {

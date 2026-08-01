@@ -91,9 +91,12 @@ type Account struct {
 }
 
 type credentialPayload struct {
-	Access  string `json:"access,omitempty"`
-	Refresh string `json:"refresh,omitempty"`
-	Session string `json:"session,omitempty"`
+	Access          string     `json:"access,omitempty"`
+	Refresh         string     `json:"refresh,omitempty"`
+	Session         string     `json:"session,omitempty"`
+	IDToken         string     `json:"id_token,omitempty"`
+	OAuthSource     string     `json:"oauth_source,omitempty"`
+	AccessExpiresAt *time.Time `json:"access_expires_at,omitempty"`
 }
 
 type preparedImport struct {
@@ -394,7 +397,11 @@ func (s *Service) prepare(ctx context.Context, input *TokenInput) (preparedImpor
 		tokens.RefreshToken = input.RefreshToken
 	}
 	status, err := s.client.FetchStatus(ctx, tokens.AccessToken)
-	if err != nil {
+	trustedSource := ""
+	if kind == chatgpt.CredentialRefresh {
+		trustedSource = "refresh"
+	}
+	if err != nil && !acceptTrustedSupplementalFailure(&status, err, trustedSource) {
 		return preparedImport{}, classifyUpstream(err)
 	}
 	if status.EvidenceLevel != chatgpt.EvidenceLiveVerified || status.ProviderAccountID == "" || status.SubscriptionExpiry == nil || status.Plan == chatgpt.PlanUnknown || status.AccountState != chatgpt.StateActive {
@@ -403,13 +410,41 @@ func (s *Service) prepare(ctx context.Context, input *TokenInput) (preparedImpor
 	if email := chatgpt.ExtractEmail(tokens.AccessToken, tokens.IDToken, status.ProviderAccountID); email != "" {
 		status.Email = email
 	}
-	payload, err := json.Marshal(credentialPayload{Access: tokens.AccessToken, Refresh: tokens.RefreshToken, Session: input.SessionToken})
+	payload, err := json.Marshal(newCredentialPayload(tokens, input.SessionToken, trustedSource))
 	tokens = chatgpt.TokenSet{}
 	input.AccessToken, input.RefreshToken, input.SessionToken = "", "", ""
 	if err != nil {
 		return preparedImport{}, internalError("credential_encode")
 	}
 	return preparedImport{kind: kind, status: status, plaintext: payload}, nil
+}
+
+func newCredentialPayload(tokens chatgpt.TokenSet, session, source string) credentialPayload {
+	expiresAt := tokens.AccessExpiresAt
+	if expiresAt == nil {
+		if parsed, ok := chatgpt.AccessTokenExpiry(tokens.AccessToken); ok {
+			expiresAt = &parsed
+		}
+	}
+	return credentialPayload{
+		Access: tokens.AccessToken, Refresh: tokens.RefreshToken, Session: session,
+		IDToken: tokens.IDToken, OAuthSource: source, AccessExpiresAt: expiresAt,
+	}
+}
+
+func acceptTrustedSupplementalFailure(status *chatgpt.StatusResult, err error, source string) bool {
+	if source == "" {
+		return false
+	}
+	var typed *chatgpt.TypedError
+	if !errors.As(err, &typed) || typed.Kind != chatgpt.ErrorPermissionDenied ||
+		(typed.EvidenceCode != "http_401" && typed.EvidenceCode != "http_403") {
+		return false
+	}
+	status.AccountState = chatgpt.StateActive
+	status.EvidenceLevel = chatgpt.EvidenceLiveVerified
+	status.EvidenceCode = source + "+accounts_check_" + typed.EvidenceCode
+	return true
 }
 
 func classifyUpstream(err error) error {

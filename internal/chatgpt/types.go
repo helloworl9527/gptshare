@@ -82,9 +82,10 @@ func (e *TypedError) Unwrap() error { return e.Cause }
 type Error = TypedError
 
 type TokenSet struct {
-	AccessToken  string
-	RefreshToken string
-	IDToken      string
+	AccessToken     string
+	RefreshToken    string
+	IDToken         string
+	AccessExpiresAt *time.Time
 }
 
 type StatusResult struct {

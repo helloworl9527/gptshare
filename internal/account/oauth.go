@@ -227,7 +227,7 @@ func (s *Service) prepareOAuthTokens(ctx context.Context, tokens chatgpt.TokenSe
 		return preparedImport{}, &ServiceError{Kind: ErrorInvalid, Code: "oauth_token_incomplete"}
 	}
 	status, err := s.client.FetchStatus(ctx, tokens.AccessToken)
-	if err != nil {
+	if err != nil && !acceptTrustedSupplementalFailure(&status, err, "oauth") {
 		return preparedImport{}, classifyUpstream(err)
 	}
 	if status.EvidenceLevel != chatgpt.EvidenceLiveVerified || status.ProviderAccountID == "" || status.SubscriptionExpiry == nil || status.Plan == chatgpt.PlanUnknown || status.AccountState != chatgpt.StateActive {
@@ -236,7 +236,7 @@ func (s *Service) prepareOAuthTokens(ctx context.Context, tokens chatgpt.TokenSe
 	if email := chatgpt.ExtractEmail(tokens.AccessToken, tokens.IDToken, status.ProviderAccountID); email != "" {
 		status.Email = email
 	}
-	plaintext, err := json.Marshal(credentialPayload{Access: tokens.AccessToken, Refresh: tokens.RefreshToken})
+	plaintext, err := json.Marshal(newCredentialPayload(tokens, "", "oauth"))
 	tokens = chatgpt.TokenSet{}
 	if err != nil {
 		return preparedImport{}, internalError("credential_encode")

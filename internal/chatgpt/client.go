@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -29,6 +30,7 @@ const (
 	oauthRedirectURI      = "http://localhost:1455/auth/callback"
 	oauthScopes           = "openid profile email offline_access"
 	oauthOriginator       = "codex_cli_rs"
+	statusUserAgent       = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
 
 type Config struct {
@@ -264,10 +266,10 @@ func (c *Client) FetchStatus(ctx context.Context, accessToken string) (StatusRes
 		return result, transient("status_request_create", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(accessToken))
-	req.Header.Set("X-Authorization", "Bearer "+strings.TrimSpace(accessToken))
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Chatgpt-Account-Id", result.ProviderAccountID)
-	req.Header.Set("User-Agent", "chatgpt-monitor-probe/step-01")
+	req.Header.Set("Origin", "https://chatgpt.com")
+	req.Header.Set("Referer", "https://chatgpt.com/")
+	req.Header.Set("User-Agent", statusUserAgent)
 	status, body, hash, doErr := c.do(req)
 	result.ResponseHash = hash
 	if doErr != nil {
@@ -304,6 +306,9 @@ func (c *Client) FetchStatus(ctx context.Context, accessToken string) (StatusRes
 		result.AccountState = stateForError(typed.Kind)
 		result.EvidenceCode = typed.EvidenceCode
 		result.EvidenceLevel = typed.EvidenceLevel
+		if typed.Kind == ErrorPermissionDenied && (status == http.StatusUnauthorized || status == http.StatusForbidden) {
+			slog.DebugContext(ctx, "ChatGPT supplemental account check denied", "endpoint", "accounts_check", "status_code", status, "response_hash", hash)
+		}
 	}
 	return result, classified
 }
@@ -485,7 +490,21 @@ func decodeTokenSet(body []byte, source string) (TokenSet, error) {
 	if strings.TrimSpace(payload.AccessToken) == "" {
 		return TokenSet{}, newTypedError(ErrorContractChanged, 0, source+"_missing_access_token", EvidenceContractVerifiedLivePending, false, false, true, nil)
 	}
-	return TokenSet{AccessToken: payload.AccessToken, RefreshToken: payload.RefreshToken, IDToken: payload.IDToken}, nil
+	tokens := TokenSet{AccessToken: payload.AccessToken, RefreshToken: payload.RefreshToken, IDToken: payload.IDToken}
+	if expiry, ok := AccessTokenExpiry(payload.AccessToken); ok {
+		tokens.AccessExpiresAt = &expiry
+	}
+	return tokens, nil
+}
+
+// AccessTokenExpiry returns the unverified JWT expiry for refresh scheduling.
+// Callers must never use it as proof that a credential is authentic.
+func AccessTokenExpiry(token string) (time.Time, bool) {
+	claims, err := parseAccessClaims(token)
+	if err != nil || claims.Exp == 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(claims.Exp, 0).UTC(), true
 }
 
 func classifyHTTP(status int, body []byte) error {

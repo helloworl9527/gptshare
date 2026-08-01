@@ -3,6 +3,7 @@ package account
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/url"
 	"os"
@@ -18,10 +19,12 @@ func TestOAuthStartCompleteAndReplayProtection(t *testing.T) {
 	service, database, keyring, closeDB := testService(t, "acct-oauth")
 	defer closeDB()
 	client := service.client.(*fakeClient)
+	accessExpiry := service.now().UTC().Add(time.Hour)
 	client.tokens = chatgpt.TokenSet{
-		AccessToken:  "oauth-access-plaintext",
-		RefreshToken: "oauth-refresh-plaintext",
-		IDToken:      "oauth-id-placeholder",
+		AccessToken:     "oauth-access-plaintext",
+		RefreshToken:    "oauth-refresh-plaintext",
+		IDToken:         "oauth-id-placeholder",
+		AccessExpiresAt: &accessExpiry,
 	}
 	start, err := service.StartOAuthImport(context.Background(), "OAuth account")
 	if err != nil {
@@ -62,6 +65,22 @@ func TestOAuthStartCompleteAndReplayProtection(t *testing.T) {
 	if accountResult.Credential.Type != "refresh" || client.oauthCode != "code-one" || client.oauthVerifier == "" {
 		t.Fatalf("account=%+v code=%q verifier configured=%v", accountResult, client.oauthCode, client.oauthVerifier != "")
 	}
+	var credentialEnvelope []byte
+	if err := database.DB().QueryRow("SELECT enc_credentials FROM accounts WHERE id=?", accountResult.ID).Scan(&credentialEnvelope); err != nil {
+		t.Fatal(err)
+	}
+	credentialPlaintext, err := keyring.Open(credentialEnvelope, credentialcrypto.CredentialAAD(accountResult.ID, "refresh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var credential credentialPayload
+	if err := json.Unmarshal(credentialPlaintext, &credential); err != nil {
+		t.Fatal(err)
+	}
+	zero(credentialPlaintext)
+	if credential.IDToken != "oauth-id-placeholder" || credential.OAuthSource != "oauth" || credential.AccessExpiresAt == nil || !credential.AccessExpiresAt.Equal(accessExpiry) {
+		t.Fatalf("OAuth credential metadata=%+v", credential)
+	}
 	var sessionState string
 	var sessionLength int
 	if err := database.DB().QueryRow("SELECT state,length(enc_session) FROM oauth_auth_sessions WHERE id=?", start.SessionID).Scan(&sessionState, &sessionLength); err != nil {
@@ -91,6 +110,27 @@ func TestOAuthStartCompleteAndReplayProtection(t *testing.T) {
 				t.Fatalf("OAuth plaintext found in SQLite file %s", path)
 			}
 		}
+	}
+}
+
+func TestOAuthGenericAccountCheckDenialIsNonBlocking(t *testing.T) {
+	service, _, _, closeDB := testService(t, "acct-oauth-denied")
+	defer closeDB()
+	client := service.client.(*fakeClient)
+	client.tokens = chatgpt.TokenSet{AccessToken: "oauth-access", RefreshToken: "oauth-refresh", IDToken: "oauth-id"}
+	client.statusErr = &chatgpt.TypedError{Kind: chatgpt.ErrorPermissionDenied, StatusCode: 401, EvidenceCode: "http_401", EvidenceLevel: chatgpt.EvidenceContractVerifiedLivePending, PreserveBusinessState: true}
+	start, err := service.StartOAuthImport(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorizationURL, _ := url.Parse(start.AuthorizationURL)
+	callback := "http://localhost:1455/auth/callback?code=denied-status&state=" + url.QueryEscape(authorizationURL.Query().Get("state"))
+	accountResult, err := service.CompleteOAuth(context.Background(), start.SessionID, callback)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if accountResult.Status != "alive" || accountResult.LastCheckState != "ok" {
+		t.Fatalf("account=%+v", accountResult)
 	}
 }
 
