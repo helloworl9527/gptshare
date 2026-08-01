@@ -464,6 +464,41 @@ func TestGenericAccountCheckDenialAfterRefreshPersistsCredentialsAndSucceeds(t *
 	}
 }
 
+func TestLegacyRefreshCredentialTreatsGenericDenialAsSupplemental(t *testing.T) {
+	s, db, keyring, client, now := newTestService(t)
+	client.errors["acct-refresh"] = &chatgpt.TypedError{Kind: chatgpt.ErrorPermissionDenied, StatusCode: 401, EvidenceCode: "http_401", EvidenceLevel: chatgpt.EvidenceContractVerifiedLivePending, PreserveBusinessState: true}
+	id := seedAccountPayload(t, db, keyring, "acct-refresh", "refresh", credentialPayload{
+		Access: jwtFor("acct-refresh", now.Add(time.Hour)), Refresh: "legacy-refresh-fixture",
+	}, now.Add(24*time.Hour), now)
+	if _, err := db.Exec("UPDATE accounts SET last_check_state='error',last_check_error_code='http_401' WHERE id=?", id); err != nil {
+		t.Fatal(err)
+	}
+	run, _, err := s.RefreshNow(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.AccountsOK != 1 || run.AccountsFailed != 0 || client.exchanges.Load() != 0 {
+		t.Fatalf("run=%+v exchanges=%d", run, client.exchanges.Load())
+	}
+	assertAccountState(t, db, id, StateAlive, CheckOK, false)
+	var envelope []byte
+	if err := db.QueryRow("SELECT enc_credentials FROM accounts WHERE id=?", id).Scan(&envelope); err != nil {
+		t.Fatal(err)
+	}
+	plaintext, err := keyring.Open(envelope, credentialcrypto.CredentialAAD(id, "refresh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var credentials credentialPayload
+	if err := json.Unmarshal(plaintext, &credentials); err != nil {
+		t.Fatal(err)
+	}
+	zero(plaintext)
+	if credentials.OAuthSource != "refresh" {
+		t.Fatalf("legacy credential source=%q", credentials.OAuthSource)
+	}
+}
+
 func TestStructuredDenialAfterRefreshStillUsesBanEvidence(t *testing.T) {
 	for _, code := range []string{"token_revoked", "account_disabled"} {
 		t.Run(code, func(t *testing.T) {

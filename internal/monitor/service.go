@@ -303,6 +303,14 @@ func (s *Service) pollWithRetry(ctx context.Context, record accountRecord) pollR
 	if json.Unmarshal(plaintext, &credentials) != nil {
 		return internalPollError("credential_decode")
 	}
+	if credentials.OAuthSource == "" {
+		credentials.OAuthSource = legacyOAuthSource(record.TokenType)
+		if credentials.OAuthSource != "" {
+			if err := s.persistCredentials(ctx, record, credentials); err != nil {
+				return internalPollError("credential_persist")
+			}
+		}
+	}
 	access := credentials.Access
 	if credentialNeedsRefresh(credentials, now.Add(s.cfg.RefreshBefore)) {
 		var tokens chatgpt.TokenSet
@@ -379,6 +387,15 @@ func (s *Service) pollWithRetry(ctx context.Context, record accountRecord) pollR
 	}
 	credentials.Access, credentials.Refresh, credentials.Session = "", "", ""
 	return pollResult{status: &status, envelope: envelope, endpoint: "accounts_check", code: status.EvidenceCode}
+}
+
+func legacyOAuthSource(tokenType string) string {
+	switch chatgpt.CredentialKind(tokenType) {
+	case chatgpt.CredentialRefresh, chatgpt.CredentialDevice, chatgpt.CredentialOAuth:
+		return tokenType
+	default:
+		return ""
+	}
 }
 
 func credentialNeedsRefresh(credentials credentialPayload, threshold time.Time) bool {
