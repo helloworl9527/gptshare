@@ -366,7 +366,7 @@ func (s *Service) pollWithRetry(ctx context.Context, record accountRecord) pollR
 			break
 		}
 		outcome := errorPollResult("accounts_check", statusErr)
-		if credentials.OAuthSource != "" && isGenericSupplementalDenial(outcome.typed) {
+		if isTrustedOAuthSource(credentials.OAuthSource) && isGenericSupplementalDenial(outcome.typed) {
 			return pollResult{supplementalUnavailable: true, endpoint: "accounts_check", code: outcome.code}
 		}
 		if outcome.typed == nil || !outcome.typed.Retryable || attempt == s.cfg.MaxRetries || s.retryPause(ctx, outcome.typed, attempt) != nil {
@@ -408,6 +408,15 @@ func credentialNeedsRefresh(credentials credentialPayload, threshold time.Time) 
 func isGenericSupplementalDenial(typed *chatgpt.TypedError) bool {
 	return typed != nil && typed.Kind == chatgpt.ErrorPermissionDenied &&
 		(typed.EvidenceCode == "http_401" || typed.EvidenceCode == "http_403")
+}
+
+func isTrustedOAuthSource(source string) bool {
+	switch source {
+	case "oauth", "refresh", "device":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Service) persistCredentials(ctx context.Context, record accountRecord, credentials credentialPayload) error {

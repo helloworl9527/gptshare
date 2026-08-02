@@ -83,6 +83,11 @@ func run(logger *slog.Logger) error {
 	if err := monitorService.RecoverInterrupted(ctx); err != nil {
 		return errors.New("monitor_recovery_failed")
 	}
+	recovered, err := monitorService.RecoverMisclassifiedSupplementalDenials(ctx)
+	if err != nil {
+		return errors.New("monitor_supplemental_recovery_failed")
+	}
+	logger.Info("monitor supplemental denial recovery completed", "accounts_recovered", recovered)
 	settingsService, err := notify.NewSettingsService(monitorStore.DB(), monitorKeyring)
 	if err != nil {
 		return errors.New("notification_settings_initialization_failed")

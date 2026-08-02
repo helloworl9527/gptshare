@@ -4,7 +4,7 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 release="$root/.workflow/artifacts/mstep05/release"
 archive="$root/.workflow/artifacts/mstep05/vitals-linux-amd64.tar.gz"
-pattern='(console\.(log|debug)|localStorage|sessionStorage|unsafe-inline|unsafe-eval|ATTACH[[:space:]]+DATABASE)'
+pattern='(console\.(log|debug)|sessionStorage|unsafe-inline|unsafe-eval|ATTACH[[:space:]]+DATABASE)'
 
 requested_scanner=${SECURITY_GATE_SCANNER:-auto}
 case "$requested_scanner" in
@@ -35,7 +35,7 @@ scan_source() {
 	if [ "$scanner" = rg ]; then
 		rg -n -i --glob '!**/*test*' --glob '!**/dev-run.sh' --glob '!**/security-gate*.sh' --glob '!**/validate-deploy-static.sh' --glob '!**/vitals-deploy-contract.sh' --glob '!**/*.md' --glob '!**/node_modules/**' --glob '!**/artifacts/**' "$pattern" "$root/cmd" "$root/internal" "$root/scripts" "$root/deploy/vitals" "$root/web/src" "$root/web/public"
 	else
-		grep -RInE --exclude='*test*' --exclude='dev-run.sh' --exclude='security-gate*.sh' --exclude='validate-deploy-static.sh' --exclude='vitals-deploy-contract.sh' --exclude='*.md' --exclude-dir='node_modules' --exclude-dir='artifacts' "$pattern" "$root/cmd" "$root/internal" "$root/scripts" "$root/deploy/vitals" "$root/web/src" "$root/web/public"
+		grep -RInE --exclude='*test*' --exclude='dev-run.sh' --exclude='security-gate*.sh' --exclude='validate-deploy-static.sh' --exclude='vitals-deploy-contract.sh' --exclude='*.md' --exclude-dir='test' --exclude-dir='tests' --exclude-dir='node_modules' --exclude-dir='artifacts' "$pattern" "$root/cmd" "$root/internal" "$root/scripts" "$root/deploy/vitals" "$root/web/src" "$root/web/public"
 	fi
 }
 
@@ -70,7 +70,53 @@ assert_clean() {
 	fi
 }
 
+assert_authorized_browser_storage() {
+	source="$root/web/public/static/user.js"
+	embedded="$root/internal/unifiedui/static/static/user.js"
+	for file in "$source" "$embedded"; do
+		count=$(grep -Ec 'localStorage\.(getItem|removeItem|setItem)\(savedCardsStorageKey' "$file" || true)
+		if [ "$count" -ne 3 ]; then
+			echo "authorized saved-card storage contract changed: $file" >&2
+			exit 1
+		fi
+		if grep -En '(localStorage|sessionStorage)' "$file" | grep -Ev 'localStorage\.(getItem|removeItem|setItem)\(savedCardsStorageKey'; then
+			echo "authorized saved-card script contains an unexpected storage sink: $file" >&2
+			exit 1
+		fi
+	done
+	if ! cmp -s "$source" "$embedded"; then
+		echo "embedded saved-card script differs from reviewed source" >&2
+		exit 1
+	fi
+	if [ "$scanner" = rg ]; then
+		if output=$(rg -n -i --glob '!**/*test*' --glob '!**/security-gate*.sh' --glob '!**/node_modules/**' '(localStorage|sessionStorage)' \
+			"$root/cmd" "$root/internal" "$root/scripts" "$root/deploy/vitals" "$root/web/src" "$root/web/public"); then
+			status=0
+		else
+			status=$?
+		fi
+	else
+		if output=$(grep -RInE --exclude='*test*' --exclude='security-gate*.sh' --exclude-dir='test' --exclude-dir='tests' --exclude-dir='node_modules' '(localStorage|sessionStorage)' \
+			"$root/cmd" "$root/internal" "$root/scripts" "$root/deploy/vitals" "$root/web/src" "$root/web/public"); then
+			status=0
+		else
+			status=$?
+		fi
+	fi
+	if [ "$status" -ne 0 ] && [ "$status" -ne 1 ]; then
+		echo "browser storage scan failed with status $status using $scanner" >&2
+		exit 1
+	fi
+	filtered=$(printf '%s\n' "$output" | grep -Fv "$source:" | grep -Fv "$embedded:" || true)
+	if [ -n "$filtered" ]; then
+		printf '%s\n' "$filtered" >&2
+		echo "source contains an unauthorized browser storage sink" >&2
+		exit 1
+	fi
+}
+
 "$root/allocation-service/scripts/security-gate.sh"
+assert_authorized_browser_storage
 assert_clean "unified source" scan_source
 
 grep -Fq 'VITALS_MONITOR_COMPAT_HTTP_ENABLED=false' "$root/deploy/vitals/server.env.example"

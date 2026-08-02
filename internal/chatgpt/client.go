@@ -515,18 +515,20 @@ func classifyHTTP(status int, body []byte) error {
 		return newTypedError(ErrorUpstreamTransient, status, "upstream_5xx", EvidenceContractVerifiedLivePending, true, false, true, nil)
 	}
 	trimmed := bytes.TrimSpace(body)
-	if len(trimmed) > 0 && (trimmed[0] == '<' || !json.Valid(trimmed)) {
-		return newTypedError(ErrorContractChanged, status, "unexpected_non_json", EvidenceContractVerifiedLivePending, false, false, true, nil)
-	}
-	code := upstreamErrorCode(trimmed)
-	switch strings.ToLower(code) {
-	case "account_disabled", "account_deactivated":
-		return newTypedError(ErrorAccountDisabled, status, code, EvidenceContractVerifiedLivePending, false, true, true, nil)
-	case "token_revoked", "credential_revoked", "refresh_token_reused":
-		return newTypedError(ErrorCredentialRevoked, status, code, EvidenceContractVerifiedLivePending, false, true, true, nil)
+	if json.Valid(trimmed) {
+		code := upstreamErrorCode(trimmed)
+		switch strings.ToLower(code) {
+		case "account_disabled", "account_deactivated":
+			return newTypedError(ErrorAccountDisabled, status, code, EvidenceContractVerifiedLivePending, false, true, true, nil)
+		case "token_revoked", "credential_revoked", "refresh_token_reused":
+			return newTypedError(ErrorCredentialRevoked, status, code, EvidenceContractVerifiedLivePending, false, true, true, nil)
+		}
 	}
 	if status == http.StatusUnauthorized || status == http.StatusForbidden {
 		return newTypedError(ErrorPermissionDenied, status, "http_"+strconv.Itoa(status), EvidenceContractVerifiedLivePending, false, false, true, nil)
+	}
+	if len(trimmed) == 0 || trimmed[0] == '<' || !json.Valid(trimmed) {
+		return newTypedError(ErrorContractChanged, status, "unexpected_non_json", EvidenceContractVerifiedLivePending, false, false, true, nil)
 	}
 	return newTypedError(ErrorContractChanged, status, "unexpected_http_"+strconv.Itoa(status), EvidenceUnverified, false, false, true, nil)
 }

@@ -116,14 +116,21 @@ func TestFetchStatusErrorClassification(t *testing.T) {
 		state  AccountState
 		retry  bool
 		banned bool
+		code   string
 	}{
-		{"revoked", 401, `{"error":{"code":"token_revoked"}}`, ErrorCredentialRevoked, StateCredentialRevoked, false, true},
-		{"disabled", 403, `{"error":{"code":"account_disabled"}}`, ErrorAccountDisabled, StateAccountDisabled, false, true},
-		{"unauthorized", 401, `{"error":{"code":"invalid_token"}}`, ErrorPermissionDenied, StatePermissionDenied, false, false},
-		{"forbidden", 403, `{"error":{"code":"insufficient_scope"}}`, ErrorPermissionDenied, StatePermissionDenied, false, false},
-		{"rate limited", 429, `{"error":{"code":"rate_limit"}}`, ErrorRateLimited, StateRateLimited, true, false},
-		{"server error", 503, `{"error":{"code":"unavailable"}}`, ErrorUpstreamTransient, StateUpstreamTransient, true, false},
-		{"html challenge", 403, `<html>challenge</html>`, ErrorContractChanged, StateContractChanged, false, false},
+		{"revoked", 401, `{"error":{"code":"token_revoked"}}`, ErrorCredentialRevoked, StateCredentialRevoked, false, true, "token_revoked"},
+		{"disabled", 403, `{"error":{"code":"account_disabled"}}`, ErrorAccountDisabled, StateAccountDisabled, false, true, "account_disabled"},
+		{"unauthorized JSON", 401, `{"error":{"code":"invalid_token"}}`, ErrorPermissionDenied, StatePermissionDenied, false, false, "http_401"},
+		{"forbidden JSON", 403, `{"error":{"code":"insufficient_scope"}}`, ErrorPermissionDenied, StatePermissionDenied, false, false, "http_403"},
+		{"unauthorized HTML", 401, `<html>unauthorized</html>`, ErrorPermissionDenied, StatePermissionDenied, false, false, "http_401"},
+		{"forbidden HTML", 403, `<html>challenge</html>`, ErrorPermissionDenied, StatePermissionDenied, false, false, "http_403"},
+		{"unauthorized empty", 401, ``, ErrorPermissionDenied, StatePermissionDenied, false, false, "http_401"},
+		{"forbidden empty", 403, ``, ErrorPermissionDenied, StatePermissionDenied, false, false, "http_403"},
+		{"forbidden invalid JSON", 403, `{`, ErrorPermissionDenied, StatePermissionDenied, false, false, "http_403"},
+		{"rate limited", 429, `{"error":{"code":"rate_limit"}}`, ErrorRateLimited, StateRateLimited, true, false, "http_429"},
+		{"server error", 503, `{"error":{"code":"unavailable"}}`, ErrorUpstreamTransient, StateUpstreamTransient, true, false, "upstream_5xx"},
+		{"other HTML", 400, `<html>bad request</html>`, ErrorContractChanged, StateContractChanged, false, false, "unexpected_non_json"},
+		{"other empty", 400, ``, ErrorContractChanged, StateContractChanged, false, false, "unexpected_non_json"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -135,7 +142,7 @@ func TestFetchStatusErrorClassification(t *testing.T) {
 			client := NewClient(Config{StatusURL: server.URL})
 			got, err := client.FetchStatus(context.Background(), testJWT(t, "acct-test", "plus", nil))
 			var typed *Error
-			if !errors.As(err, &typed) || typed.Kind != tt.kind || typed.Retryable != tt.retry || typed.BannedCandidate != tt.banned {
+			if !errors.As(err, &typed) || typed.Kind != tt.kind || typed.Retryable != tt.retry || typed.BannedCandidate != tt.banned || typed.EvidenceCode != tt.code {
 				t.Fatalf("error = %#v, want kind=%s retry=%v", err, tt.kind, tt.retry)
 			}
 			if typed.EvidenceLevel != EvidenceContractVerifiedLivePending || !typed.PreserveBusinessState {
@@ -275,6 +282,19 @@ func TestRefreshAndSessionExchange(t *testing.T) {
 	}
 }
 
+func TestRefreshEndpointHTMLDenialRemainsCredentialFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`<html>login required</html>`))
+	}))
+	defer server.Close()
+	_, err := NewClient(Config{TokenURL: server.URL}).RefreshToken(context.Background(), "refresh-placeholder")
+	var typed *TypedError
+	if !errors.As(err, &typed) || typed.Kind != ErrorPermissionDenied || typed.EvidenceCode != "http_401" {
+		t.Fatalf("refresh error=%#v", err)
+	}
+}
+
 func TestDeviceFlow(t *testing.T) {
 	access := testJWT(t, "acct-test", "plus", nil)
 	polls := 0
@@ -352,7 +372,7 @@ func TestGenericStatusDenialDebugLogContainsOnlySafeDiagnostics(t *testing.T) {
 	secretMarker := "sensitive-response-marker"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
-		_, _ = w.Write([]byte(fmt.Sprintf(`{"error":{"code":"invalid_token","message":%q}}`, secretMarker)))
+		_, _ = w.Write([]byte("<html>" + secretMarker + "</html>"))
 	}))
 	defer server.Close()
 	var logs bytes.Buffer

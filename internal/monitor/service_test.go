@@ -241,6 +241,128 @@ func TestRecoverInterruptedSkipsUnknownAndRejectedLegacyEvidence(t *testing.T) {
 	assertCount(t, db, "SELECT count(*) FROM alert_events", 0)
 }
 
+func TestRecoverMisclassifiedSupplementalDenialsIsExactAuditedAndIdempotent(t *testing.T) {
+	s, db, keyring, _, now := newTestService(t)
+	signature := EvidenceSignatureFor("accounts_check", "unexpected_non_json", "status-v1")
+	otherSignature := EvidenceSignatureFor("accounts_check", "unexpected_non_json", "status-v2")
+	nextRetry := formatTime(now.Add(time.Hour))
+
+	seedCandidate := func(pid, tokenType string) int64 {
+		t.Helper()
+		payload := credentialPayload{Access: jwtFor(pid, now.Add(time.Hour)), OAuthSource: tokenType}
+		if tokenType == "refresh" {
+			payload.Refresh = "recovery-refresh-fixture"
+		}
+		id := seedAccountPayload(t, db, keyring, pid, tokenType, payload, now.Add(24*time.Hour), now.Add(-time.Hour))
+		if _, err := db.Exec(`UPDATE accounts SET
+			last_check_state='contract_changed',last_check_error_code='unexpected_non_json',next_retry_at=?,
+			polling_paused=1,pause_reason='contract_changed',pending_evidence_signature=?,pending_detected_at=?
+			WHERE id=?`, nextRetry, signature, formatTime(now.Add(-time.Minute)), id); err != nil {
+			t.Fatal(err)
+		}
+		var epochID int64
+		if err := db.QueryRow("SELECT id FROM authorization_epochs WHERE account_id=? AND ended_at IS NULL", id).Scan(&epochID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`INSERT INTO status_change_log(
+			account_id,epoch_id,at,field,from_value,to_value,evidence_code,evidence_level,evidence_signature)
+			VALUES (?,?,?,?,?,?,?,?,?)`, id, epochID, formatTime(now.Add(-time.Minute)), "last_check_state", CheckOK,
+			CheckContractChanged, "unexpected_non_json", string(chatgpt.EvidenceContractVerifiedLivePending), signature); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+
+	targets := []int64{
+		seedCandidate("acct-recovery-refresh", "refresh"),
+		seedCandidate("acct-recovery-device", "device"),
+	}
+	nonTargets := []int64{
+		seedCandidate("acct-recovery-access", "access"),
+		seedCandidate("acct-recovery-dead", "refresh"),
+		seedCandidate("acct-recovery-check", "refresh"),
+		seedCandidate("acct-recovery-code", "refresh"),
+		seedCandidate("acct-recovery-unpaused", "refresh"),
+		seedCandidate("acct-recovery-signature", "refresh"),
+	}
+	mutations := []struct {
+		id    int64
+		query string
+		args  []any
+	}{
+		{nonTargets[1], "UPDATE accounts SET status='dead_normal' WHERE id=?", nil},
+		{nonTargets[2], "UPDATE accounts SET last_check_state='error' WHERE id=?", nil},
+		{nonTargets[3], "UPDATE accounts SET last_check_error_code='other_error' WHERE id=?", nil},
+		{nonTargets[4], "UPDATE accounts SET polling_paused=0 WHERE id=?", nil},
+		{nonTargets[5], "UPDATE accounts SET pending_evidence_signature=? WHERE id=?", []any{otherSignature}},
+	}
+	for _, mutation := range mutations {
+		args := append(mutation.args, mutation.id)
+		if _, err := db.Exec(mutation.query, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fingerprint := func(id int64) string {
+		t.Helper()
+		var value string
+		if err := db.QueryRow(`SELECT status||'|'||token_type||'|'||last_check_state||'|'||
+			COALESCE(last_check_error_code,'')||'|'||polling_paused||'|'||COALESCE(pause_reason,'')||'|'||
+			COALESCE(pending_evidence_signature,'')||'|'||COALESCE(pending_detected_at,'')||'|'||COALESCE(next_retry_at,'')
+			FROM accounts WHERE id=?`, id).Scan(&value); err != nil {
+			t.Fatal(err)
+		}
+		return value
+	}
+	beforeNonTargets := make(map[int64]string, len(nonTargets))
+	for _, id := range nonTargets {
+		beforeNonTargets[id] = fingerprint(id)
+	}
+	var immutableBefore string
+	if err := db.QueryRow(`SELECT plan||'|'||raw_plan||'|'||COALESCE(current_expiry,'')||'|'||auth_expiry||'|'||hex(enc_credentials)||'|'||credential_key_id
+		FROM accounts WHERE id=?`, targets[0]).Scan(&immutableBefore); err != nil {
+		t.Fatal(err)
+	}
+
+	recovered, err := s.RecoverMisclassifiedSupplementalDenials(context.Background())
+	if err != nil || recovered != len(targets) {
+		t.Fatalf("recovered=%d err=%v", recovered, err)
+	}
+	for _, id := range targets {
+		assertAccountState(t, db, id, StateAlive, CheckOK, false)
+		var errorCode, retryAt, pauseReason, pendingSignature, pendingDetected sql.NullString
+		if err := db.QueryRow(`SELECT last_check_error_code,next_retry_at,pause_reason,pending_evidence_signature,pending_detected_at
+			FROM accounts WHERE id=?`, id).Scan(&errorCode, &retryAt, &pauseReason, &pendingSignature, &pendingDetected); err != nil {
+			t.Fatal(err)
+		}
+		if errorCode.Valid || retryAt.Valid || pauseReason.Valid || pendingSignature.Valid || pendingDetected.Valid {
+			t.Fatalf("recovery fields were not cleared for account %d", id)
+		}
+	}
+	for _, id := range nonTargets {
+		if after := fingerprint(id); after != beforeNonTargets[id] {
+			t.Fatalf("non-target account %d changed: before=%q after=%q", id, beforeNonTargets[id], after)
+		}
+	}
+	var immutableAfter string
+	if err := db.QueryRow(`SELECT plan||'|'||raw_plan||'|'||COALESCE(current_expiry,'')||'|'||auth_expiry||'|'||hex(enc_credentials)||'|'||credential_key_id
+		FROM accounts WHERE id=?`, targets[0]).Scan(&immutableAfter); err != nil {
+		t.Fatal(err)
+	}
+	if immutableAfter != immutableBefore {
+		t.Fatalf("business or credential fields changed: before=%q after=%q", immutableBefore, immutableAfter)
+	}
+	assertCount(t, db, "SELECT count(*) FROM status_change_log WHERE evidence_code='supplemental_denial_reclassified'", len(targets))
+	assertCount(t, db, "SELECT count(*) FROM status_change_log WHERE evidence_code='unexpected_non_json' AND review_decision='rejected' AND account_id IN ("+strconv.FormatInt(targets[0], 10)+","+strconv.FormatInt(targets[1], 10)+")", len(targets))
+	assertCount(t, db, "SELECT count(*) FROM status_change_log WHERE evidence_code='supplemental_denial_reclassified' AND evidence_level='contract_verified_live_pending' AND review_decision IS NULL", len(targets))
+	assertCount(t, db, "SELECT count(*) FROM status_change_log WHERE evidence_code='unexpected_non_json' AND review_decision='rejected' AND reviewed_at IS NOT NULL AND review_operator='startup_recovery'", len(targets))
+
+	recovered, err = s.RecoverMisclassifiedSupplementalDenials(context.Background())
+	if err != nil || recovered != 0 {
+		t.Fatalf("second recovery=%d err=%v", recovered, err)
+	}
+	assertCount(t, db, "SELECT count(*) FROM status_change_log WHERE evidence_code='supplemental_denial_reclassified'", len(targets))
+}
+
 func TestNormalExpiryWinsWithoutUpstreamAndKeepsAccountVisible(t *testing.T) {
 	s, db, keyring, client, now := newTestService(t)
 	id := seedAccount(t, db, keyring, "acct-expired", now, now.Add(-30*24*time.Hour))
@@ -497,6 +619,58 @@ func TestLegacyRefreshCredentialTreatsGenericDenialAsSupplemental(t *testing.T) 
 	if credentials.OAuthSource != "refresh" {
 		t.Fatalf("legacy credential source=%q", credentials.OAuthSource)
 	}
+}
+
+func TestDeviceCredentialRotationSurvivesGenericSupplementalDenial(t *testing.T) {
+	s, db, keyring, client, now := newTestService(t)
+	accessExpiry := now.Add(time.Hour)
+	client.exchangeExpiry = &accessExpiry
+	client.exchangeIDToken = "device-rotated-id-token"
+	client.errors["acct-refresh"] = &chatgpt.TypedError{Kind: chatgpt.ErrorPermissionDenied, StatusCode: 403, EvidenceCode: "http_403", EvidenceLevel: chatgpt.EvidenceContractVerifiedLivePending, PreserveBusinessState: true}
+	id := seedAccountPayload(t, db, keyring, "acct-refresh", "device", credentialPayload{
+		Access: jwtFor("acct-refresh", now.Add(-time.Hour)), Refresh: "device-refresh-fixture", OAuthSource: "device",
+	}, now.Add(24*time.Hour), now)
+	run, _, err := s.RefreshNow(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.AccountsOK != 1 || run.AccountsFailed != 0 {
+		t.Fatalf("run=%+v", run)
+	}
+	assertAccountState(t, db, id, StateAlive, CheckOK, false)
+	var envelope []byte
+	if err := db.QueryRow("SELECT enc_credentials FROM accounts WHERE id=?", id).Scan(&envelope); err != nil {
+		t.Fatal(err)
+	}
+	plaintext, err := keyring.Open(envelope, credentialcrypto.CredentialAAD(id, "device"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var credentials credentialPayload
+	if err := json.Unmarshal(plaintext, &credentials); err != nil {
+		t.Fatal(err)
+	}
+	zero(plaintext)
+	if credentials.Refresh != "device-refresh-fixture-rotated" || credentials.IDToken != "device-rotated-id-token" ||
+		credentials.OAuthSource != "device" || credentials.AccessExpiresAt == nil || !credentials.AccessExpiresAt.Equal(accessExpiry) {
+		t.Fatalf("persisted device credentials=%+v", credentials)
+	}
+}
+
+func TestUnknownCredentialSourceCannotBypassStatusValidation(t *testing.T) {
+	s, db, keyring, client, now := newTestService(t)
+	client.errors["acct-untrusted-source"] = &chatgpt.TypedError{Kind: chatgpt.ErrorPermissionDenied, StatusCode: 401, EvidenceCode: "http_401", EvidenceLevel: chatgpt.EvidenceContractVerifiedLivePending, PreserveBusinessState: true}
+	id := seedAccountPayload(t, db, keyring, "acct-untrusted-source", "access", credentialPayload{
+		Access: jwtFor("acct-untrusted-source", now.Add(time.Hour)), OAuthSource: "untrusted",
+	}, now.Add(24*time.Hour), now)
+	run, _, err := s.RefreshNow(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.AccountsOK != 0 || run.AccountsFailed != 1 || run.ErrorCounts["http_401"] != 1 {
+		t.Fatalf("run=%+v", run)
+	}
+	assertAccountState(t, db, id, StateAlive, CheckError, false)
 }
 
 func TestStructuredDenialAfterRefreshStillUsesBanEvidence(t *testing.T) {

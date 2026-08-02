@@ -84,6 +84,12 @@ func main() {
 		logger.Error("monitor recovery failed", "error_code", "monitor_recovery_failed")
 		os.Exit(1)
 	}
+	recovered, err := monitorService.RecoverMisclassifiedSupplementalDenials(ctx)
+	if err != nil {
+		logger.Error("monitor supplemental denial recovery failed", "error_code", "monitor_supplemental_recovery_failed")
+		os.Exit(1)
+	}
+	logger.Info("monitor supplemental denial recovery completed", "accounts_recovered", recovered)
 	settingsService, err := notify.NewSettingsService(database.DB(), keyring)
 	if err != nil {
 		logger.Error("settings initialization failed", "error_code", "settings_config_invalid")
