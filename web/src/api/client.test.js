@@ -27,4 +27,13 @@ describe('API client', () => {
     await expect(api.monitorAccounts()).rejects.toMatchObject({ status: 401 })
     expect(listener).toHaveBeenCalledOnce()
   })
+
+  it('explains duplicate account conflicts', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response({ code: 'provider_account_exists' }, 409)))
+    await expect(api.monitorAccounts()).rejects.toMatchObject({
+      status: 409,
+      code: 'provider_account_exists',
+      message: '账号已存在，无需重新导入',
+    })
+  })
 })
