@@ -61,7 +61,7 @@ export function summarizeMonitor(accounts = []) {
   const near = accounts.filter((item) => item.status === 'alive' && item.near_expiry)
   const banned = accounts.filter((item) => item.status === 'dead_banned')
   const retired = accounts.filter((item) => item.status === 'dead_normal')
-  const abnormalChecks = accounts.filter((item) => ['error', 'verification_required', 'contract_changed'].includes(item.last_check_state))
+  const abnormalChecks = accounts.filter((item) => ['error', 'verification_required', 'contract_changed', 'reauthorization_required'].includes(item.last_check_state))
   const survivalDays = banned.map((item) => Number(item.banned_survival_days)).filter(Number.isFinite)
   return {
     total: accounts.length,
@@ -79,6 +79,28 @@ export function monitorCheckIssue(account = {}) {
   if (!code) return null
 
   const credentialType = String(account.credential?.type || account.token_type || '').toLowerCase()
+  const oauthReasons = {
+    oauth_invalid_grant: ['授权已失效', 'OAuth 授权已失效（invalid_grant）', '上游已拒绝当前授权。可能是授权被撤销、授权会话失效，或 refresh token 已不再有效。'],
+    oauth_refresh_token_reused: ['检测到令牌轮换竞争', 'Refresh Token 已被重复使用', '系统检测到 refresh token 已被使用过。这通常表示另一个刷新请求或外部程序已完成令牌轮换，当前保存的旧令牌不能再次使用。'],
+    oauth_refresh_token_invalid: ['刷新令牌无效', 'Refresh Token 已失效', '上游确认当前 refresh token 无效或已撤销，系统已停止继续使用该令牌。'],
+    oauth_refresh_token_expired: ['刷新令牌已过期', 'Refresh Token 已过期', '当前 refresh token 已超过有效期，系统已停止无效重试。'],
+    oauth_session_terminated: ['授权会话已终止', 'OAuth 会话已终止', '与当前 refresh token 关联的 OAuth 会话已被终止或撤销。'],
+    oauth_refresh_unauthorized: ['刷新授权被拒绝', 'OAuth 刷新未经授权（HTTP 401）', 'OAuth Token 端点拒绝了当前刷新凭据，但未返回更具体的稳定原因。'],
+    oauth_refresh_forbidden: ['刷新授权被禁止', 'OAuth 刷新被禁止（HTTP 403）', 'OAuth Token 端点禁止当前刷新请求，当前授权需要重新建立。'],
+    oauth_refresh_token_missing: ['缺少刷新令牌', '缺少可用的 Refresh Token', 'Access Token 已需要刷新，但保存的凭据中没有可用于续期的 refresh token。'],
+  }
+  if (oauthReasons[code]) {
+    const [badge, title, detail] = oauthReasons[code]
+    return {
+      badge,
+      summary: `${badge}，需重新授权`,
+      title,
+      detail,
+      action: '请选择 OAuth、令牌或设备码重新授权入口；授权成功后系统会恢复自动轮询。',
+      rotationConflict: code === 'oauth_refresh_token_reused',
+      code,
+    }
+  }
   if (code === 'http_401') {
     if (credentialType === 'refresh' || credentialType === 'device') {
       return {
@@ -87,6 +109,7 @@ export function monitorCheckIssue(account = {}) {
         title: 'OAuth 令牌刷新被拒绝（HTTP 401）',
         detail: '系统在使用 refresh token 换取新 access token 时被上游拒绝。常见原因是同一 refresh token 被其他程序刷新后发生轮换、继续复用旧令牌，或上游撤销了当前授权会话。',
         action: '请按原授权方式重新授权，完成后执行“立即刷新”。不要在其他程序中继续使用原 refresh token。',
+        rotationConflict: false,
         code,
       }
     }

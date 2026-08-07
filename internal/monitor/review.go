@@ -26,6 +26,17 @@ func (s *Service) finalizeLegacyPendingBans(ctx context.Context) error {
 		return err
 	}
 	defer tx.Rollback()
+	now := s.now().UTC()
+	if _, err := tx.ExecContext(ctx, `UPDATE accounts SET
+		last_check_state='reauthorization_required',
+		last_check_error_code=CASE WHEN last_check_error_code='refresh_token_reused'
+			THEN 'oauth_refresh_token_reused' ELSE 'oauth_refresh_token_invalid' END,
+		polling_paused=1,pause_reason='reauthorization_required',next_retry_at=NULL,
+		pending_evidence_signature=NULL,pending_detected_at=NULL,updated_at=?
+		WHERE polling_paused=1 AND last_check_state='verification_required'
+		  AND last_check_error_code IN ('token_revoked','credential_revoked','refresh_token_reused')`, formatTime(now)); err != nil {
+		return err
+	}
 	rows, err := tx.QueryContext(ctx, `SELECT
 			a.id,a.status,a.import_time,a.pending_detected_at,e.id,
 			a.pending_evidence_signature,a.last_check_error_code
@@ -35,8 +46,7 @@ func (s *Service) finalizeLegacyPendingBans(ctx context.Context) error {
 		  AND a.pause_reason='evidence_review_required'
 		  AND a.last_check_state='verification_required'
 		  AND a.last_check_error_code IN (
-		    'account_disabled','account_deactivated','token_revoked',
-		    'credential_revoked','refresh_token_reused'
+		    'account_disabled','account_deactivated'
 		  )
 		  AND a.pending_evidence_signature IS NOT NULL
 		  AND a.pending_detected_at IS NOT NULL`)
@@ -59,8 +69,16 @@ func (s *Service) finalizeLegacyPendingBans(ctx context.Context) error {
 	if err := rows.Close(); err != nil {
 		return err
 	}
-	now := s.now().UTC()
 	for _, item := range candidates {
+		if item.signature != EvidenceSignatureFor("accounts_check", item.code, s.cfg.ParserVersion) {
+			if _, err := tx.ExecContext(ctx, `UPDATE accounts SET last_check_state='reauthorization_required',
+				last_check_error_code='oauth_refresh_token_invalid',polling_paused=1,pause_reason='reauthorization_required',
+				next_retry_at=NULL,pending_evidence_signature=NULL,pending_detected_at=NULL,updated_at=? WHERE id=?`,
+				formatTime(now), item.accountID); err != nil {
+				return err
+			}
+			continue
+		}
 		if s.registryLevel(ctx, tx, item.signature) == chatgpt.EvidenceUnverified {
 			continue
 		}
@@ -104,6 +122,10 @@ func (s *Service) ReviewEvidence(ctx context.Context, request ReviewRequest) (Re
 	if !strings.HasPrefix(request.Signature, "ev1:") || len(request.Signature) != 68 || (request.Decision != ReviewConfirm && request.Decision != ReviewReject) || request.Reason == "" || len(request.Reason) > 512 || strings.ContainsAny(request.Reason, "\r\n") || request.Operator == "" || len(request.Operator) > 128 {
 		return ReviewResult{}, errors.New("invalid evidence review request")
 	}
+	if request.Signature != EvidenceSignatureFor("accounts_check", "account_disabled", s.cfg.ParserVersion) &&
+		request.Signature != EvidenceSignatureFor("accounts_check", "account_deactivated", s.cfg.ParserVersion) {
+		return ReviewResult{}, &NotFoundError{}
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return ReviewResult{}, err
@@ -112,7 +134,8 @@ func (s *Service) ReviewEvidence(ctx context.Context, request ReviewRequest) (Re
 	now := s.now().UTC()
 	rows, err := tx.QueryContext(ctx, `SELECT a.id,a.status,a.import_time,a.pending_detected_at,e.id
 		FROM accounts a JOIN authorization_epochs e ON e.account_id=a.id AND e.ended_at IS NULL
-		WHERE a.polling_paused=1 AND a.pending_evidence_signature=? AND a.last_check_state='verification_required'`, request.Signature)
+		WHERE a.polling_paused=1 AND a.pending_evidence_signature=? AND a.last_check_state='verification_required'
+		  AND a.last_check_error_code IN ('account_disabled','account_deactivated')`, request.Signature)
 	if err != nil {
 		return ReviewResult{}, err
 	}
@@ -216,7 +239,10 @@ func insertReviewedChange(ctx context.Context, tx *sql.Tx, item reviewCandidate,
 }
 
 func PendingSignatures(ctx context.Context, db *sql.DB) ([]string, error) {
-	rows, err := db.QueryContext(ctx, `SELECT DISTINCT pending_evidence_signature FROM accounts WHERE polling_paused=1 AND last_check_state='verification_required' ORDER BY pending_evidence_signature`)
+	rows, err := db.QueryContext(ctx, `SELECT DISTINCT pending_evidence_signature FROM accounts
+		WHERE polling_paused=1 AND last_check_state='verification_required'
+		  AND last_check_error_code IN ('account_disabled','account_deactivated')
+		ORDER BY pending_evidence_signature`)
 	if err != nil {
 		return nil, err
 	}

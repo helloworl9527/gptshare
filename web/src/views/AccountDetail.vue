@@ -17,7 +17,7 @@ const confirming = ref(false)
 const cancelButton = ref(null)
 
 const statusLabel = computed(() => ({ alive: account.value?.near_expiry ? '临期存活' : '存活', dead_banned: '异常封号', dead_normal: '正常退役' })[account.value?.status] || '未知')
-const checkAbnormal = computed(() => ['error', 'verification_required', 'contract_changed'].includes(account.value?.last_check_state))
+const checkAbnormal = computed(() => ['error', 'verification_required', 'contract_changed', 'reauthorization_required'].includes(account.value?.last_check_state))
 const checkIssue = computed(() => checkAbnormal.value ? monitorCheckIssue(account.value) : null)
 
 function dateTime(value) {
@@ -45,7 +45,9 @@ async function refreshNow() {
     if (run.state === 'running') notice.value = `刷新已进入后台，运行编号 ${run.id}`
     else { notice.value = '刷新完成，当前快照已更新。'; await load() }
   } catch (reason) {
-    notice.value = reason.status === 409 ? '该账号正在刷新，请稍后再查看。' : reason.message
+    notice.value = reason.code === 'reauthorization_required'
+      ? '当前授权已失效，请先通过下方入口重新授权。'
+      : reason.status === 409 ? '该账号正在刷新，请稍后再查看。' : reason.message
   } finally { working.value = false }
 }
 
@@ -95,6 +97,9 @@ watch(confirming, async (open) => { if (open) { await nextTick(); cancelButton.v
           <p>{{ checkIssue?.detail || '下方业务状态保留最近一次可信结果。' }}</p>
           <p class="check-issue-action">
             处理：{{ checkIssue?.action || '请执行“立即刷新”后再次检查。' }}
+          </p>
+          <p v-if="account.last_check_state === 'reauthorization_required'" class="check-issue-action">
+            令牌轮换竞争：{{ checkIssue?.rotationConflict ? '已检测到' : '未检测到明确竞争信号' }}
           </p>
           <code v-if="account.last_check_error_code">错误码：{{ account.last_check_error_code }}</code>
         </div>

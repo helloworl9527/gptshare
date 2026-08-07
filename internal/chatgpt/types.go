@@ -40,13 +40,14 @@ const (
 type ErrorKind string
 
 const (
-	ErrorCredentialRevoked ErrorKind = "credential_revoked"
-	ErrorAccountDisabled   ErrorKind = "account_disabled"
-	ErrorPermissionDenied  ErrorKind = "permission_or_scope_denied"
-	ErrorRateLimited       ErrorKind = "rate_limited"
-	ErrorUpstreamTransient ErrorKind = "upstream_transient"
-	ErrorContractChanged   ErrorKind = "contract_changed"
-	ErrorInput             ErrorKind = "invalid_input"
+	ErrorCredentialRevoked     ErrorKind = "credential_revoked"
+	ErrorAccountDisabled       ErrorKind = "account_disabled"
+	ErrorPermissionDenied      ErrorKind = "permission_or_scope_denied"
+	ErrorRateLimited           ErrorKind = "rate_limited"
+	ErrorUpstreamTransient     ErrorKind = "upstream_transient"
+	ErrorContractChanged       ErrorKind = "contract_changed"
+	ErrorAuthorizationRequired ErrorKind = "authorization_required"
+	ErrorInput                 ErrorKind = "invalid_input"
 )
 
 type EvidenceLevel string

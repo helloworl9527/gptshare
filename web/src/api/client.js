@@ -61,6 +61,7 @@ function publicMessage(status, code) {
   if (code === 'phase_one_contract_changed') return '一期返回的数据格式已变化，请检查一期服务版本。'
   if (code === 'phase_one_monitor_timeout') return '一期响应超时，请稍后重试。'
   if (code === 'phase_one_monitor_unavailable') return '一期监控暂时不可用，请稍后重试。'
+  if (code === 'reauthorization_required') return '当前授权已失效，请先重新授权。'
   if (status === 401) return '登录状态已失效，请重新登录。'
   if (status === 403) return '安全校验未通过，请刷新页面后重试。'
   if (status === 404) return '请求的账号或运行记录不存在。'

@@ -135,7 +135,7 @@ func (k *Keyring) ReencryptAccounts(ctx context.Context, db *sql.DB) (int, error
 		if err != nil {
 			return 0, fmt.Errorf("reencrypt account %d: %w", item.id, err)
 		}
-		if _, err := tx.ExecContext(ctx, "UPDATE accounts SET enc_credentials=?,credential_key_id=? WHERE id=?", reencrypted, k.activeID, item.id); err != nil {
+		if _, err := tx.ExecContext(ctx, "UPDATE accounts SET enc_credentials=?,credential_key_id=?,credential_generation=credential_generation+1 WHERE id=?", reencrypted, k.activeID, item.id); err != nil {
 			return 0, err
 		}
 	}

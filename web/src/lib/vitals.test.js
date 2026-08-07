@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { monitorCheckIssue } from './vitals.js'
+import { monitorCheckIssue, summarizeMonitor } from './vitals.js'
 
 describe('monitorCheckIssue', () => {
   it.each(['refresh', 'device'])('explains %s credential refresh rejection with a concrete response', (type) => {
@@ -40,5 +40,30 @@ describe('monitorCheckIssue', () => {
 
   it('returns no issue when no monitoring error is present', () => {
     expect(monitorCheckIssue({ last_check_state: 'ok' })).toBeNull()
+  })
+
+  it.each([
+    ['oauth_invalid_grant', '授权已失效'],
+    ['oauth_refresh_token_invalid', '刷新令牌无效'],
+    ['oauth_refresh_token_expired', '刷新令牌已过期'],
+    ['oauth_session_terminated', '授权会话已终止'],
+    ['oauth_refresh_unauthorized', '刷新授权被拒绝'],
+    ['oauth_refresh_forbidden', '刷新授权被禁止'],
+    ['oauth_refresh_token_missing', '缺少刷新令牌'],
+  ])('explains stable OAuth code %s', (code, badge) => {
+    const issue = monitorCheckIssue({ last_check_state: 'reauthorization_required', last_check_error_code: code })
+    expect(issue.badge).toBe(badge)
+    expect(issue.action).toContain('重新授权')
+    expect(issue.code).toBe(code)
+  })
+
+  it('identifies refresh-token reuse as a detected rotation conflict', () => {
+    const issue = monitorCheckIssue({ last_check_error_code: 'oauth_refresh_token_reused' })
+    expect(issue.rotationConflict).toBe(true)
+    expect(issue.badge).toBe('检测到令牌轮换竞争')
+  })
+
+  it('includes reauthorization warnings in abnormal check totals', () => {
+    expect(summarizeMonitor([{ status: 'alive', last_check_state: 'reauthorization_required' }]).abnormalChecks).toBe(1)
   })
 })

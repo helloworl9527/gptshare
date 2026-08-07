@@ -577,7 +577,11 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
-          $ref: '#/components/responses/Conflict'
+          description: Refresh is already running or polling is paused; an authorization warning returns code reauthorization_required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '415':
           $ref: '#/components/responses/UnsupportedMediaType'
         '422':
@@ -1297,9 +1301,10 @@ components:
           minimum: 0
         last_check_state:
           type: string
-          enum: [pending, ok, error, verification_required, contract_changed]
+          enum: [pending, ok, error, verification_required, contract_changed, reauthorization_required]
         last_check_error_code:
           type: string
+          description: Stable sanitized monitor error code; OAuth authorization failures use the oauth_* codes and never include upstream response text or credential material
         next_retry_at:
           type: string
           format: date-time

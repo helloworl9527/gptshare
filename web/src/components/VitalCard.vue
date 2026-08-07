@@ -13,7 +13,7 @@ const visualState = computed(() => {
 })
 const stateLabel = computed(() => ({ alive: '存活', near: '临期', banned: '封号', retired: '正常退役' })[visualState.value])
 const stateCode = computed(() => ({ alive: 'ALIVE', near: 'EXPIRING', banned: 'BANNED', retired: 'RETIRED' })[visualState.value])
-const checkAbnormal = computed(() => ['error', 'verification_required', 'contract_changed'].includes(props.account.last_check_state))
+const checkAbnormal = computed(() => ['error', 'verification_required', 'contract_changed', 'reauthorization_required'].includes(props.account.last_check_state))
 const checkIssue = computed(() => checkAbnormal.value ? monitorCheckIssue(props.account) : null)
 
 function formatDate(value) {

@@ -381,6 +381,14 @@ func TestMonitorHTTPSRefreshContractCSRFConflictAndAsyncQuery(t *testing.T) {
 	if conflict["run_id"] != stub.run.ID {
 		t.Fatalf("conflict=%v", conflict)
 	}
+	stub.err = &monitor.ReauthorizationRequiredError{}
+	response = h.request(t, http.MethodPost, "/api/accounts/1/refresh", map[string]string{}, csrf, "")
+	assertStatus(t, response, http.StatusConflict)
+	var authorizationWarning map[string]any
+	decode(t, response, &authorizationWarning)
+	if authorizationWarning["code"] != "reauthorization_required" {
+		t.Fatalf("authorization warning=%v", authorizationWarning)
+	}
 }
 
 func TestMonitorHTTPSRealServiceRefreshPersistsSnapshotWithoutPlaintext(t *testing.T) {

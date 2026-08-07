@@ -178,7 +178,7 @@ func (c *Client) RefreshToken(ctx context.Context, refreshToken string) (TokenSe
 		return TokenSet{}, err
 	}
 	if status < 200 || status >= 300 {
-		return TokenSet{}, classifyHTTP(status, body)
+		return TokenSet{}, classifyOAuthRefreshHTTP(status, body)
 	}
 	return decodeTokenSet(body, "refresh")
 }
@@ -533,6 +533,77 @@ func classifyHTTP(status int, body []byte) error {
 	return newTypedError(ErrorContractChanged, status, "unexpected_http_"+strconv.Itoa(status), EvidenceUnverified, false, false, true, nil)
 }
 
+func classifyOAuthRefreshHTTP(status int, body []byte) error {
+	if status == http.StatusTooManyRequests || status >= 500 || status == 0 {
+		return classifyHTTP(status, body)
+	}
+	code, description := upstreamOAuthError(body)
+	combined := strings.ToLower(strings.TrimSpace(code + " " + description))
+	stableCode := ""
+	switch {
+	case strings.Contains(combined, "refresh_token_reused"), strings.Contains(combined, "refresh token reused"), strings.Contains(combined, "already been used"):
+		stableCode = "oauth_refresh_token_reused"
+	case strings.Contains(combined, "session") && (strings.Contains(combined, "terminated") || strings.Contains(combined, "revoked")):
+		stableCode = "oauth_session_terminated"
+	case strings.Contains(combined, "refresh") && strings.Contains(combined, "expired"):
+		stableCode = "oauth_refresh_token_expired"
+	case strings.Contains(combined, "refresh") && (strings.Contains(combined, "missing") || strings.Contains(combined, "required")):
+		stableCode = "oauth_refresh_token_missing"
+	case strings.Contains(combined, "refresh") && (strings.Contains(combined, "invalid") || strings.Contains(combined, "revoked")):
+		stableCode = "oauth_refresh_token_invalid"
+	case strings.Contains(combined, "token_revoked"), strings.Contains(combined, "credential_revoked"), strings.Contains(combined, "account_disabled"), strings.Contains(combined, "account_deactivated"):
+		stableCode = "oauth_refresh_token_invalid"
+	case strings.EqualFold(strings.TrimSpace(code), "invalid_grant"):
+		stableCode = "oauth_invalid_grant"
+	case status == http.StatusUnauthorized:
+		stableCode = "oauth_refresh_unauthorized"
+	case status == http.StatusForbidden:
+		stableCode = "oauth_refresh_forbidden"
+	case status >= 400 && status < 500:
+		stableCode = "oauth_refresh_token_invalid"
+	}
+	if stableCode != "" {
+		return newTypedError(ErrorAuthorizationRequired, status, stableCode, EvidenceContractVerifiedLivePending, false, false, true, nil)
+	}
+	return classifyHTTP(status, body)
+}
+
+func upstreamOAuthError(body []byte) (string, string) {
+	var payload struct {
+		Error            json.RawMessage `json:"error"`
+		ErrorDescription string          `json:"error_description"`
+		Code             string          `json:"code"`
+	}
+	if json.Unmarshal(body, &payload) != nil {
+		return "", ""
+	}
+	code := payload.Code
+	if len(payload.Error) > 0 {
+		var text string
+		if json.Unmarshal(payload.Error, &text) == nil {
+			code = text
+		} else {
+			var nested struct {
+				Code        string `json:"code"`
+				Type        string `json:"type"`
+				Description string `json:"description"`
+				Message     string `json:"message"`
+			}
+			if json.Unmarshal(payload.Error, &nested) == nil {
+				if nested.Code != "" {
+					code = nested.Code
+				} else {
+					code = nested.Type
+				}
+				if payload.ErrorDescription == "" {
+					payload.ErrorDescription = nested.Description + " " + nested.Message
+				}
+			}
+		}
+	}
+	return code, payload.ErrorDescription
+}
+
 func upstreamErrorCode(body []byte) string {
 	var payload struct {
 		Code  string `json:"code"`
@@ -565,6 +636,8 @@ func stateForError(kind ErrorKind) AccountState {
 		return StateRateLimited
 	case ErrorUpstreamTransient:
 		return StateUpstreamTransient
+	case ErrorAuthorizationRequired:
+		return StateCredentialRevoked
 	default:
 		return StateContractChanged
 	}

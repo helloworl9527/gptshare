@@ -18,6 +18,13 @@ const abnormalAccount = {
   credential: { type: 'refresh', configured: true },
 }
 
+const reauthorizationAccount = {
+  ...abnormalAccount,
+  last_check_state: 'reauthorization_required',
+  last_check_error_code: 'oauth_refresh_token_reused',
+  polling_paused: true,
+}
+
 function response(body) {
   return { ok: true, status: 200, headers: new Headers(), json: async () => body }
 }
@@ -56,5 +63,35 @@ describe('monitor error presentation', () => {
     expect(wrapper.text()).toContain('同一 refresh token 被其他程序刷新后发生轮换')
     expect(wrapper.text()).toContain('按原授权方式重新授权')
     expect(wrapper.text()).toContain('错误码：http_401')
+  })
+
+  it('shows detected token rotation competition and reauthorization entry points', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response(reauthorizationAccount)))
+    const placeholder = { template: '<div />' }
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/monitor/accounts/:id', component: AccountDetail },
+        { path: '/monitor/import', name: 'import', component: placeholder },
+        { path: '/monitor/accounts', component: placeholder },
+        { path: '/login', component: placeholder },
+        { path: '/', component: placeholder },
+        { path: '/allocation/accounts', component: placeholder },
+        { path: '/allocation/cards', component: placeholder },
+        { path: '/allocation/allocations', component: placeholder },
+        { path: '/settings', component: placeholder },
+      ],
+    })
+    await router.push('/monitor/accounts/7')
+    await router.isReady()
+    const wrapper = mount(AccountDetail, { global: { plugins: [router] } })
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('Refresh Token 已被重复使用')
+    expect(wrapper.text()).toContain('令牌轮换')
+    expect(wrapper.text()).toContain('令牌轮换竞争：已检测到')
+    expect(wrapper.text()).toContain('错误码：oauth_refresh_token_reused')
+    expect(wrapper.text()).toContain('OAuth 重新授权')
+    expect(wrapper.text()).toContain('设备码重新授权')
   })
 })

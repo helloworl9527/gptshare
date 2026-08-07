@@ -259,6 +259,14 @@ func TestAuthExpiryStableReauthorizePreservesEpochAndFailureRollsBack(t *testing
 	newExpiry := originalExpiry.Add(30 * 24 * time.Hour)
 	service.client.(*fakeClient).status.SubscriptionExpiry = &newExpiry
 	service.now = func() time.Time { return time.Date(2026, 7, 23, 0, 0, 0, 0, time.UTC) }
+	if _, err := database.DB().Exec(`UPDATE accounts SET last_check_state='reauthorization_required',last_check_error_code='oauth_invalid_grant',
+		polling_paused=1,pause_reason='reauthorization_required',next_retry_at=NULL WHERE id=?`, account.ID); err != nil {
+		t.Fatal(err)
+	}
+	var generationBefore int64
+	if err := database.DB().QueryRow("SELECT credential_generation FROM accounts WHERE id=?", account.ID).Scan(&generationBefore); err != nil {
+		t.Fatal(err)
+	}
 	account, err = service.ReauthorizeByToken(context.Background(), account.ID, &TokenInput{AccessToken: "second-access"})
 	if err != nil || !account.AuthExpiry.Equal(newExpiry) {
 		t.Fatalf("reauthorize account=%+v err=%v", account, err)
@@ -268,6 +276,15 @@ func TestAuthExpiryStableReauthorizePreservesEpochAndFailureRollsBack(t *testing
 	database.DB().QueryRow("SELECT count(*) FROM status_change_log WHERE account_id=?", account.ID).Scan(&logs)
 	if epochs != 2 || ended != 1 || logs != 1 {
 		t.Fatalf("epochs=%d ended=%d logs=%d", epochs, ended, logs)
+	}
+	var generationAfter int64
+	var lastCheck string
+	var paused bool
+	if err := database.DB().QueryRow("SELECT credential_generation,last_check_state,polling_paused FROM accounts WHERE id=?", account.ID).Scan(&generationAfter, &lastCheck, &paused); err != nil {
+		t.Fatal(err)
+	}
+	if generationAfter != generationBefore+1 || lastCheck != "ok" || paused {
+		t.Fatalf("reauthorization recovery generation=%d->%d state=%s paused=%v", generationBefore, generationAfter, lastCheck, paused)
 	}
 
 	service.client.(*fakeClient).status.ProviderAccountID = "different-account"
@@ -338,15 +355,20 @@ func TestDatabasePlaintextScanAndBulkKeyRotation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var generationBefore int64
+	if err := database.DB().QueryRow("SELECT credential_generation FROM accounts WHERE id=?", account.ID).Scan(&generationBefore); err != nil {
+		t.Fatal(err)
+	}
 	count, err := rotating.ReencryptAccounts(context.Background(), database.DB())
 	if err != nil || count != 3 {
 		t.Fatalf("rotation count=%d err=%v", count, err)
 	}
 	var envelope []byte
 	var keyID string
-	database.DB().QueryRow("SELECT enc_credentials,credential_key_id FROM accounts WHERE id=?", account.ID).Scan(&envelope, &keyID)
-	if keyID != "new" {
-		t.Fatalf("key id=%q", keyID)
+	var generationAfter int64
+	database.DB().QueryRow("SELECT enc_credentials,credential_key_id,credential_generation FROM accounts WHERE id=?", account.ID).Scan(&envelope, &keyID, &generationAfter)
+	if keyID != "new" || generationAfter != generationBefore+1 {
+		t.Fatalf("key id=%q generation=%d->%d", keyID, generationBefore, generationAfter)
 	}
 	plaintext, err := rotating.Open(envelope, credentialcrypto.CredentialAAD(account.ID, "access"))
 	if err != nil || !bytes.Contains(plaintext, []byte(secret)) {

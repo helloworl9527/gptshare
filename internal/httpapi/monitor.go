@@ -30,6 +30,7 @@ func registerMonitorRoutes(router *gin.Engine, manager *auth.Manager, service Mo
 			var conflict *monitor.ConflictError
 			var missing *monitor.NotFoundError
 			var paused *monitor.PausedError
+			var reauthorizationRequired *monitor.ReauthorizationRequiredError
 			switch {
 			case errors.As(err, &conflict):
 				c.JSON(http.StatusConflict, gin.H{"code": "refresh_in_progress", "message": "account refresh already running", "request_id": c.GetString("request_id"), "run_id": conflict.RunID})
@@ -37,6 +38,8 @@ func registerMonitorRoutes(router *gin.Engine, manager *auth.Manager, service Mo
 				writeError(c, http.StatusNotFound, "account_not_found", "account not found")
 			case errors.As(err, &paused):
 				writeError(c, http.StatusConflict, "evidence_review_required", "account polling is paused for evidence review")
+			case errors.As(err, &reauthorizationRequired):
+				writeError(c, http.StatusConflict, "reauthorization_required", "account reauthorization is required")
 			default:
 				writeError(c, http.StatusInternalServerError, "refresh_failed", "account refresh could not be started")
 			}

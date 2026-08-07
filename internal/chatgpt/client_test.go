@@ -290,8 +290,44 @@ func TestRefreshEndpointHTMLDenialRemainsCredentialFailure(t *testing.T) {
 	defer server.Close()
 	_, err := NewClient(Config{TokenURL: server.URL}).RefreshToken(context.Background(), "refresh-placeholder")
 	var typed *TypedError
-	if !errors.As(err, &typed) || typed.Kind != ErrorPermissionDenied || typed.EvidenceCode != "http_401" {
+	if !errors.As(err, &typed) || typed.Kind != ErrorAuthorizationRequired || typed.EvidenceCode != "oauth_refresh_unauthorized" || typed.BannedCandidate {
 		t.Fatalf("refresh error=%#v", err)
+	}
+}
+
+func TestOAuthRefreshErrorsHaveStableSanitizedCodes(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		body   string
+		code   string
+	}{
+		{"invalid grant string", 400, `{"error":"invalid_grant"}`, "oauth_invalid_grant"},
+		{"reused", 400, `{"error":"invalid_grant","error_description":"refresh token already been used"}`, "oauth_refresh_token_reused"},
+		{"invalid", 400, `{"error":"invalid_grant","error_description":"refresh token is invalid"}`, "oauth_refresh_token_invalid"},
+		{"expired", 400, `{"error":"invalid_grant","error_description":"refresh token expired"}`, "oauth_refresh_token_expired"},
+		{"terminated", 400, `{"error":"invalid_grant","error_description":"session terminated"}`, "oauth_session_terminated"},
+		{"unauthorized", 401, `{"error":"unauthorized"}`, "oauth_refresh_unauthorized"},
+		{"forbidden", 403, `{"error":{"code":"access_denied"}}`, "oauth_refresh_forbidden"},
+		{"missing", 400, `{"error":"invalid_request","error_description":"refresh token is required"}`, "oauth_refresh_token_missing"},
+		{"token endpoint account disabled is not ban evidence", 400, `{"error":{"code":"account_disabled"}}`, "oauth_refresh_token_invalid"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(test.status)
+				_, _ = w.Write([]byte(test.body))
+			}))
+			defer server.Close()
+			_, err := NewClient(Config{TokenURL: server.URL}).RefreshToken(context.Background(), "refresh-placeholder")
+			var typed *TypedError
+			if !errors.As(err, &typed) || typed.Kind != ErrorAuthorizationRequired || typed.EvidenceCode != test.code || typed.BannedCandidate || typed.Retryable || !typed.PreserveBusinessState {
+				t.Fatalf("refresh error=%#v", err)
+			}
+			if strings.Contains(err.Error(), "refresh-placeholder") || strings.Contains(err.Error(), test.body) {
+				t.Fatal("credential or upstream body escaped through error")
+			}
+		})
 	}
 }
 

@@ -12,10 +12,11 @@ const (
 	StateDeadNormal = "dead_normal"
 	StateDeadBanned = "dead_banned"
 
-	CheckOK                   = "ok"
-	CheckError                = "error"
-	CheckVerificationRequired = "verification_required"
-	CheckContractChanged      = "contract_changed"
+	CheckOK                      = "ok"
+	CheckError                   = "error"
+	CheckVerificationRequired    = "verification_required"
+	CheckContractChanged         = "contract_changed"
+	CheckReauthorizationRequired = "reauthorization_required"
 )
 
 type Client interface {
@@ -75,6 +76,12 @@ func (*NotFoundError) Error() string { return "monitor: record not found" }
 type PausedError struct{}
 
 func (*PausedError) Error() string { return "monitor: account polling is paused for evidence review" }
+
+type ReauthorizationRequiredError struct{}
+
+func (*ReauthorizationRequiredError) Error() string {
+	return "monitor: account reauthorization is required"
+}
 
 type ReviewDecision string
 

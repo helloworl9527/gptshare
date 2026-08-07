@@ -15,7 +15,7 @@ import (
 
 func (s *Service) loadDueAccounts(ctx context.Context, onlyID int64) ([]accountRecord, error) {
 	query := `SELECT a.id,a.provider_account_id,a.token_type,a.enc_credentials,a.auth_expiry,a.status,a.import_time,
-		a.last_check_state,a.polling_paused,e.id
+		a.last_check_state,a.polling_paused,e.id,a.credential_generation
 		FROM accounts a JOIN authorization_epochs e ON e.account_id=a.id AND e.ended_at IS NULL
 		WHERE a.deleted_at IS NULL`
 	args := []any{}
@@ -36,7 +36,7 @@ func (s *Service) loadDueAccounts(ctx context.Context, onlyID int64) ([]accountR
 	for rows.Next() {
 		var record accountRecord
 		var authExpiry, imported string
-		if err := rows.Scan(&record.ID, &record.ProviderID, &record.TokenType, &record.Envelope, &authExpiry, &record.Status, &imported, &record.LastCheck, &record.Paused, &record.EpochID); err != nil {
+		if err := rows.Scan(&record.ID, &record.ProviderID, &record.TokenType, &record.Envelope, &authExpiry, &record.Status, &imported, &record.LastCheck, &record.Paused, &record.EpochID, &record.Generation); err != nil {
 			return nil, err
 		}
 		record.AuthExpiry, err = parseTime(authExpiry)
@@ -50,6 +50,17 @@ func (s *Service) loadDueAccounts(ctx context.Context, onlyID int64) ([]accountR
 		records = append(records, record)
 	}
 	return records, rows.Err()
+}
+
+func (s *Service) loadAccountSnapshot(ctx context.Context, accountID int64) (accountRecord, error) {
+	records, err := s.loadDueAccounts(ctx, accountID)
+	if err != nil {
+		return accountRecord{}, err
+	}
+	if len(records) != 1 {
+		return accountRecord{}, &NotFoundError{}
+	}
+	return records[0], nil
 }
 
 func (s *Service) createRun(ctx context.Context, trigger string, accountID *int64, total int) (Run, error) {
@@ -120,22 +131,32 @@ func (s *Service) GetRun(ctx context.Context, runID string) (Run, error) {
 	return run, nil
 }
 
-func (s *Service) applyResult(ctx context.Context, runID string, record accountRecord, outcome pollResult, interval time.Duration) error {
+func (s *Service) applyResult(ctx context.Context, runID string, record accountRecord, outcome pollResult, interval time.Duration) (bool, error) {
+	if outcome.skipped {
+		return false, nil
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer tx.Rollback()
 	now := s.now().UTC()
 	var currentStatus, currentPlan, currentRawPlan, currentExpiry, lastCheck, currentLabel string
-	var currentExpiryNull, currentEmail sql.NullString
+	var currentExpiryNull, currentEmail, currentDeadAt, currentDeathType sql.NullString
+	var currentSurvival sql.NullFloat64
 	var paused bool
-	if err := tx.QueryRowContext(ctx, `SELECT status,plan,raw_plan,current_expiry,last_check_state,polling_paused,email,label FROM accounts WHERE id=? AND deleted_at IS NULL`, record.ID).
-		Scan(&currentStatus, &currentPlan, &currentRawPlan, &currentExpiryNull, &lastCheck, &paused, &currentEmail, &currentLabel); err != nil {
-		return err
+	var currentGeneration int64
+	if err := tx.QueryRowContext(ctx, `SELECT status,plan,raw_plan,current_expiry,last_check_state,polling_paused,email,label,credential_generation,
+		dead_at,death_type,banned_survival_days FROM accounts WHERE id=? AND deleted_at IS NULL`, record.ID).
+		Scan(&currentStatus, &currentPlan, &currentRawPlan, &currentExpiryNull, &lastCheck, &paused, &currentEmail, &currentLabel, &currentGeneration,
+			&currentDeadAt, &currentDeathType, &currentSurvival); err != nil {
+		return false, err
+	}
+	if outcome.generation != 0 && currentGeneration != outcome.generation {
+		return false, nil
 	}
 	if paused && outcome.code != "normal_expiry" {
-		return nil
+		return false, nil
 	}
 	if currentExpiryNull.Valid {
 		currentExpiry = currentExpiryNull.String
@@ -145,9 +166,12 @@ func (s *Service) applyResult(ctx context.Context, runID string, record accountR
 	code := outcome.code
 	signature := EvidenceSignatureFor(outcome.endpoint, code, s.cfg.ParserVersion)
 	newStatus, newPlan, newRawPlan, newExpiry, newCheck := currentStatus, currentPlan, currentRawPlan, currentExpiry, lastCheck
-	var deadAt any
-	var deathType any
+	var deadAt any = nullableSQLString(currentDeadAt)
+	var deathType any = nullableSQLString(currentDeathType)
 	var survival any
+	if currentSurvival.Valid {
+		survival = currentSurvival.Float64
+	}
 	var nextRetry any
 	var pauseReason any
 	var pendingSignature any
@@ -159,7 +183,7 @@ func (s *Service) applyResult(ctx context.Context, runID string, record accountR
 		newStatus, newCheck = StateDeadNormal, CheckOK
 		deadAt, deathType = formatTime(record.AuthExpiry), "normal_expiry"
 		if err := closeEpoch(tx, record.EpochID, StateDeadNormal, record.AuthExpiry, nil); err != nil {
-			return err
+			return false, err
 		}
 	} else if outcome.supplementalUnavailable {
 		newCheck = CheckOK
@@ -199,7 +223,7 @@ func (s *Service) applyResult(ctx context.Context, runID string, record accountR
 			}
 			survival = days
 			if err := closeEpoch(tx, record.EpochID, StateDeadBanned, now, &days); err != nil {
-				return err
+				return false, err
 			}
 		} else if candidate {
 			newCheck, pollingPaused = CheckContractChanged, 1
@@ -207,17 +231,18 @@ func (s *Service) applyResult(ctx context.Context, runID string, record accountR
 		} else if level == chatgpt.EvidenceUnverified || outcome.typed.Kind == chatgpt.ErrorContractChanged {
 			newCheck, pollingPaused = CheckContractChanged, 1
 			pauseReason, pendingSignature, pendingDetected = "contract_changed", signature, formatTime(now)
+		} else if isAuthorizationFailure(outcome.typed) {
+			newCheck, pollingPaused = CheckReauthorizationRequired, 1
+			pauseReason = "reauthorization_required"
+			nextRetry = nil
+			pendingSignature = nil
+			pendingDetected = nil
 		} else {
 			newCheck = CheckError
 			nextRetry = formatTime(now.Add(s.retryDelay(outcome.typed)))
 		}
 	}
 
-	if len(outcome.envelope) > 0 {
-		if _, err := tx.ExecContext(ctx, "UPDATE accounts SET enc_credentials=?,credential_key_id=? WHERE id=?", outcome.envelope, s.cipher.ActiveKeyID(), record.ID); err != nil {
-			return err
-		}
-	}
 	nextDue := nextRetry
 	if nextDue == nil && newCheck == CheckOK && newStatus == StateAlive {
 		nextDue = formatTime(now.Add(interval + s.jitter(record.ID, interval)))
@@ -226,7 +251,7 @@ func (s *Service) applyResult(ctx context.Context, runID string, record accountR
 	if _, err := tx.ExecContext(ctx, `UPDATE accounts SET plan=?,raw_plan=?,current_expiry=?,status=?,last_alive_at=CASE WHEN ?='alive' AND ?='ok' THEN ? ELSE last_alive_at END,
 		dead_at=?,death_type=?,banned_survival_days=?,last_check_state=?,last_check_error_code=?,next_retry_at=?,polling_paused=?,pause_reason=?,pending_evidence_signature=?,pending_detected_at=?,updated_at=? WHERE id=?`,
 		newPlan, newRawPlan, nullable(newExpiry), newStatus, newStatus, newCheck, formatTime(now), deadAt, deathType, survival, newCheck, nullableError(newCheck, code), nextDue, pollingPaused, pauseReason, pendingSignature, pendingDetected, formatTime(now), record.ID); err != nil {
-		return err
+		return false, err
 	}
 	if fillEmail != nil || fillLabel != nil {
 		if _, err := tx.ExecContext(ctx, `UPDATE accounts SET
@@ -235,7 +260,7 @@ func (s *Service) applyResult(ctx context.Context, runID string, record accountR
 			updated_at=?
 			WHERE id=? AND deleted_at IS NULL`,
 			fillEmail, fillEmail, fillLabel, fillLabel, formatTime(now), record.ID); err != nil {
-			return err
+			return false, err
 		}
 	}
 	changes := []struct{ field, from, to string }{{"status", currentStatus, newStatus}, {"plan", currentPlan, newPlan}, {"current_expiry", currentExpiry, newExpiry}, {"last_check_state", lastCheck, newCheck}}
@@ -244,15 +269,18 @@ func (s *Service) applyResult(ctx context.Context, runID string, record accountR
 			continue
 		}
 		if err := insertChange(ctx, tx, record.ID, record.EpochID, now, change.field, change.from, change.to, code, level, signature, reviewDecision, runID); err != nil {
-			return err
+			return false, err
 		}
 	}
 	if currentStatus != StateDeadBanned && newStatus == StateDeadBanned {
 		if _, err := insertAlert(ctx, tx, record.ID, record.EpochID, now); err != nil {
-			return err
+			return false, err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func isStableBanCandidate(typed *chatgpt.TypedError) bool {
@@ -262,8 +290,6 @@ func isStableBanCandidate(typed *chatgpt.TypedError) bool {
 	switch typed.EvidenceCode {
 	case "account_disabled", "account_deactivated":
 		return typed.Kind == chatgpt.ErrorAccountDisabled
-	case "token_revoked", "credential_revoked", "refresh_token_reused":
-		return typed.Kind == chatgpt.ErrorCredentialRevoked
 	default:
 		return false
 	}
@@ -337,6 +363,13 @@ func nullableError(check, code string) any {
 		return nil
 	}
 	return code
+}
+
+func nullableSQLString(value sql.NullString) any {
+	if !value.Valid {
+		return nil
+	}
+	return value.String
 }
 
 func fillOnlyEmailProjection(currentEmail sql.NullString, currentLabel, providerID string, outcome pollResult) (any, any) {

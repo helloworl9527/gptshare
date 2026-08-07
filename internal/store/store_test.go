@@ -36,8 +36,8 @@ func TestOpenAppliesAndRepeatsMigrations(t *testing.T) {
 	if err := second.db.QueryRow("SELECT count(*) FROM schema_migrations").Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != 5 {
-		t.Fatalf("migration count = %d, want 5", count)
+	if count != 6 {
+		t.Fatalf("migration count = %d, want 6", count)
 	}
 	assertRequiredSchema(t, second.db)
 	assertPragmas(t, second.db)
@@ -70,7 +70,7 @@ func TestAccountsEmailMigrationFromSchemaThree(t *testing.T) {
 
 	upgraded, err := Open(ctx, dbPath, repositoryMigrations(t))
 	if err != nil {
-		t.Fatalf("upgrade to schema 5: %v", err)
+		t.Fatalf("upgrade to schema 6: %v", err)
 	}
 	defer upgraded.Close()
 	after := rowCounts(t, upgraded.db, "accounts", "authorization_epochs", "status_change_log")
@@ -80,11 +80,15 @@ func TestAccountsEmailMigrationFromSchemaThree(t *testing.T) {
 		}
 	}
 	var email sql.NullString
-	if err := upgraded.db.QueryRow("SELECT email FROM accounts WHERE provider_account_id='acct-schema-three'").Scan(&email); err != nil {
+	var generation int64
+	if err := upgraded.db.QueryRow("SELECT email,credential_generation FROM accounts WHERE provider_account_id='acct-schema-three'").Scan(&email, &generation); err != nil {
 		t.Fatal(err)
 	}
 	if email.Valid {
 		t.Fatalf("email default=%q, want NULL", email.String)
+	}
+	if generation != 1 {
+		t.Fatalf("credential_generation=%d want=1", generation)
 	}
 	var migrationCount, userVersion int
 	if err := upgraded.db.QueryRow("SELECT count(*) FROM schema_migrations").Scan(&migrationCount); err != nil {
@@ -93,7 +97,7 @@ func TestAccountsEmailMigrationFromSchemaThree(t *testing.T) {
 	if err := upgraded.db.QueryRow("PRAGMA user_version").Scan(&userVersion); err != nil {
 		t.Fatal(err)
 	}
-	if migrationCount != 5 || userVersion != 5 {
+	if migrationCount != 6 || userVersion != 6 {
 		t.Fatalf("migration_count=%d user_version=%d", migrationCount, userVersion)
 	}
 }
@@ -429,7 +433,7 @@ func assertRequiredSchema(t *testing.T, db *sql.DB) {
 
 func assertPragmas(t *testing.T, db *sql.DB) {
 	t.Helper()
-	checks := map[string]any{"foreign_keys": 1, "journal_mode": "wal", "busy_timeout": busyTimeoutMS, "user_version": 5}
+	checks := map[string]any{"foreign_keys": 1, "journal_mode": "wal", "busy_timeout": busyTimeoutMS, "user_version": 6}
 	for pragma, want := range checks {
 		var got any
 		if err := db.QueryRow("PRAGMA " + pragma).Scan(&got); err != nil {

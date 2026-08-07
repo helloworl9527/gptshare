@@ -29,7 +29,10 @@ func (f fakeSource) List(context.Context) ([]account.Account, error) { return f.
 
 func TestListStatusAndBatchStayInProcess(t *testing.T) {
 	expiry := time.Now().UTC().Add(time.Hour)
-	facade, err := New(fakeSource{items: []account.Account{{ProviderAccountID: "provider-1", AuthExpiry: expiry, Status: "alive", Plan: "plus"}}})
+	facade, err := New(fakeSource{items: []account.Account{{
+		ProviderAccountID: "provider-1", AuthExpiry: expiry, Status: "alive", Plan: "plus",
+		LastCheckState: "reauthorization_required", LastCheckErrorCode: "oauth_refresh_token_reused", PollingPaused: true,
+	}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +48,7 @@ func TestListStatusAndBatchStayInProcess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if statuses["provider-1"].MonitorStatus != "alive" || statuses["missing"].MonitorStatus != "not_found" {
+	if statuses["provider-1"].MonitorStatus != "alive" || statuses["provider-1"].SyncErrorCode != "" || statuses["missing"].MonitorStatus != "not_found" {
 		t.Fatalf("unexpected statuses: %#v", statuses)
 	}
 	if !facade.Available(context.Background()) {

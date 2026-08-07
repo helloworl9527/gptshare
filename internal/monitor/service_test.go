@@ -35,10 +35,22 @@ type fakeClient struct {
 	exchangeSecrets []string
 	exchangeExpiry  *time.Time
 	exchangeIDToken string
+	exchangeErr     *chatgpt.TypedError
+	exchangeHook    func(chatgpt.CredentialKind, string) (chatgpt.TokenSet, error)
 }
 
 func (f *fakeClient) ExchangeCredential(_ context.Context, kind chatgpt.CredentialKind, secret string) (chatgpt.TokenSet, error) {
 	f.exchanges.Add(1)
+	f.mu.Lock()
+	hook, configuredErr := f.exchangeHook, f.exchangeErr
+	f.mu.Unlock()
+	if hook != nil {
+		return hook(kind, secret)
+	}
+	if configuredErr != nil {
+		copy := *configuredErr
+		return chatgpt.TokenSet{}, &copy
+	}
 	if kind == chatgpt.CredentialRefresh {
 		f.mu.Lock()
 		f.exchangeSecrets = append(f.exchangeSecrets, secret)
@@ -47,6 +59,120 @@ func (f *fakeClient) ExchangeCredential(_ context.Context, kind chatgpt.Credenti
 		return chatgpt.TokenSet{AccessToken: jwtFor("acct-refresh", time.Now().Add(time.Hour)), RefreshToken: secret + "-rotated", IDToken: idToken, AccessExpiresAt: expiry}, nil
 	}
 	return chatgpt.TokenSet{}, errors.New("unexpected exchange")
+}
+
+func TestOAuthRefreshFailureRequiresReauthorizationWithoutChangingBusinessState(t *testing.T) {
+	s, db, keyring, client, now := newTestService(t)
+	id := seedAccountPayload(t, db, keyring, "acct-refresh", "refresh", credentialPayload{
+		Access: jwtFor("acct-refresh", now.Add(-time.Hour)), Refresh: "sanitized-refresh-fixture", OAuthSource: "refresh",
+	}, now.Add(24*time.Hour), now.Add(-48*time.Hour))
+	client.exchangeErr = authorizationRequired("oauth_refresh_token_reused")
+
+	run, done, err := s.RefreshNow(context.Background(), id)
+	if err != nil || !done || run.AccountsFailed != 1 || run.ErrorCounts["oauth_refresh_token_reused"] != 1 {
+		t.Fatalf("run=%+v done=%v err=%v", run, done, err)
+	}
+	assertAccountState(t, db, id, StateAlive, CheckReauthorizationRequired, true)
+	var code, pause string
+	var nextRetry, endedAt sql.NullString
+	if err := db.QueryRow(`SELECT last_check_error_code,pause_reason,next_retry_at,
+		(SELECT ended_at FROM authorization_epochs WHERE account_id=accounts.id ORDER BY id DESC LIMIT 1)
+		FROM accounts WHERE id=?`, id).Scan(&code, &pause, &nextRetry, &endedAt); err != nil {
+		t.Fatal(err)
+	}
+	if code != "oauth_refresh_token_reused" || pause != "reauthorization_required" || nextRetry.Valid || endedAt.Valid {
+		t.Fatalf("code=%q pause=%q retry=%v ended=%v", code, pause, nextRetry, endedAt)
+	}
+	assertCount(t, db, "SELECT count(*) FROM alert_events", 0)
+	if _, _, err := s.RefreshNow(context.Background(), id); err == nil {
+		t.Fatal("manual refresh of authorization warning unexpectedly started")
+	} else {
+		var required *ReauthorizationRequiredError
+		if !errors.As(err, &required) {
+			t.Fatalf("manual refresh error=%T %v", err, err)
+		}
+	}
+}
+
+func TestLegacyGenericRefreshDenialIsNormalizedToStableOAuthCode(t *testing.T) {
+	s, db, keyring, client, now := newTestService(t)
+	id := seedAccountPayload(t, db, keyring, "acct-refresh", "refresh", credentialPayload{
+		Access: jwtFor("acct-refresh", now.Add(-time.Hour)), Refresh: "sanitized-refresh-fixture", OAuthSource: "refresh",
+	}, now.Add(24*time.Hour), now)
+	client.exchangeErr = &chatgpt.TypedError{Kind: chatgpt.ErrorPermissionDenied, StatusCode: 401, EvidenceCode: "http_401",
+		EvidenceLevel: chatgpt.EvidenceContractVerifiedLivePending, PreserveBusinessState: true}
+	if _, done, err := s.RefreshNow(context.Background(), id); err != nil || !done {
+		t.Fatalf("done=%v err=%v", done, err)
+	}
+	assertAccountState(t, db, id, StateAlive, CheckReauthorizationRequired, true)
+	var code string
+	if err := db.QueryRow("SELECT last_check_error_code FROM accounts WHERE id=?", id).Scan(&code); err != nil || code != "oauth_refresh_unauthorized" {
+		t.Fatalf("code=%q err=%v", code, err)
+	}
+}
+
+func TestConcurrentRefreshCASUsesWinningRotatedCredential(t *testing.T) {
+	s1, db, keyring, client, now := newTestService(t)
+	s2, err := New(db, client, keyring, s1.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s2.now = s1.now
+	s2.SetBaseContext(context.Background())
+	id := seedAccountPayload(t, db, keyring, "acct-refresh", "refresh", credentialPayload{
+		Access: jwtFor("acct-refresh", now.Add(-time.Hour)), Refresh: "sanitized-refresh-fixture", OAuthSource: "refresh",
+	}, now.Add(24*time.Hour), now)
+
+	arrived := make(chan struct{}, 2)
+	release := make(chan struct{})
+	var sequence atomic.Int32
+	client.exchangeHook = func(kind chatgpt.CredentialKind, secret string) (chatgpt.TokenSet, error) {
+		if kind != chatgpt.CredentialRefresh || secret != "sanitized-refresh-fixture" {
+			t.Fatalf("unexpected exchange kind=%s secret=%q", kind, secret)
+		}
+		n := sequence.Add(1)
+		arrived <- struct{}{}
+		<-release
+		access := jwtFor("acct-refresh", now.Add(time.Hour))
+		return chatgpt.TokenSet{AccessToken: access, RefreshToken: "winner-candidate-" + strconv.Itoa(int(n))}, nil
+	}
+	type refreshResult struct {
+		run Run
+		err error
+	}
+	results := make(chan refreshResult, 2)
+	for _, service := range []*Service{s1, s2} {
+		go func(service *Service) {
+			run, _, refreshErr := service.RefreshNow(context.Background(), id)
+			results <- refreshResult{run: run, err: refreshErr}
+		}(service)
+	}
+	<-arrived
+	<-arrived
+	close(release)
+	for range 2 {
+		result := <-results
+		if result.err != nil || result.run.AccountsSkipped != 0 {
+			t.Fatalf("refresh run=%+v err=%v", result.run, result.err)
+		}
+	}
+	var envelope []byte
+	var generation int64
+	if err := db.QueryRow("SELECT enc_credentials,credential_generation FROM accounts WHERE id=?", id).Scan(&envelope, &generation); err != nil {
+		t.Fatal(err)
+	}
+	if generation != 2 {
+		t.Fatalf("credential_generation=%d want=2", generation)
+	}
+	plaintext, err := keyring.Open(envelope, credentialcrypto.CredentialAAD(id, "refresh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zero(plaintext)
+	var stored credentialPayload
+	if json.Unmarshal(plaintext, &stored) != nil || (stored.Refresh != "winner-candidate-1" && stored.Refresh != "winner-candidate-2") {
+		t.Fatalf("stored refresh token did not come from CAS winner")
+	}
 }
 
 func (f *fakeClient) FetchStatus(ctx context.Context, access string) (chatgpt.StatusResult, error) {
@@ -96,9 +222,9 @@ func (f *fakeClient) FetchStatus(ctx context.Context, access string) (chatgpt.St
 	return status, nil
 }
 
-func TestStableBanCandidatesAutomaticallyFinalizeAndDeduplicate(t *testing.T) {
+func TestExplicitAccountDisabledSignalsAutomaticallyFinalizeAndDeduplicate(t *testing.T) {
 	s, db, keyring, client, now := newTestService(t)
-	client.errors = map[string]*chatgpt.TypedError{"acct-a": candidate("credential_revoked")}
+	client.errors = map[string]*chatgpt.TypedError{"acct-a": candidate("account_disabled")}
 	id := seedAccount(t, db, keyring, "acct-a", now.Add(10*24*time.Hour), now.Add(-2*24*time.Hour))
 	run, done, err := s.RefreshNow(context.Background(), id)
 	if err != nil || !done || run.State != "completed" {
@@ -112,7 +238,7 @@ func TestStableBanCandidatesAutomaticallyFinalizeAndDeduplicate(t *testing.T) {
 	}
 
 	second := seedAccount(t, db, keyring, "acct-b", now.Add(10*24*time.Hour), now.Add(-time.Hour))
-	client.errors["acct-b"] = candidate("credential_revoked")
+	client.errors["acct-b"] = candidate("account_deactivated")
 	if _, done, err := s.RefreshNow(context.Background(), second); err != nil || !done {
 		t.Fatalf("second refresh done=%v err=%v", done, err)
 	}
@@ -125,16 +251,19 @@ func TestStableBanCandidatesAutomaticallyFinalizeAndDeduplicate(t *testing.T) {
 	}
 	assertAccountState(t, db, third, StateDeadBanned, CheckOK, false)
 	assertCount(t, db, "SELECT count(*) FROM alert_events", 3)
+}
 
-	for _, code := range []string{"account_deactivated", "token_revoked", "refresh_token_reused"} {
-		accountID := seedAccount(t, db, keyring, "acct-"+code, now.Add(10*24*time.Hour), now.Add(-time.Hour))
+func TestCredentialRevocationFromStatusDoesNotBan(t *testing.T) {
+	s, db, keyring, client, now := newTestService(t)
+	for _, code := range []string{"credential_revoked", "token_revoked", "refresh_token_reused"} {
+		id := seedAccount(t, db, keyring, "acct-"+code, now.Add(24*time.Hour), now)
 		client.errors["acct-"+code] = candidate(code)
-		if _, done, err := s.RefreshNow(context.Background(), accountID); err != nil || !done {
+		if _, done, err := s.RefreshNow(context.Background(), id); err != nil || !done {
 			t.Fatalf("%s refresh done=%v err=%v", code, done, err)
 		}
-		assertAccountState(t, db, accountID, StateDeadBanned, CheckOK, false)
+		assertAccountState(t, db, id, StateAlive, CheckError, false)
 	}
-	assertCount(t, db, "SELECT count(*) FROM alert_events", 6)
+	assertCount(t, db, "SELECT count(*) FROM alert_events", 0)
 }
 
 func TestRejectAndUnverifiedRemainFailClosed(t *testing.T) {
@@ -208,6 +337,45 @@ func TestRecoverInterruptedFinalizesLegacyPendingBan(t *testing.T) {
 	if deadAt != formatTime(detected) || deathType != "abnormal_ban" {
 		t.Fatalf("dead_at=%s death_type=%s", deadAt, deathType)
 	}
+}
+
+func TestRecoverInterruptedConvertsLegacyCredentialCandidateToAuthorizationWarning(t *testing.T) {
+	s, db, keyring, _, now := newTestService(t)
+	id := seedAccount(t, db, keyring, "acct-legacy-refresh", now.Add(24*time.Hour), now.Add(-2*24*time.Hour))
+	oauthDisabledID := seedAccount(t, db, keyring, "acct-legacy-oauth-disabled", now.Add(24*time.Hour), now.Add(-2*24*time.Hour))
+	if _, err := db.Exec(`UPDATE accounts SET
+		last_check_state='verification_required',last_check_error_code='refresh_token_reused',
+		polling_paused=1,pause_reason='evidence_review_required',
+		pending_evidence_signature=?,pending_detected_at=? WHERE id=?`,
+		EvidenceSignatureFor("oauth_token", "refresh_token_reused", "status-v1"), formatTime(now.Add(-time.Hour)), id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE accounts SET
+		last_check_state='verification_required',last_check_error_code='account_disabled',
+		polling_paused=1,pause_reason='evidence_review_required',
+		pending_evidence_signature=?,pending_detected_at=? WHERE id=?`,
+		EvidenceSignatureFor("oauth_token", "account_disabled", "status-v1"), formatTime(now.Add(-time.Hour)), oauthDisabledID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecoverInterrupted(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	assertAccountState(t, db, id, StateAlive, CheckReauthorizationRequired, true)
+	var code, pause string
+	if err := db.QueryRow("SELECT last_check_error_code,pause_reason FROM accounts WHERE id=?", id).Scan(&code, &pause); err != nil {
+		t.Fatal(err)
+	}
+	if code != "oauth_refresh_token_reused" || pause != "reauthorization_required" {
+		t.Fatalf("code=%q pause=%q", code, pause)
+	}
+	assertAccountState(t, db, oauthDisabledID, StateAlive, CheckReauthorizationRequired, true)
+	if err := db.QueryRow("SELECT last_check_error_code,pause_reason FROM accounts WHERE id=?", oauthDisabledID).Scan(&code, &pause); err != nil {
+		t.Fatal(err)
+	}
+	if code != "oauth_refresh_token_invalid" || pause != "reauthorization_required" {
+		t.Fatalf("oauth token endpoint code=%q pause=%q", code, pause)
+	}
+	assertCount(t, db, "SELECT count(*) FROM alert_events", 0)
 }
 
 func TestRecoverInterruptedSkipsUnknownAndRejectedLegacyEvidence(t *testing.T) {
@@ -673,7 +841,7 @@ func TestUnknownCredentialSourceCannotBypassStatusValidation(t *testing.T) {
 	assertAccountState(t, db, id, StateAlive, CheckError, false)
 }
 
-func TestStructuredDenialAfterRefreshStillUsesBanEvidence(t *testing.T) {
+func TestOnlyExplicitAccountDisabledAfterRefreshUsesBanEvidence(t *testing.T) {
 	for _, code := range []string{"token_revoked", "account_disabled"} {
 		t.Run(code, func(t *testing.T) {
 			s, db, keyring, client, now := newTestService(t)
@@ -686,7 +854,11 @@ func TestStructuredDenialAfterRefreshStillUsesBanEvidence(t *testing.T) {
 			if run.AccountsFailed != 1 || run.ErrorCounts[code] != 1 {
 				t.Fatalf("run=%+v", run)
 			}
-			assertAccountState(t, db, id, StateDeadBanned, CheckOK, false)
+			if code == "account_disabled" {
+				assertAccountState(t, db, id, StateDeadBanned, CheckOK, false)
+			} else {
+				assertAccountState(t, db, id, StateAlive, CheckError, false)
+			}
 		})
 	}
 }
