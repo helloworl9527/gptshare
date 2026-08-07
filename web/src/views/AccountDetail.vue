@@ -3,6 +3,7 @@ import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from '../api/client.js'
 import AdminShell from '../components/AdminShell.vue'
+import { monitorCheckIssue } from '../lib/vitals.js'
 
 const route = useRoute()
 const router = useRouter()
@@ -17,6 +18,7 @@ const cancelButton = ref(null)
 
 const statusLabel = computed(() => ({ alive: account.value?.near_expiry ? '临期存活' : '存活', dead_banned: '异常封号', dead_normal: '正常退役' })[account.value?.status] || '未知')
 const checkAbnormal = computed(() => ['error', 'verification_required', 'contract_changed'].includes(account.value?.last_check_state))
+const checkIssue = computed(() => checkAbnormal.value ? monitorCheckIssue(account.value) : null)
 
 function dateTime(value) {
   if (!value) return '—'
@@ -88,8 +90,13 @@ watch(confirming, async (open) => { if (open) { await nextTick(); cancelButton.v
         <div v-if="notice" class="recovery-banner" role="status">
           {{ notice }}
         </div>
-        <div v-if="checkAbnormal" class="warning-banner" role="status">
-          上次检查异常；下方业务状态保留最近一次可信结果。
+        <div v-if="checkAbnormal" class="warning-banner check-issue" role="status">
+          <strong>{{ checkIssue?.title || '上次检查异常' }}</strong>
+          <p>{{ checkIssue?.detail || '下方业务状态保留最近一次可信结果。' }}</p>
+          <p class="check-issue-action">
+            处理：{{ checkIssue?.action || '请执行“立即刷新”后再次检查。' }}
+          </p>
+          <code v-if="account.last_check_error_code">错误码：{{ account.last_check_error_code }}</code>
         </div>
         <section class="triad-grid" aria-label="订阅三态">
           <article><span>订阅类型</span><strong translate="no">{{ account.plan?.toUpperCase() || 'UNKNOWN' }}</strong></article>

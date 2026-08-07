@@ -74,6 +74,62 @@ export function summarizeMonitor(accounts = []) {
   }
 }
 
+export function monitorCheckIssue(account = {}) {
+  const code = String(account.last_check_error_code || '').trim()
+  if (!code) return null
+
+  const credentialType = String(account.credential?.type || account.token_type || '').toLowerCase()
+  if (code === 'http_401') {
+    if (credentialType === 'refresh' || credentialType === 'device') {
+      return {
+        badge: '刷新授权 401',
+        summary: 'OAuth 刷新被拒绝，需重新授权',
+        title: 'OAuth 令牌刷新被拒绝（HTTP 401）',
+        detail: '系统在使用 refresh token 换取新 access token 时被上游拒绝。常见原因是同一 refresh token 被其他程序刷新后发生轮换、继续复用旧令牌，或上游撤销了当前授权会话。',
+        action: '请按原授权方式重新授权，完成后执行“立即刷新”。不要在其他程序中继续使用原 refresh token。',
+        code,
+      }
+    }
+    if (credentialType === 'access') {
+      return {
+        badge: 'Access 401',
+        summary: 'Access Token 被拒绝，需重新导入',
+        title: 'Access Token 被拒绝（HTTP 401）',
+        detail: '上游账号检查接口不再接受当前 access token。该令牌可能已过期、被撤销，或不具备当前接口所需权限。',
+        action: '请重新导入有效令牌，完成后执行“立即刷新”。',
+        code,
+      }
+    }
+    if (credentialType === 'session') {
+      return {
+        badge: '会话授权 401',
+        summary: '网页登录会话被拒绝，需重新授权',
+        title: '网页登录会话被拒绝（HTTP 401）',
+        detail: '上游不再接受当前网页登录会话，或无法用该会话换取有效 access token。常见于退出登录、修改安全设置或会话被撤销。',
+        action: '请重新导入当前有效的会话令牌，完成后执行“立即刷新”。',
+        code,
+      }
+    }
+    return {
+      badge: '授权 401',
+      summary: '上游拒绝当前授权，需重新授权',
+      title: '上游拒绝当前授权（HTTP 401）',
+      detail: '当前凭据未通过上游身份校验，但上游没有返回可进一步区分的稳定错误码。',
+      action: '请按原授权方式重新授权，完成后执行“立即刷新”。',
+      code,
+    }
+  }
+
+  return {
+    badge: '检查异常',
+    summary: `检查异常 · ${code}`,
+    title: '上次账号检查异常',
+    detail: '系统已保留最近一次可信业务状态。请根据下方原始错误码排查，避免将检查故障误判为账号失效。',
+    action: '可先执行“立即刷新”；若错误持续出现，再检查授权状态或上游服务。',
+    code,
+  }
+}
+
 export function statusVisual(account) {
   if (account.status === 'dead_banned') return 'banned'
   if (account.status === 'dead_normal') return 'retired'

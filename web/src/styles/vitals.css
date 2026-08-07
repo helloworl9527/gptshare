@@ -145,13 +145,14 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .pulse-retired polyline { stroke-dasharray: 6 7; }
 .signal-meta { display: flex; align-items: center; gap: 8px; margin-top: -7px; color: #9aa49f; font: 9px var(--mono); letter-spacing: .1em; }
 .signal-meta strong { color: var(--state); font-size: 9px; }
-.check-warning { margin-left: auto; color: #985d00; font-weight: 700; }
+.check-warning { overflow: hidden; max-width: 46%; margin-left: auto; color: #985d00; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
 .vital-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0; margin: 20px -22px 0; border-top: 1px solid var(--line); }
 .vital-stats div { min-width: 0; padding: 14px 12px; border-right: 1px solid var(--line); }
 .vital-stats div:last-child { border-right: 0; }
 .vital-stats dt { color: #89948e; font-size: 9px; }
 .vital-stats dd { overflow: hidden; margin: 7px 0 0; color: #25332d; font: 600 11px var(--mono); font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
-.vital-card footer { display: flex; justify-content: space-between; margin: 0 -22px; border-top: 1px solid var(--line); color: #7d8983; padding: 12px 15px; font-size: 10px; }
+.vital-card footer { display: flex; justify-content: space-between; gap: 10px; min-height: 42px; margin: 0 -22px; border-top: 1px solid var(--line); color: #7d8983; padding: 12px 15px; font-size: 10px; }
+.vital-card footer span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .state-panel { min-height: 310px; display: flex; flex-direction: column; align-items: center; justify-content: center; border: 1px solid var(--line); background: #fff; text-align: center; padding: 40px; }
 .state-panel h3 { margin: 18px 0 8px; font: 650 24px var(--display); }
 .state-panel p { max-width: 480px; margin: 0; color: var(--muted); line-height: 1.7; }
@@ -261,6 +262,11 @@ tbody tr { border-left: 4px solid var(--green); }
 .snapshot-dead_banned { border-color: var(--red); background: #fff0f1; color: #9d2730; }
 .snapshot-dead_normal { border-color: var(--retired); background: #edf1ef; color: #56645d; }
 .warning-banner { margin: 16px 0; border-left: 3px solid var(--amber); background: #fff8e7; color: #735000; padding: 12px 14px; }
+.check-issue { padding: 16px 18px; }
+.check-issue strong { display: block; color: #664600; font-size: 14px; }
+.check-issue p { max-width: 920px; margin: 8px 0 0; font-size: 12px; line-height: 1.65; }
+.check-issue .check-issue-action { color: #5c4308; font-weight: 650; }
+.check-issue code { display: inline-block; margin-top: 10px; border: 1px solid #e4c878; background: #fffdf5; padding: 4px 7px; color: #644700; font: 10px var(--mono); }
 .triad-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; border: 1px solid var(--line); background: var(--line); }
 .triad-grid article { min-width: 0; background: #fff; padding: 24px; }
 .triad-grid span { color: var(--muted); font-size: 12px; }

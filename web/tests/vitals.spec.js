@@ -68,6 +68,25 @@ test('unified admin covers both domains, credential completion and reveal', asyn
   expect(consoleErrors).toEqual([])
 })
 
+test('monitor 401 explains the failed stage and next action', async ({ page }, testInfo) => {
+  const consoleErrors = []
+  page.on('console', (message) => { if (message.type() === 'error') consoleErrors.push(message.text()) })
+  await login(page)
+  await page.getByRole('link', { name: '账号体征', exact: true }).click()
+  await expect(page.getByRole('heading', { name: '账号体征', exact: true })).toBeVisible()
+  const accountCard = page.locator('.vital-card').filter({ hasText: 'Device Refresh Alert' })
+  await expect(accountCard).toContainText('刷新授权 401')
+  await expect(accountCard).toContainText('OAuth 刷新被拒绝，需重新授权')
+  await accountCard.getByRole('button', { name: /Device Refresh Alert/ }).click()
+  await expect(page.getByText('OAuth 令牌刷新被拒绝（HTTP 401）')).toBeVisible()
+  await expect(page.getByText(/refresh token 被其他程序刷新后发生轮换/)).toBeVisible()
+  await expect(page.getByText(/按原授权方式重新授权/)).toBeVisible()
+  await expect(page.getByText('错误码：http_401')).toBeVisible()
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+  await page.screenshot({ path: path.join(screenshots, `monitor-http-401-${testInfo.project.name}.png`), fullPage: true })
+  expect(consoleErrors).toEqual([])
+})
+
 test('public card flow persists redeemed card codes without account credentials', async ({ page }) => {
   const consoleErrors = []
   page.on('console', (message) => { if (message.type() === 'error') consoleErrors.push(message.text()) })

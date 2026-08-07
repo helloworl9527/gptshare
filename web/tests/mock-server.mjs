@@ -9,6 +9,7 @@ const monitorAccounts = [
   { id: 101, label: 'North Star', provider_account_id: 'acct-north', email: 'north@example.test', plan: 'plus', auth_expiry: '2026-08-19T00:00:00Z', current_expiry: '2026-08-19T00:00:00Z', last_authorized_at: '2026-07-20T00:00:00Z', last_alive_at: '2026-07-24T00:00:00Z', last_check_state: 'ok', status: 'alive', near_expiry: false, credential: { type: 'session_token', configured: true }, polling_paused: false },
   { id: 102, label: 'Amber Lab', provider_account_id: 'acct-amber', email: 'amber@example.test', plan: 'team', auth_expiry: '2026-07-26T00:00:00Z', current_expiry: '2026-07-26T00:00:00Z', last_check_state: 'ok', status: 'alive', near_expiry: true },
   { id: 103, label: 'Banned', provider_account_id: 'acct-banned', email: 'banned@example.test', plan: 'plus', last_check_state: 'verification_required', status: 'dead_banned', banned_survival_days: 21 },
+  { id: 104, label: 'Device Refresh Alert', provider_account_id: 'acct-device-alert', email: 'device-alert@example.test', plan: 'plus', auth_expiry: '2026-08-26T00:00:00Z', current_expiry: '2026-08-26T00:00:00Z', last_authorized_at: '2026-07-26T00:00:00Z', last_alive_at: '2026-08-05T00:00:00Z', last_check_state: 'error', last_check_error_code: 'http_401', status: 'alive', near_expiry: false, credential: { type: 'device', configured: true }, polling_paused: false },
 ]
 const monitorSettings = { poll_interval: 3600, near_expiry_days: 3, channels: { telegram: { enabled: false, configured: false }, wecom: { enabled: false, configured: true }, feishu: { enabled: false, configured: false } } }
 
@@ -104,6 +105,12 @@ const server = http.createServer(async (request, response) => {
   if (url.pathname === '/api/auth/logout' && request.method === 'POST') return send(response, 204, null, { 'Set-Cookie': 'mock_session=; Path=/; Max-Age=0' })
   if (url.pathname === '/api/me') return authenticated(request) ? send(response, 200, { username: 'admin' }) : send(response, 401, { code: 'unauthorized' })
   if (url.pathname === '/api/accounts' && request.method === 'GET') { if (!protect(request, response)) return; return send(response, 200, { accounts: scenario === 'empty' ? [] : monitorAccounts }) }
+  const monitorAccount = url.pathname.match(/^\/api\/accounts\/(\d+)$/)
+  if (monitorAccount && request.method === 'GET') {
+    if (!protect(request, response)) return
+    const item = monitorAccounts.find((account) => account.id === Number(monitorAccount[1]))
+    return item ? send(response, 200, item) : send(response, 404, { code: 'account_not_found' })
+  }
   if (url.pathname === '/api/settings' && request.method === 'GET') { if (!protect(request, response)) return; return send(response, 200, monitorSettings) }
   if (url.pathname === '/api/settings' && request.method === 'PUT') { if (!protect(request, response)) return; Object.assign(monitorSettings, await readJSON(request)); return send(response, 200, monitorSettings) }
   if (url.pathname === '/api/admin/config/security-boundaries' && request.method === 'GET') {

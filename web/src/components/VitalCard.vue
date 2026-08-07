@@ -1,6 +1,7 @@
 <script setup>
 import { computed } from 'vue'
 import PulseLine from './PulseLine.vue'
+import { monitorCheckIssue } from '../lib/vitals.js'
 
 const props = defineProps({ account: { type: Object, required: true } })
 const emit = defineEmits(['select'])
@@ -13,6 +14,7 @@ const visualState = computed(() => {
 const stateLabel = computed(() => ({ alive: '存活', near: '临期', banned: '封号', retired: '正常退役' })[visualState.value])
 const stateCode = computed(() => ({ alive: 'ALIVE', near: 'EXPIRING', banned: 'BANNED', retired: 'RETIRED' })[visualState.value])
 const checkAbnormal = computed(() => ['error', 'verification_required', 'contract_changed'].includes(props.account.last_check_state))
+const checkIssue = computed(() => checkAbnormal.value ? monitorCheckIssue(props.account) : null)
 
 function formatDate(value) {
   if (!value) return '—'
@@ -40,7 +42,7 @@ function formatDate(value) {
     <PulseLine :state="visualState" />
     <div class="signal-meta">
       <span>SIGNAL</span><strong translate="no">{{ stateCode }}</strong>
-      <span v-if="checkAbnormal" class="check-warning">检查异常</span>
+      <span v-if="checkAbnormal" class="check-warning" :title="checkIssue?.title || '检查异常'">{{ checkIssue?.badge || '检查异常' }}</span>
     </div>
     <dl class="vital-stats">
       <div><dt>订阅类型</dt><dd>{{ account.plan?.toUpperCase() || 'UNKNOWN' }}</dd></div>
@@ -52,7 +54,7 @@ function formatDate(value) {
       </div>
     </dl>
     <footer>
-      <span>{{ checkAbnormal ? '保留上次业务状态' : '状态已同步' }}</span>
+      <span :title="checkIssue?.detail">{{ checkIssue?.summary || (checkAbnormal ? '保留上次业务状态' : '状态已同步') }}</span>
       <span aria-hidden="true">↗</span>
     </footer>
   </article>
