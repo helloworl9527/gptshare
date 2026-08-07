@@ -139,6 +139,30 @@ func TestListAccountsParsesReadOnlyPullSyncResponse(t *testing.T) {
 	}
 }
 
+func TestListAccountsKeepsInvalidItemForPerAccountSyncHandling(t *testing.T) {
+	past := time.Now().UTC().Add(-24 * time.Hour).Format(time.RFC3339Nano)
+	future := time.Now().UTC().Add(24 * time.Hour).Format(time.RFC3339Nano)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"accounts":[
+			{"provider_account_id":"expired","status":"dead_normal","auth_expiry":"` + past + `"},
+			{"provider_account_id":"invalid","status":"alive","auth_expiry":"not-a-time"},
+			{"provider_account_id":"after-invalid","status":"alive","auth_expiry":"` + future + `"}
+		]}`))
+	}))
+	defer server.Close()
+	client, err := NewWithOptions(server.URL, "allocation-monitor-key", server.Client(), WithRetries(0), WithCircuitBreaker(10, time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := client.ListAccounts(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 || got[0].MonitorStatus != "dead_normal" || got[0].AccountExpiry.IsZero() || got[1].SyncErrorCode != "missing_account_expiry" || got[2].MonitorAccountID != "after-invalid" {
+		t.Fatalf("unexpected pull items: %+v", got)
+	}
+}
+
 func TestBatchStatusItemMatrix(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req struct {

@@ -36,4 +36,12 @@ describe('API client', () => {
       message: '账号已存在，无需重新导入',
     })
   })
+
+	it('shows a specific phase-one contract error', async () => {
+		vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response({ code: 'phase_one_contract_changed' }, 503)))
+		await expect(api.allocationAccounts()).rejects.toMatchObject({
+			code: 'phase_one_contract_changed',
+			message: '一期返回的数据格式已变化，请检查一期服务版本。',
+		})
+	})
 })

@@ -148,7 +148,7 @@ func TestAdminAccountCRUDSyncDegradeAndLeakRedaction(t *testing.T) {
 	}
 	syncStatus := postJSON(t, client, server.URL+"/api/admin/accounts/"+itoa(created.Account.ID)+"/sync-status", csrf, map[string]any{})
 	syncBody := readBody(t, syncStatus)
-	if syncStatus.StatusCode != http.StatusOK || !strings.Contains(syncBody, `"monitor_status":"dead_normal"`) {
+	if syncStatus.StatusCode != http.StatusOK || !strings.Contains(syncBody, `"monitor_status":"dead_normal"`) || !strings.Contains(syncBody, `"status":"expired"`) {
 		t.Fatalf("sync status=%d body=%s", syncStatus.StatusCode, syncBody)
 	}
 	assertNoCredentialLeak(t, syncBody)
@@ -264,6 +264,59 @@ func TestAdminAccountPullSyncPendingCredentialsAndFailClosed(t *testing.T) {
 	}
 	if strings.Contains(offlineBody, "pulled@example.test") {
 		t.Fatalf("offline error leaked email: %s", offlineBody)
+	}
+}
+
+func TestAdminAccountPullSyncMixedTerminalStatesAndItemFailure(t *testing.T) {
+	now := time.Now().UTC()
+	past := now.Add(-24 * time.Hour).Format(time.RFC3339Nano)
+	future := now.Add(24 * time.Hour).Format(time.RFC3339Nano)
+	phaseOne := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/monitor/accounts" {
+			t.Fatalf("unexpected monitor path %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"accounts":[
+			{"provider_account_id":"alive","email":"alive@example.test","status":"alive","auth_expiry":"` + future + `"},
+			{"provider_account_id":"expired","email":"expired@example.test","status":"dead_normal","auth_expiry":"` + past + `"},
+			{"provider_account_id":"conflict","email":"conflict@example.test","status":"alive","auth_expiry":"` + past + `"},
+			{"provider_account_id":"banned","email":"banned@example.test","status":"dead_banned","auth_expiry":"` + past + `"},
+			{"provider_account_id":"after-conflict","email":"after@example.test","status":"alive","auth_expiry":"` + future + `"}
+		]}`))
+	}))
+	defer phaseOne.Close()
+
+	server := testAccountsTLSServer(t, phaseOne.URL)
+	defer server.Close()
+	client := authedAccountClient(t, server)
+	csrf := getCSRF(t, client, server.URL)
+	response := postJSON(t, client, server.URL+"/api/admin/accounts/pull-monitor", csrf, map[string]any{})
+	body := readBody(t, response)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("pull status=%d body=%s", response.StatusCode, body)
+	}
+	for _, want := range []string{
+		`"total":5`, `"created":4`, `"updated":0`, `"skipped":0`, `"failed":1`,
+		`"monitor_account_id":"conflict"`, `"code":"alive_expiry_conflict"`,
+		`"monitor_account_id":"after-conflict"`, `"status":"expired"`, `"status":"banned"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("pull body missing %s: %s", want, body)
+		}
+	}
+	dbValue, ok := testDatabases.Load(server.URL)
+	if !ok {
+		t.Fatal("test database not registered")
+	}
+	var conflictCount, afterConflictCount int
+	if err := dbValue.(*sql.DB).QueryRow("SELECT count(*) FROM chatgpt_accounts WHERE monitor_account_id='conflict'").Scan(&conflictCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := dbValue.(*sql.DB).QueryRow("SELECT count(*) FROM chatgpt_accounts WHERE monitor_account_id='after-conflict'").Scan(&afterConflictCount); err != nil {
+		t.Fatal(err)
+	}
+	if conflictCount != 0 || afterConflictCount != 1 {
+		t.Fatalf("persisted conflict=%d after-conflict=%d", conflictCount, afterConflictCount)
 	}
 }
 

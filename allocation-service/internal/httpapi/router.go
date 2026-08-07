@@ -249,11 +249,20 @@ func writeAccountError(c *gin.Context, err error) {
 		writeError(c, http.StatusNotFound, "not_found", "account not found")
 	case errors.Is(err, repository.ErrAccountAllocated):
 		writeError(c, http.StatusConflict, "account_allocated", "allocated account cannot be deleted")
+	case monitorFaultIs(err, monitorfacade.FaultContractChanged):
+		writeError(c, http.StatusServiceUnavailable, "phase_one_contract_changed", "phase one monitor response contract changed")
+	case monitorFaultIs(err, monitorfacade.FaultTimeout):
+		writeError(c, http.StatusServiceUnavailable, "phase_one_monitor_timeout", "phase one monitor timed out")
 	case errors.Is(err, monitorfacade.ErrUnavailable):
 		writeError(c, http.StatusServiceUnavailable, "phase_one_monitor_unavailable", "phase one monitor is unavailable")
 	default:
 		writeError(c, http.StatusInternalServerError, "internal_error", "request could not be processed")
 	}
+}
+
+func monitorFaultIs(err error, want monitorfacade.FaultKind) bool {
+	kind, ok := monitorfacade.FaultKindOf(err)
+	return ok && kind == want
 }
 
 func writeCardError(c *gin.Context, err error) {
@@ -404,9 +413,21 @@ func pullMonitorAccountsHandler(service *accountsvc.Service) gin.HandlerFunc {
 			"accounts":   serializeAccounts(result.Accounts),
 			"created":    result.Created,
 			"updated":    result.Updated,
+			"skipped":    result.Skipped,
+			"failed":     result.Failed,
+			"errors":     serializePullSyncErrors(result.Errors),
+			"total":      result.Total,
 			"request_id": c.GetString("request_id"),
 		})
 	}
+}
+
+func serializePullSyncErrors(items []accountsvc.PullSyncError) []gin.H {
+	result := make([]gin.H, 0, len(items))
+	for _, item := range items {
+		result = append(result, gin.H{"monitor_account_id": item.MonitorAccountID, "code": item.Code})
+	}
+	return result
 }
 
 func updateAccountHandler(service *accountsvc.Service) gin.HandlerFunc {

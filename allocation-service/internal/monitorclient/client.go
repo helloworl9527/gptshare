@@ -196,16 +196,21 @@ func (c *Client) ListAccounts(ctx context.Context) ([]StatusResult, error) {
 	for _, item := range body.Accounts {
 		id := defaultString(item.ProviderAccountID, item.AccountID)
 		expiry := parseTimeOrZero(defaultString(item.AuthExpiry, item.SubscriptionExpiry))
-		if id == "" || expiry.IsZero() {
-			return nil, monitorfacade.NewFault(monitorfacade.FaultContractChanged)
-		}
 		status := defaultString(item.MonitorStatus, mapPhaseOneStatus(item.Status))
+		errorCode := ""
+		switch {
+		case id == "":
+			errorCode = "missing_monitor_account_id"
+		case expiry.IsZero():
+			errorCode = "missing_account_expiry"
+		}
 		results = append(results, StatusResult{
 			MonitorAccountID: id,
 			MonitorStatus:    normalizeMonitorStatus(status),
 			Email:            item.Email,
 			AccountExpiry:    expiry,
 			Plan:             item.Plan,
+			SyncErrorCode:    errorCode,
 		})
 	}
 	return results, nil

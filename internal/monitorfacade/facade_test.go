@@ -74,11 +74,17 @@ func TestTypedFaultMatrix(t *testing.T) {
 	}
 }
 
-func TestContractChangeFailsClosed(t *testing.T) {
-	facade, _ := New(fakeSource{items: []account.Account{{ProviderAccountID: "provider-1"}}})
-	if _, err := facade.ListAccounts(context.Background()); err == nil {
-		t.Fatal("expected incomplete DTO to fail closed")
-	} else if kind, ok := allocationfacade.FaultKindOf(err); !ok || kind != allocationfacade.FaultContractChanged {
-		t.Fatalf("fault = %v, %v", kind, ok)
+func TestListContractChangeIsReportedPerItem(t *testing.T) {
+	expiry := time.Now().UTC().Add(time.Hour)
+	facade, _ := New(fakeSource{items: []account.Account{
+		{ProviderAccountID: "provider-1"},
+		{ProviderAccountID: "provider-2", AuthExpiry: expiry, Status: "alive"},
+	}})
+	items, err := facade.ListAccounts(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 || items[0].SyncErrorCode != "missing_account_expiry" || items[1].MonitorAccountID != "provider-2" {
+		t.Fatalf("unexpected list result: %+v", items)
 	}
 }

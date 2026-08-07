@@ -98,6 +98,15 @@ type PullSyncResult struct {
 	Accounts []models.Account
 	Created  int
 	Updated  int
+	Skipped  int
+	Failed   int
+	Errors   []PullSyncError
+	Total    int
+}
+
+type PullSyncError struct {
+	MonitorAccountID string
+	Code             string
 }
 
 func NewService(repo Repository, monitor MonitorImporter) *Service {
@@ -167,18 +176,36 @@ func (s *Service) PullFromMonitor(ctx context.Context) (PullSyncResult, error) {
 	accounts := make([]models.Account, 0, len(items))
 	created := 0
 	updated := 0
+	skipped := 0
+	failed := 0
+	issues := make([]PullSyncError, 0)
+	seen := make(map[string]struct{}, len(items))
 	for _, item := range items {
-		if strings.TrimSpace(item.MonitorAccountID) == "" || item.AccountExpiry.IsZero() {
-			return PullSyncResult{}, monitorfacade.NewFault(monitorfacade.FaultContractChanged)
+		monitorID := strings.TrimSpace(item.MonitorAccountID)
+		if code := validatePullItem(s.now().UTC(), item); code != "" {
+			failed++
+			issues = append(issues, PullSyncError{MonitorAccountID: monitorID, Code: code})
+			continue
 		}
+		if _, duplicate := seen[monitorID]; duplicate {
+			skipped++
+			issues = append(issues, PullSyncError{MonitorAccountID: monitorID, Code: "duplicate_monitor_account"})
+			continue
+		}
+		seen[monitorID] = struct{}{}
 		account, wasCreated, err := s.repo.UpsertSyncedAccount(ctx, repository.SyncedAccount{
-			MonitorAccountID: item.MonitorAccountID,
-			DisplayUsername:  firstNonEmpty(item.Email, item.MonitorAccountID),
+			MonitorAccountID: monitorID,
+			DisplayUsername:  firstNonEmpty(item.Email, monitorID),
 			AccountExpiry:    item.AccountExpiry,
 			MonitorStatus:    normalizeMonitorStatus(item.MonitorStatus),
 		})
 		if err != nil {
-			return PullSyncResult{}, err
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return PullSyncResult{}, err
+			}
+			failed++
+			issues = append(issues, PullSyncError{MonitorAccountID: monitorID, Code: "account_sync_failed"})
+			continue
 		}
 		if wasCreated {
 			created++
@@ -187,7 +214,30 @@ func (s *Service) PullFromMonitor(ctx context.Context) (PullSyncResult, error) {
 		}
 		accounts = append(accounts, account)
 	}
-	return PullSyncResult{Accounts: accounts, Created: created, Updated: updated}, nil
+	return PullSyncResult{Accounts: accounts, Created: created, Updated: updated, Skipped: skipped, Failed: failed, Errors: issues, Total: len(items)}, nil
+}
+
+func validatePullItem(now time.Time, item monitorfacade.StatusResult) string {
+	if item.SyncErrorCode != "" {
+		return item.SyncErrorCode
+	}
+	if strings.TrimSpace(item.MonitorAccountID) == "" {
+		return "missing_monitor_account_id"
+	}
+	if item.AccountExpiry.IsZero() {
+		return "missing_account_expiry"
+	}
+	status := normalizeMonitorStatus(item.MonitorStatus)
+	if status != item.MonitorStatus && strings.TrimSpace(item.MonitorStatus) != "" {
+		return "unsupported_monitor_status"
+	}
+	if item.AccountExpiry.Before(now) && status == "alive" {
+		return "alive_expiry_conflict"
+	}
+	if item.AccountExpiry.Before(now) && status != "dead_normal" && status != "dead_banned" {
+		return "past_expiry_for_non_terminal_account"
+	}
+	return ""
 }
 
 func (s *Service) CapacitySettings(ctx context.Context) (repository.AccountCapacitySettings, error) {

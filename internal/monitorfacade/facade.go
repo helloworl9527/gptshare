@@ -48,11 +48,33 @@ func (f *Facade) ListAccounts(ctx context.Context) ([]allocationfacade.StatusRes
 	for _, item := range items {
 		converted, err := statusResult(item)
 		if err != nil {
-			return nil, err
+			converted = invalidStatusResult(item)
 		}
 		result = append(result, converted)
 	}
 	return result, nil
+}
+
+func invalidStatusResult(item account.Account) allocationfacade.StatusResult {
+	email := ""
+	if item.Email != nil {
+		email = *item.Email
+	}
+	errorCode := "unsupported_monitor_status"
+	switch {
+	case item.ProviderAccountID == "":
+		errorCode = "missing_monitor_account_id"
+	case item.AuthExpiry.IsZero():
+		errorCode = "missing_account_expiry"
+	}
+	return allocationfacade.StatusResult{
+		MonitorAccountID: item.ProviderAccountID,
+		MonitorStatus:    item.Status,
+		Email:            email,
+		AccountExpiry:    item.AuthExpiry,
+		Plan:             item.Plan,
+		SyncErrorCode:    errorCode,
+	}
 }
 
 func (f *Facade) Status(ctx context.Context, id string) (allocationfacade.ImportResult, error) {

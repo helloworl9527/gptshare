@@ -64,6 +64,30 @@ describe('P2 admin views', () => {
     wrapper.unmount()
   })
 
+  it('shows per-account pull statistics and a concrete failure reason', async () => {
+		const fetchMock = vi.fn()
+			.mockResolvedValueOnce(response({ accounts }))
+			.mockResolvedValueOnce(response(accountSettings))
+			.mockResolvedValueOnce(response({ csrf_token: 'c'.repeat(43) }))
+			.mockResolvedValueOnce(response({
+				accounts,
+				created: 2,
+				updated: 1,
+				skipped: 0,
+				failed: 1,
+				errors: [{ monitor_account_id: 'conflict', code: 'alive_expiry_conflict' }],
+			}))
+			.mockResolvedValueOnce(response({ accounts }))
+			.mockResolvedValueOnce(response(accountSettings))
+		const wrapper = await render(Accounts, fetchMock)
+		await wrapper.get('button.compact-action').trigger('click')
+		await flushPromises()
+		expect(wrapper.text()).toContain('新建 2，更新 1，跳过 0，失败 1')
+		expect(wrapper.text()).toContain('conflict：状态为 alive，但到期时间已过')
+		expect(wrapper.text()).not.toContain('请求参数未通过校验')
+		wrapper.unmount()
+	})
+
   it('runs batch monitor sync from the accounts view', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(response({ accounts }))

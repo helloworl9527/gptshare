@@ -457,6 +457,17 @@ func TestUpsertSyncedAccountPendingCredentialsAndDoesNotOverwriteCredentials(t *
 	if updated.Status != "available" {
 		t.Fatalf("filled account status=%q", updated.Status)
 	}
+	cardID, err := repo.CreateCard(context.Background(), CardSeed{CodeSuffix: "SYNC", DurationDays: 7})
+	if err != nil {
+		t.Fatal(err)
+	}
+	allocation, err := repo.RedeemCard(context.Background(), cardID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if allocation.AccountID != first.ID {
+		t.Fatalf("allocation account=%d, want %d", allocation.AccountID, first.ID)
+	}
 	creds, err := repo.Credentials(context.Background(), first.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -467,14 +478,21 @@ func TestUpsertSyncedAccountPendingCredentialsAndDoesNotOverwriteCredentials(t *
 	second, created, err := repo.UpsertSyncedAccount(context.Background(), SyncedAccount{
 		MonitorAccountID: "phase-one-sync-1",
 		DisplayUsername:  "renamed@example.test",
-		AccountExpiry:    now.Add(100 * 24 * time.Hour),
+		AccountExpiry:    now.Add(-24 * time.Hour),
 		MonitorStatus:    "dead_normal",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if created || second.ID != first.ID || second.DisplayUsername != "renamed@example.test" || second.Status != "available" || second.MonitorStatus != "dead_normal" {
+	if created || second.ID != first.ID || second.DisplayUsername != "renamed@example.test" || second.Status != "expired" || second.MonitorStatus != "dead_normal" || second.MaxConcurrentUsers != 5 || second.CurrentAllocations != 1 {
 		t.Fatalf("bad second pull account=%+v created=%v", second, created)
+	}
+	active, err := repo.ActiveAllocationCount(context.Background(), first.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if active != 1 {
+		t.Fatalf("active allocations after pull=%d, want 1", active)
 	}
 	after, err := repo.Credentials(context.Background(), first.ID)
 	if err != nil {
@@ -482,6 +500,19 @@ func TestUpsertSyncedAccountPendingCredentialsAndDoesNotOverwriteCredentials(t *
 	}
 	if after.Password != creds.Password || after.TOTPSecret != creds.TOTPSecret {
 		t.Fatalf("pull overwrote credentials before=%+v after=%+v", creds, after)
+	}
+	banned, created, err := repo.UpsertSyncedAccount(context.Background(), SyncedAccount{
+		MonitorAccountID: "phase-one-banned", DisplayUsername: "banned@example.test",
+		AccountExpiry: now.Add(-48 * time.Hour), MonitorStatus: "dead_banned",
+	})
+	if err != nil || !created || banned.Status != "banned" {
+		t.Fatalf("past banned pull account=%+v created=%v err=%v", banned, created, err)
+	}
+	if _, _, err := repo.UpsertSyncedAccount(context.Background(), SyncedAccount{
+		MonitorAccountID: "phase-one-conflict", DisplayUsername: "conflict@example.test",
+		AccountExpiry: now.Add(-time.Hour), MonitorStatus: "alive",
+	}); !errors.Is(err, ErrAccountExpiryTooLong) {
+		t.Fatalf("past alive error=%v, want ErrAccountExpiryTooLong", err)
 	}
 }
 

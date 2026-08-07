@@ -28,6 +28,14 @@ describe('API client', () => {
     expect(listener).toHaveBeenCalledOnce()
   })
 
+	it('shows a specific phase-one contract error', async () => {
+		vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response({ code: 'phase_one_contract_changed' }, 503)))
+		await expect(api.accounts()).rejects.toMatchObject({
+			code: 'phase_one_contract_changed',
+			message: '一期返回的数据格式已变化，请检查一期服务版本。',
+		})
+	})
+
   it('sends CSRF for reveal GET without writing secrets to storage', async () => {
     const storage = vi.spyOn(Storage.prototype, 'setItem')
     const fetchMock = vi.fn()

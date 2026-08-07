@@ -53,6 +53,7 @@ type ImportResult struct {
 	Email            string
 	AccountExpiry    time.Time
 	Plan             string
+	SyncErrorCode    string
 }
 
 type StatusResult struct {
@@ -61,6 +62,7 @@ type StatusResult struct {
 	Email            string
 	AccountExpiry    time.Time
 	Plan             string
+	SyncErrorCode    string
 }
 
 type Client interface {

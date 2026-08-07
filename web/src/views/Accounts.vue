@@ -153,13 +153,34 @@ async function pullMonitorAccounts() {
   try {
     const result = await api.pullMonitorAccounts()
     accounts.value = result.accounts || accounts.value
-    notice.value = `已从一期同步 ${result.created || 0} 个新账号，更新 ${result.updated || 0} 个账号。`
+    notice.value = pullSyncNotice(result)
     await load()
   } catch (reason) {
     notice.value = reason.message
   } finally {
     busy.value = false
   }
+}
+
+function pullSyncNotice(result) {
+  const summary = `一期同步完成：新建 ${result.created || 0}，更新 ${result.updated || 0}，跳过 ${result.skipped || 0}，失败 ${result.failed || 0}。`
+  const details = (result.errors || []).map((item, index) => {
+    const account = item.monitor_account_id || `第 ${index + 1} 项`
+    return `${account}：${pullSyncErrorLabel(item.code)}`
+  })
+  return details.length ? `${summary} ${details.join('；')}` : summary
+}
+
+function pullSyncErrorLabel(code) {
+  return ({
+    alive_expiry_conflict: '状态为 alive，但到期时间已过',
+    past_expiry_for_non_terminal_account: '非终态账号的到期时间已过',
+    missing_monitor_account_id: '缺少一期账号 ID',
+    missing_account_expiry: '缺少或无法识别到期时间',
+    unsupported_monitor_status: '一期账号状态无法识别',
+    duplicate_monitor_account: '一期列表包含重复账号',
+    account_sync_failed: '账号写入失败',
+  })[code] || `同步失败（${code || 'unknown_error'}）`
 }
 
 function openEdit(account) {

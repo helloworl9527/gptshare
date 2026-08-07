@@ -269,7 +269,8 @@ func (r *Repository) CreateAccount(ctx context.Context, seed AccountSeed) (int64
 
 func (r *Repository) UpsertSyncedAccount(ctx context.Context, seed SyncedAccount) (models.Account, bool, error) {
 	now := r.now().UTC()
-	if strings.TrimSpace(seed.MonitorAccountID) == "" || strings.TrimSpace(seed.DisplayUsername) == "" || seed.AccountExpiry.IsZero() || seed.AccountExpiry.Before(now) {
+	terminal := seed.MonitorStatus == "dead_normal" || seed.MonitorStatus == "dead_banned"
+	if strings.TrimSpace(seed.MonitorAccountID) == "" || strings.TrimSpace(seed.DisplayUsername) == "" || seed.AccountExpiry.IsZero() || (seed.AccountExpiry.Before(now) && !terminal) {
 		return models.Account{}, false, ErrAccountExpiryTooLong
 	}
 	capacity := seed.MaxConcurrentUsers
@@ -291,11 +292,15 @@ func (r *Repository) UpsertSyncedAccount(ctx context.Context, seed SyncedAccount
 	if existingID > 0 {
 		result, err := r.db.ExecContext(ctx, `UPDATE chatgpt_accounts
 			SET display_username=?, account_expiry=?, monitor_status=?,
-			    status=CASE WHEN ?='dead_banned' THEN 'banned' ELSE status END,
+			    status=CASE
+			        WHEN ?='dead_banned' THEN 'banned'
+			        WHEN ?='dead_normal' THEN 'expired'
+			        ELSE status
+			    END,
 			    updated_at=?
 			WHERE id=?`,
 			strings.TrimSpace(seed.DisplayUsername), formatTime(seed.AccountExpiry.UTC()),
-			defaultString(seed.MonitorStatus, "unknown"), defaultString(seed.MonitorStatus, "unknown"),
+			defaultString(seed.MonitorStatus, "unknown"), defaultString(seed.MonitorStatus, "unknown"), defaultString(seed.MonitorStatus, "unknown"),
 			formatTime(now), existingID)
 		if err != nil {
 			return models.Account{}, false, err
@@ -313,6 +318,8 @@ func (r *Repository) UpsertSyncedAccount(ctx context.Context, seed SyncedAccount
 	status := "pending_credentials"
 	if seed.MonitorStatus == "dead_banned" {
 		status = "banned"
+	} else if seed.MonitorStatus == "dead_normal" {
+		status = "expired"
 	}
 	result, err := r.db.ExecContext(ctx, `INSERT INTO chatgpt_accounts
 		(display_username,display_password_secret,display_password_key_id,display_2fa_secret,display_2fa_key_id,account_expiry,max_concurrent_users,monitor_account_id,monitor_status,status,created_at,updated_at)
@@ -1065,11 +1072,15 @@ func (r *Repository) UpdateAccountMonitorStatus(ctx context.Context, accountID i
 	now := r.now().UTC()
 	result, err := r.db.ExecContext(ctx, `UPDATE chatgpt_accounts
 		SET monitor_account_id=?, monitor_status=?,
-		    status=CASE WHEN ?='dead_banned' THEN 'banned' ELSE status END,
+		    status=CASE
+		        WHEN ?='dead_banned' THEN 'banned'
+		        WHEN ?='dead_normal' THEN 'expired'
+		        ELSE status
+		    END,
 		    updated_at=?
 		WHERE id=?`,
 		nullable(monitorAccountID), defaultString(monitorStatus, "unknown_monitor"),
-		defaultString(monitorStatus, "unknown_monitor"), formatTime(now), accountID)
+		defaultString(monitorStatus, "unknown_monitor"), defaultString(monitorStatus, "unknown_monitor"), formatTime(now), accountID)
 	if err != nil {
 		return models.Account{}, err
 	}
