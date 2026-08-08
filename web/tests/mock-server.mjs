@@ -211,9 +211,14 @@ const server = http.createServer(async (request, response) => {
     if (card.id === 3) return send(response, 200, { card: { id: card.id, code_suffix: card.code_suffix, plaintext_available: false }, message: '明文不可用(旧批次)' })
     return send(response, 200, { card: { id: card.id, code_suffix: card.code_suffix, plaintext_available: true }, code: `2345-6789-${card.code_suffix}` })
   }
-  if (url.pathname === '/api/redeem' && request.method === 'POST') { await readJSON(request); return send(response, 200, { redeemed: true }) }
+  if (url.pathname === '/api/redeem' && request.method === 'POST') {
+    await readJSON(request)
+    if (scenario === 'expired-card') return send(response, 404, { code: 'not_found' })
+    return send(response, 200, { redeemed: true })
+  }
   if (url.pathname === '/api/cards/query' && request.method === 'POST') {
     await readJSON(request)
+    if (scenario === 'expired-card') return send(response, 404, { code: 'query_not_available' })
     return send(response, 200, { result: { account: { display_username: 'public@example.test', password: 'public-test-password' }, totp: { secret: 'JBSWY3DPEHPK3PXP' }, card: { valid_until: '2026-08-23T00:00:00Z' }, replacement_notice: { state: 'primary' } } })
   }
   return send(response, 404, { code: 'not_found' })

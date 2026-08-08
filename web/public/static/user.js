@@ -56,6 +56,13 @@ form.addEventListener("submit", async (event) => {
       renderResult(body.result);
       return;
     }
+    if (savedCardHasExpired(payload.code)) {
+      captchaId = 0;
+      captchaBox.classList.remove("visible");
+      answerInput.value = "";
+      showError("卡密已过期。");
+      return;
+    }
     if (apiError.code === "captcha_required" && apiError.captcha) {
       captchaId = apiError.captcha.id;
       captchaQuestion.textContent = apiError.captcha.question;
@@ -186,6 +193,14 @@ function showError(message) {
 function normalizeCardCode(value) {
   const compact = String(value || "").toUpperCase().replace(/[^2-9A-HJKMNP-Z]/g, "").slice(0, 12);
   return compact.replace(/(.{4})(?=.)/g, "$1-");
+}
+
+function savedCardHasExpired(code) {
+  const normalized = normalizeCardCode(code);
+  const saved = readSavedCards().find((item) => item.code === normalized);
+  if (!saved?.valid_until) return false;
+  const expiresAt = new Date(saved.valid_until).getTime();
+  return Number.isFinite(expiresAt) && expiresAt <= Date.now();
 }
 
 function readSavedCards() {

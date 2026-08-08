@@ -126,3 +126,22 @@ test('public card flow persists redeemed card codes without account credentials'
   await expect(page.getByText('public@example.test')).toBeVisible()
   expect(consoleErrors).toEqual([])
 })
+
+test('public card flow identifies a previously saved expired card', async ({ page, request }) => {
+  await scenario(request, 'expired-card', true)
+  await page.addInitScript(() => {
+    localStorage.setItem('vitals.redeemed-cards.v1', JSON.stringify([{
+      code: 'STUV-WXYZ-2345',
+      saved_at: '2026-07-01T00:00:00Z',
+      valid_until: '2026-07-08T00:00:00Z',
+    }]))
+  })
+  await page.goto('/admin/user.html')
+  await page.getByLabel('卡密', { exact: true }).fill('STUV-WXYZ-2345')
+  await page.getByRole('button', { name: '查询或兑换卡密' }).click()
+
+  await expect(page.locator('#error')).toHaveText('卡密已过期。')
+  await expect(page.locator('#error')).toHaveClass(/visible/)
+  await expect(page.locator('#result')).not.toHaveClass(/visible/)
+  await expect(page.locator('#saved-cards-list')).toContainText('STUV-WXYZ-2345')
+})
