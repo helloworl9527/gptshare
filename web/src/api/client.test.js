@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { api, clearClientState, fetchCSRF } from './client.js'
+import { api, clearClientState, fetchCSRF, request } from './client.js'
 
 function response(body, status = 200, headers = {}) {
   return { ok: status >= 200 && status < 300, status, headers: new Headers(headers), json: async () => body }
@@ -44,4 +44,18 @@ describe('API client', () => {
 			message: '一期返回的数据格式已变化，请检查一期服务版本。',
 		})
 	})
+
+  it('keeps the generic message for non-OAuth validation errors and exposes the request ID', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response({
+      code: 'validation_failed',
+      message: 'untrusted upstream detail',
+      request_id: 'request-422',
+    }, 422)))
+    await expect(request('/api/example')).rejects.toMatchObject({
+      status: 422,
+      code: 'validation_failed',
+      requestId: 'request-422',
+      message: '请求参数未通过校验。',
+    })
+  })
 })

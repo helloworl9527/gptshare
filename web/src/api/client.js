@@ -1,12 +1,13 @@
 let csrfToken = ''
 
 export class APIError extends Error {
-  constructor(message, { status = 0, code = 'network_error', retryAfter = 0 } = {}) {
+  constructor(message, { status = 0, code = 'network_error', retryAfter = 0, requestId = '' } = {}) {
     super(message)
     this.name = 'APIError'
     this.status = status
     this.code = code
     this.retryAfter = retryAfter
+    this.requestId = requestId
   }
 }
 
@@ -49,6 +50,7 @@ export async function request(path, options = {}) {
       status: response.status,
       code: payload.code || 'request_failed',
       retryAfter: Number(response.headers.get('Retry-After') || 0),
+      requestId: typeof payload.request_id === 'string' ? payload.request_id : '',
     })
   }
   if (response.status === 204) return null

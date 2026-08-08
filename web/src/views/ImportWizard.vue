@@ -1,8 +1,9 @@
 <script setup>
-import { computed, onBeforeUnmount, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from '../api/client.js'
 import { normalizeJSONBatch, normalizeLineBatch } from '../import-normalize.js'
+import { describeOAuthError } from '../oauth-error.js'
 import AdminShell from '../components/AdminShell.vue'
 
 const route = useRoute()
@@ -36,21 +37,25 @@ const batchPlaceholder = computed(() => batchFormat.value === 'lines'
 const oauth = ref(null)
 const callbackURL = ref('')
 const loading = ref(false)
-const error = ref('')
+const generalError = ref('')
+const oauthError = ref(null)
+const oauthErrorElement = ref()
+const callbackInput = ref()
 const device = ref(null)
 const deviceState = ref('')
 let timer
 
 function setMode(nextMode) {
   mode.value = nextMode
-  error.value = ''
+  generalError.value = ''
+  oauthError.value = null
   router.replace({ query: { ...route.query, mode: nextMode } })
 }
 
 async function submitToken() {
-  error.value = ''
+  generalError.value = ''
   if (!credential.value.trim()) {
-    error.value = '请粘贴一种凭证后再提交。'
+    generalError.value = '请粘贴一种凭证后再提交。'
     return
   }
   loading.value = true
@@ -62,7 +67,7 @@ async function submitToken() {
     credential.value = ''
     await router.replace({ name: 'account-detail', params: { id: account.id } })
   } catch (reason) {
-    error.value = reason.message
+    generalError.value = reason.message
   } finally {
     credential.value = ''
     loading.value = false
@@ -76,12 +81,12 @@ function normalizeBatch() {
 }
 
 async function submitBatch(itemsOverride) {
-  error.value = ''
+  generalError.value = ''
   let items
   try {
     items = itemsOverride || normalizeBatch()
   } catch (reason) {
-    error.value = reason.message
+    generalError.value = reason.message
     return
   }
   batchRaw.value = ''
@@ -94,7 +99,7 @@ async function submitBatch(itemsOverride) {
       .map((item) => items[item.index])
       .filter(Boolean)
   } catch (reason) {
-    error.value = reason.message
+    generalError.value = reason.message
     retryItems.value = items
   } finally {
     loading.value = false
@@ -102,7 +107,8 @@ async function submitBatch(itemsOverride) {
 }
 
 async function startOAuth() {
-  error.value = ''
+  generalError.value = ''
+  oauthError.value = null
   loading.value = true
   try {
     oauth.value = reauthorizeID.value
@@ -110,16 +116,18 @@ async function startOAuth() {
       : await api.startOAuth(label.value)
     window.open(oauth.value.authorization_url, '_blank', 'noopener,noreferrer')
   } catch (reason) {
-    error.value = reason.message
+    generalError.value = reason.message
   } finally {
     loading.value = false
   }
 }
 
 async function completeOAuth() {
-  error.value = ''
+  generalError.value = ''
+  oauthError.value = null
   if (!callbackURL.value.trim()) {
-    error.value = '请粘贴浏览器地址栏中的完整回调 URL。'
+    oauthError.value = describeOAuthError({ code: 'oauth_callback_invalid' })
+    await focusOAuthError()
     return
   }
   loading.value = true
@@ -128,15 +136,39 @@ async function completeOAuth() {
     callbackURL.value = ''
     await router.replace({ name: 'account-detail', params: { id: account.id } })
   } catch (reason) {
-    error.value = reason.message
+    callbackURL.value = ''
+    oauthError.value = describeOAuthError(reason)
+    await focusOAuthError()
   } finally {
     callbackURL.value = ''
     loading.value = false
   }
 }
 
+async function focusOAuthError() {
+  await nextTick()
+  oauthErrorElement.value?.focus()
+}
+
+function focusCallbackInput() {
+  callbackInput.value?.focus()
+}
+
+function reopenOAuth() {
+  if (oauth.value?.authorization_url) {
+    window.open(oauth.value.authorization_url, '_blank', 'noopener,noreferrer')
+  }
+}
+
+async function restartOAuth() {
+  callbackURL.value = ''
+  oauthError.value = null
+  oauth.value = null
+  await startOAuth()
+}
+
 async function startDevice() {
-  error.value = ''
+  generalError.value = ''
   loading.value = true
   clearTimeout(timer)
   try {
@@ -146,7 +178,7 @@ async function startDevice() {
     deviceState.value = 'pending'
     schedule(device.value.interval_seconds)
   } catch (reason) {
-    error.value = reason.message
+    generalError.value = reason.message
   } finally {
     loading.value = false
   }
@@ -168,7 +200,7 @@ async function pollDevice() {
     if (result.state === 'expired') return
     schedule(result.retry_after_seconds || device.value.interval_seconds)
   } catch (reason) {
-    error.value = reason.message
+    generalError.value = reason.message
   }
 }
 
@@ -198,8 +230,8 @@ onBeforeUnmount(() => clearTimeout(timer))
           设备码授权
         </button>
       </div>
-      <p v-if="error" class="form-alert" role="alert">
-        {{ error }}
+      <p v-if="generalError" class="form-alert" role="alert">
+        {{ generalError }}
       </p>
 
       <section v-if="mode === 'oauth'" id="oauth-panel" class="form-surface" role="tabpanel" aria-labelledby="oauth-tab">
@@ -212,10 +244,38 @@ onBeforeUnmount(() => clearTimeout(timer))
           </button>
         </template>
         <form v-else @submit.prevent="completeOAuth">
+          <article v-if="oauthError" id="oauth-error" ref="oauthErrorElement" class="oauth-error" role="alert" tabindex="-1">
+            <h2>{{ oauthError.title }}</h2>
+            <p>{{ oauthError.detail }}</p>
+            <dl class="oauth-error-reference">
+              <div>
+                <dt>错误码</dt>
+                <dd>{{ oauthError.code }}</dd>
+              </div>
+              <div v-if="oauthError.requestId">
+                <dt>请求编号</dt>
+                <dd>{{ oauthError.requestId }}</dd>
+              </div>
+            </dl>
+            <div v-if="oauthError.recovery !== 'contact_support'" class="oauth-error-actions">
+              <button v-if="oauthError.recovery === 'retry_callback'" type="button" @click="focusCallbackInput">
+                重新粘贴回调 URL
+              </button>
+              <button v-if="oauthError.recovery === 'retry_callback' || oauthError.recovery === 'reopen_authorization'" type="button" @click="reopenOAuth">
+                重新打开当前授权页
+              </button>
+              <button v-if="oauthError.recovery === 'restart_authorization'" type="button" :disabled="loading" @click="restartOAuth">
+                生成新的授权链接
+              </button>
+              <button v-if="oauthError.recovery === 'restart_original_account'" type="button" :disabled="loading" @click="restartOAuth">
+                使用原账号重新授权
+              </button>
+            </div>
+          </article>
           <p>授权完成后，复制浏览器地址栏中以 <code>http://localhost:1455/auth/callback</code> 开头的完整 URL。</p>
           <a class="button-link" :href="oauth.authorization_url" target="_blank" rel="noopener noreferrer">重新打开授权页</a>
           <label for="oauth-callback">完整回调 URL</label>
-          <textarea id="oauth-callback" v-model="callbackURL" rows="5" autocomplete="off" spellcheck="false" placeholder="http://localhost:1455/auth/callback?code=…&state=…" />
+          <textarea id="oauth-callback" ref="callbackInput" v-model="callbackURL" rows="5" autocomplete="off" spellcheck="false" placeholder="http://localhost:1455/auth/callback?code=…&state=…" :aria-invalid="oauthError ? 'true' : undefined" :aria-describedby="oauthError ? 'oauth-error' : undefined" />
           <p class="privacy-note">
             提交后回调 URL 会立即清空；授权会话 15 分钟后过期。
           </p>

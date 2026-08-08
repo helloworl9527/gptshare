@@ -296,6 +296,17 @@ tbody tr { border-left: 4px solid var(--green); }
 .form-surface label, .settings-form label { margin-top: 10px; color: #3d4c45; font-size: 13px; font-weight: 650; }
 .form-surface input, .form-surface select, .form-surface textarea, .settings-form input { width: 100%; border: 1px solid #cdd7d2; border-radius: 3px; background: #fff; color: var(--ink); padding: 13px 14px; }
 .form-surface textarea { resize: vertical; min-height: 150px; font: 12px/1.6 var(--mono); }
+.oauth-error { margin-bottom: 10px; border-left: 3px solid var(--red); background: #fff2f2; color: #712027; padding: 18px; outline: none; }
+.oauth-error:focus-visible { box-shadow: 0 0 0 3px rgba(180, 35, 47, .14); }
+.oauth-error h2 { margin: 0; color: #91252b; font: 700 18px var(--display); }
+.oauth-error p { margin: 8px 0 0; line-height: 1.65; }
+.oauth-error-reference { display: flex; flex-wrap: wrap; gap: 8px 24px; margin: 14px 0 0; }
+.oauth-error-reference div { display: flex; min-width: 0; gap: 7px; }
+.oauth-error-reference dt { color: #9c5b60; font-size: 11px; }
+.oauth-error-reference dd { margin: 0; font: 600 11px var(--mono); overflow-wrap: anywhere; }
+.oauth-error-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+.oauth-error-actions button { min-height: 40px; border: 1px solid #d99ca1; border-radius: 3px; background: #fff; color: #7c242b; padding: 0 13px; font-weight: 650; }
+.oauth-error-actions button:hover:not(:disabled) { border-color: #a92d36; }
 .device-code-card { margin-top: 14px; border: 1px solid var(--green); background: #f3fbf8; padding: 26px; text-align: center; }
 .segmented-control { display: inline-flex; gap: 2px; margin-bottom: 22px; padding: 3px; background: #e8eeeb; }
 .segmented-control.compact { margin-top: 4px; }
