@@ -45,6 +45,19 @@ describe('API client', () => {
 		})
 	})
 
+	it('shows dedicated safe-retirement conflict messages', async () => {
+		vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response({ code: 'account_replacement_unavailable' }, 409)))
+		await expect(api.allocationAccounts()).rejects.toMatchObject({
+			code: 'account_replacement_unavailable',
+			message: '备用账号容量不足，无法安全下线；本次操作未产生任何变更。',
+		})
+		vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response({ code: 'account_allocated' }, 409)))
+		await expect(api.allocationAccounts()).rejects.toMatchObject({
+			code: 'account_allocated',
+			message: '该账号仍有分配，暂时无法下线。',
+		})
+	})
+
   it('keeps the generic message for non-OAuth validation errors and exposes the request ID', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response({
       code: 'validation_failed',

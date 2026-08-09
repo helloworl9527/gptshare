@@ -249,6 +249,8 @@ func writeAccountError(c *gin.Context, err error) {
 		writeError(c, http.StatusNotFound, "not_found", "account not found")
 	case errors.Is(err, repository.ErrAccountAllocated):
 		writeError(c, http.StatusConflict, "account_allocated", "allocated account cannot be deleted")
+	case errors.Is(err, repository.ErrAccountReplacementUnavailable):
+		writeError(c, http.StatusConflict, "account_replacement_unavailable", "replacement account capacity is unavailable")
 	case monitorFaultIs(err, monitorfacade.FaultContractChanged):
 		writeError(c, http.StatusServiceUnavailable, "phase_one_contract_changed", "phase one monitor response contract changed")
 	case monitorFaultIs(err, monitorfacade.FaultTimeout):
@@ -515,11 +517,17 @@ func deleteAccountHandler(service *accountsvc.Service) gin.HandlerFunc {
 		if !ok {
 			return
 		}
-		if err := service.Delete(c.Request.Context(), id); err != nil {
+		result, err := service.Delete(c.Request.Context(), id)
+		if err != nil {
 			writeAccountError(c, err)
 			return
 		}
-		c.Status(http.StatusNoContent)
+		c.JSON(http.StatusOK, gin.H{
+			"archived":             result.Archived,
+			"replaced_allocations": result.ReplacedAllocations,
+			"closed_allocations":   result.ClosedAllocations,
+			"request_id":           c.GetString("request_id"),
+		})
 	}
 }
 

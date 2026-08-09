@@ -611,38 +611,259 @@ func TestCredentialKeyRotationReencryptAndOldKeyRemovalFailClosed(t *testing.T) 
 	}
 }
 
-func TestAccountExpiryValidationAndAllocatedDelete(t *testing.T) {
+func TestAccountExpiryValidationAndRetireWithoutAllocations(t *testing.T) {
 	db := openStore(t)
 	defer db.Close()
 	repo := New(db.DB(), testCredentialKeyring(t))
+	ctx := context.Background()
 	now := time.Date(2026, 7, 24, 0, 0, 0, 0, time.UTC)
 	repo.SetNow(func() time.Time { return now })
-	if _, err := repo.CreateAccount(context.Background(), AccountSeed{
+	if _, err := repo.CreateAccount(ctx, AccountSeed{
 		DisplayUsername: "past", DisplayPassword: "secret-password", DisplayTOTPSecret: "secret-totp", AccountExpiry: now.Add(-time.Hour), MaxConcurrentUsers: 1,
 	}); !errors.Is(err, ErrAccountExpiryTooLong) {
 		t.Fatalf("expiry error=%v want %v", err, ErrAccountExpiryTooLong)
 	}
-	if _, err := repo.CreateAccount(context.Background(), AccountSeed{
+	if _, err := repo.CreateAccount(ctx, AccountSeed{
 		DisplayUsername: "phase-one-long", DisplayPassword: "secret-password", DisplayTOTPSecret: "secret-totp", AccountExpiry: now.Add(90 * 24 * time.Hour), MaxConcurrentUsers: 1,
 	}); err != nil {
 		t.Fatalf("phase-one governed long expiry rejected: %v", err)
 	}
-	accountID, err := repo.CreateAccount(context.Background(), AccountSeed{
-		DisplayUsername: "allocated", DisplayPassword: "secret-password", DisplayTOTPSecret: "secret-totp", AccountExpiry: now.Add(30 * 24 * time.Hour), MaxConcurrentUsers: 1,
+	accountID, err := repo.CreateAccount(ctx, AccountSeed{
+		DisplayUsername: "retire-empty", DisplayPassword: "secret-password", DisplayTOTPSecret: "secret-totp", SourceURL: "https://example.test/source", AccountExpiry: now.Add(30 * 24 * time.Hour), MaxConcurrentUsers: 3, MonitorAccountID: "monitor-retired", MonitorStatus: "alive",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	cardID, err := repo.CreateCard(context.Background(), CardSeed{CodeHash: hashFor(100), CodeSuffix: suffixFor(100), DurationDays: 30})
+	result, err := repo.RetireAccount(ctx, accountID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := repo.RedeemCard(context.Background(), cardID); err != nil {
+	if !result.Archived || result.ReplacedAllocations != 0 || result.ClosedAllocations != 0 {
+		t.Fatalf("retire result=%+v", result)
+	}
+	if _, err := repo.Account(ctx, accountID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("archived account lookup err=%v", err)
+	}
+	accounts, err := repo.ListAccounts(ctx)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := repo.DeleteAccount(context.Background(), accountID); !errors.Is(err, ErrAccountAllocated) {
-		t.Fatalf("delete allocated err=%v want %v", err, ErrAccountAllocated)
+	for _, account := range accounts {
+		if account.ID == accountID {
+			t.Fatalf("archived account remained in list: %+v", account)
+		}
 	}
+	var archivedAt sql.NullString
+	var status, monitorID, passwordKey, totpKey string
+	var password, totp []byte
+	var sourceKey sql.NullString
+	var source []byte
+	if err := db.DB().QueryRow(`SELECT archived_at,status,monitor_account_id,display_password_key_id,display_password_secret,display_2fa_key_id,display_2fa_secret,source_url_key_id,source_url_secret
+		FROM chatgpt_accounts WHERE id=?`, accountID).Scan(&archivedAt, &status, &monitorID, &passwordKey, &password, &totpKey, &totp, &sourceKey, &source); err != nil {
+		t.Fatal(err)
+	}
+	if !archivedAt.Valid || status != "disabled" || monitorID != "monitor-retired" || passwordKey != "" || totpKey != "" || len(password) != 0 || len(totp) != 0 || sourceKey.Valid || len(source) != 0 {
+		t.Fatalf("archived row not sanitized: archived=%v status=%s monitor=%s password_key=%q password=%x totp_key=%q totp=%x source_key=%v source=%x", archivedAt.Valid, status, monitorID, passwordKey, password, totpKey, totp, sourceKey, source)
+	}
+	if _, err := repo.RetireAccount(ctx, accountID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("repeated retirement err=%v", err)
+	}
+	if _, _, err := repo.UpsertSyncedAccount(ctx, SyncedAccount{MonitorAccountID: monitorID, DisplayUsername: "restored@example.test", AccountExpiry: now.Add(24 * time.Hour), MonitorStatus: "alive"}); !errors.Is(err, ErrAccountArchived) {
+		t.Fatalf("archived monitor account was not skipped: %v", err)
+	}
+	if _, err := db.DB().Exec(`UPDATE chatgpt_accounts SET status='available' WHERE id=?`, accountID); err != nil {
+		t.Fatal(err)
+	}
+	metrics, err := repo.InventoryMetrics(ctx, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metrics.EligibleAccounts != 1 || metrics.Capacity != 1 {
+		t.Fatalf("archived account counted in inventory: %+v", metrics)
+	}
+	backupID, err := repo.CreateAccount(ctx, AccountSeed{DisplayUsername: "active-backup", DisplayPassword: "password", DisplayTOTPSecret: "totp", AccountExpiry: now.Add(30 * 24 * time.Hour), MaxConcurrentUsers: 1, MonitorStatus: "alive"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cardID, err := repo.CreateCard(ctx, CardSeed{CodeHash: hashFor(100), CodeSuffix: suffixFor(100), DurationDays: 7})
+	if err != nil {
+		t.Fatal(err)
+	}
+	allocation, err := repo.RedeemCard(ctx, cardID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if allocation.AccountID != backupID || allocation.AccountID == accountID {
+		t.Fatalf("archived account selected for redemption: allocation=%+v archived=%d backup=%d", allocation, accountID, backupID)
+	}
+}
+
+func TestRetireAccountAtomicallyMigratesMultiplePrimaryAllocations(t *testing.T) {
+	db := openStore(t)
+	defer db.Close()
+	repo := New(db.DB(), testCredentialKeyring(t))
+	ctx := context.Background()
+	now := time.Date(2026, 7, 24, 0, 0, 0, 0, time.UTC)
+	repo.SetNow(func() time.Time { return now })
+	retiredID, err := repo.CreateAccount(ctx, AccountSeed{DisplayUsername: "retired", DisplayPassword: "password", DisplayTOTPSecret: "totp", AccountExpiry: now.Add(30 * 24 * time.Hour), MaxConcurrentUsers: 2, MonitorStatus: "alive"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldAllocationIDs := make([]int64, 0, 2)
+	for i := 0; i < 2; i++ {
+		cardID, err := repo.CreateCard(ctx, CardSeed{CodeHash: hashFor(110 + i), CodeSuffix: suffixFor(110 + i), DurationDays: 7})
+		if err != nil {
+			t.Fatal(err)
+		}
+		allocation, err := repo.RedeemCard(ctx, cardID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		oldAllocationIDs = append(oldAllocationIDs, allocation.ID)
+	}
+	backupID, err := repo.CreateAccount(ctx, AccountSeed{DisplayUsername: "backup", DisplayPassword: "password", DisplayTOTPSecret: "totp", AccountExpiry: now.Add(30 * 24 * time.Hour), MaxConcurrentUsers: 2, MonitorStatus: "alive"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := repo.RetireAccount(ctx, retiredID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Archived || result.ReplacedAllocations != 2 || result.ClosedAllocations != 0 {
+		t.Fatalf("retire result=%+v", result)
+	}
+	var activeOld, activeBackup, historyCount int
+	if err := db.DB().QueryRow(`SELECT count(*) FROM allocations WHERE account_id=? AND active=1`, retiredID).Scan(&activeOld); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DB().QueryRow(`SELECT count(*) FROM allocations WHERE account_id=? AND active=1 AND allocation_state='primary'`, backupID).Scan(&activeBackup); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DB().QueryRow(`SELECT count(*) FROM replacement_history WHERE old_account_id=? AND new_account_id=? AND reason='account_retired' AND operator='admin'`, retiredID, backupID).Scan(&historyCount); err != nil {
+		t.Fatal(err)
+	}
+	if activeOld != 0 || activeBackup != 2 || historyCount != 2 {
+		t.Fatalf("migration old_active=%d backup_active=%d history=%d", activeOld, activeBackup, historyCount)
+	}
+	for _, allocationID := range oldAllocationIDs {
+		var state, reason string
+		var active int
+		var superseded sql.NullInt64
+		if err := db.DB().QueryRow(`SELECT allocation_state,active,replacement_reason,superseded_by_allocation_id FROM allocations WHERE id=?`, allocationID).Scan(&state, &active, &reason, &superseded); err != nil {
+			t.Fatal(err)
+		}
+		if state != "replaced" || active != 0 || reason != "account_retired" || !superseded.Valid {
+			t.Fatalf("old allocation %d not linked: state=%s active=%d reason=%s superseded=%v", allocationID, state, active, reason, superseded)
+		}
+	}
+	var violations int
+	rows, err := db.DB().Query("PRAGMA foreign_key_check")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		violations++
+	}
+	rows.Close()
+	if violations != 0 {
+		t.Fatalf("foreign key violations=%d", violations)
+	}
+}
+
+func TestRetireAccountClosesGraceAndRollsBackWhenReplacementCapacityIsInsufficient(t *testing.T) {
+	t.Run("closes active grace", func(t *testing.T) {
+		db := openStore(t)
+		defer db.Close()
+		repo := New(db.DB(), testCredentialKeyring(t))
+		ctx := context.Background()
+		now := time.Date(2026, 7, 24, 0, 0, 0, 0, time.UTC)
+		repo.SetNow(func() time.Time { return now })
+		retiredID, err := repo.CreateAccount(ctx, AccountSeed{DisplayUsername: "grace", DisplayPassword: "password", DisplayTOTPSecret: "totp", AccountExpiry: now.Add(12 * time.Hour), MaxConcurrentUsers: 1, MonitorStatus: "alive"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		cardID, err := repo.CreateCard(ctx, CardSeed{CodeHash: hashFor(120), CodeSuffix: suffixFor(120), DurationDays: 7})
+		if err != nil {
+			t.Fatal(err)
+		}
+		oldAllocation, err := repo.RedeemCard(ctx, cardID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		backupID, err := repo.CreateAccount(ctx, AccountSeed{DisplayUsername: "grace-backup", DisplayPassword: "password", DisplayTOTPSecret: "totp", AccountExpiry: now.Add(30 * 24 * time.Hour), MaxConcurrentUsers: 1, MonitorStatus: "alive"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		run, err := repo.ProcessReplacements(ctx, now)
+		if err != nil || len(run.Replaced) != 1 {
+			t.Fatalf("replacement run=%+v err=%v", run, err)
+		}
+		result, err := repo.RetireAccount(ctx, retiredID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.ReplacedAllocations != 0 || result.ClosedAllocations != 1 {
+			t.Fatalf("retire result=%+v", result)
+		}
+		var state, reason string
+		var active, backupCapacity int
+		if err := db.DB().QueryRow(`SELECT allocation_state,active,replacement_reason FROM allocations WHERE id=?`, oldAllocation.ID).Scan(&state, &active, &reason); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.DB().QueryRow(`SELECT current_allocations FROM chatgpt_accounts WHERE id=?`, backupID).Scan(&backupCapacity); err != nil {
+			t.Fatal(err)
+		}
+		if state != "replaced" || active != 0 || reason != "account_retired" || backupCapacity != 1 {
+			t.Fatalf("grace close state=%s active=%d reason=%s backup_capacity=%d", state, active, reason, backupCapacity)
+		}
+	})
+
+	t.Run("rolls back all partial replacements", func(t *testing.T) {
+		db := openStore(t)
+		defer db.Close()
+		repo := New(db.DB(), testCredentialKeyring(t))
+		ctx := context.Background()
+		now := time.Date(2026, 7, 24, 0, 0, 0, 0, time.UTC)
+		repo.SetNow(func() time.Time { return now })
+		retiredID, err := repo.CreateAccount(ctx, AccountSeed{DisplayUsername: "rollback", DisplayPassword: "password", DisplayTOTPSecret: "totp", AccountExpiry: now.Add(30 * 24 * time.Hour), MaxConcurrentUsers: 2, MonitorStatus: "alive"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; i < 2; i++ {
+			cardID, err := repo.CreateCard(ctx, CardSeed{CodeHash: hashFor(130 + i), CodeSuffix: suffixFor(130 + i), DurationDays: 7})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := repo.RedeemCard(ctx, cardID); err != nil {
+				t.Fatal(err)
+			}
+		}
+		backupID, err := repo.CreateAccount(ctx, AccountSeed{DisplayUsername: "small-backup", DisplayPassword: "password", DisplayTOTPSecret: "totp", AccountExpiry: now.Add(30 * 24 * time.Hour), MaxConcurrentUsers: 1, MonitorStatus: "alive"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := repo.RetireAccount(ctx, retiredID); !errors.Is(err, ErrAccountReplacementUnavailable) {
+			t.Fatalf("retire err=%v", err)
+		}
+		var archived sql.NullString
+		var oldActive, backupActive, historyCount int
+		var password []byte
+		if err := db.DB().QueryRow(`SELECT archived_at,display_password_secret FROM chatgpt_accounts WHERE id=?`, retiredID).Scan(&archived, &password); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.DB().QueryRow(`SELECT count(*) FROM allocations WHERE account_id=? AND active=1 AND allocation_state='primary'`, retiredID).Scan(&oldActive); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.DB().QueryRow(`SELECT current_allocations FROM chatgpt_accounts WHERE id=?`, backupID).Scan(&backupActive); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.DB().QueryRow(`SELECT count(*) FROM replacement_history WHERE reason='account_retired'`).Scan(&historyCount); err != nil {
+			t.Fatal(err)
+		}
+		if archived.Valid || oldActive != 2 || backupActive != 0 || historyCount != 0 || len(password) == 0 {
+			t.Fatalf("partial changes survived rollback: archived=%v old_active=%d backup=%d history=%d password_len=%d", archived.Valid, oldActive, backupActive, historyCount, len(password))
+		}
+	})
 }
 
 func TestCardStateTransitionsRevokeReleaseAndExtend(t *testing.T) {

@@ -104,11 +104,13 @@ async function updateAccount() {
 }
 
 async function remove(account) {
+  if (busy.value) return
+  if (!window.confirm(`确认下线账号 ${account.display_username}？仍有效的卡密分配将自动迁移到备用账号，旧账号凭证将被清除。`)) return
   busy.value = true
   notice.value = ''
   try {
-		await api.deleteAllocationAccount(account.id)
-    notice.value = '账号已删除。'
+    const result = await api.deleteAllocationAccount(account.id)
+    notice.value = `账号已下线：迁移 ${result.replaced_allocations || 0} 个有效分配，结束 ${result.closed_allocations || 0} 个无效或宽限分配。`
     await load()
   } catch (reason) {
     notice.value = reason.message
@@ -302,8 +304,8 @@ onMounted(load)
                 <button type="button" @click="sync(account)">
                   同步
                 </button>
-                <button class="danger-button" type="button" @click="remove(account)">
-                  删除
+                <button class="danger-button" type="button" :disabled="busy" @click="remove(account)">
+                  下线
                 </button>
               </td>
             </tr>

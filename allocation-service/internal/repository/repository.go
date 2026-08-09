@@ -18,15 +18,17 @@ import (
 )
 
 var (
-	ErrAccountExpiryTooLong = errors.New("account expiry cannot exceed 30 days")
-	ErrAccountAllocated     = errors.New("account has active allocations")
-	ErrCapacityTooSmall     = errors.New("max concurrent users is below current allocations")
-	ErrCardStateConflict    = errors.New("card state does not allow this operation")
-	ErrCardDurationLimit    = errors.New("card duration cannot exceed 30 days from redemption")
-	ErrNoAccountCapacity    = errors.New("no account capacity")
-	ErrCaptchaRequired      = errors.New("captcha required")
-	ErrCaptchaInvalid       = errors.New("captcha invalid")
-	ErrInvalidSetting       = errors.New("setting validation failed")
+	ErrAccountExpiryTooLong          = errors.New("account expiry cannot exceed 30 days")
+	ErrAccountAllocated              = errors.New("account has active allocations")
+	ErrAccountArchived               = errors.New("account is archived")
+	ErrAccountReplacementUnavailable = errors.New("account replacement unavailable")
+	ErrCapacityTooSmall              = errors.New("max concurrent users is below current allocations")
+	ErrCardStateConflict             = errors.New("card state does not allow this operation")
+	ErrCardDurationLimit             = errors.New("card duration cannot exceed 30 days from redemption")
+	ErrNoAccountCapacity             = errors.New("no account capacity")
+	ErrCaptchaRequired               = errors.New("captcha required")
+	ErrCaptchaInvalid                = errors.New("captcha invalid")
+	ErrInvalidSetting                = errors.New("setting validation failed")
 )
 
 const (
@@ -187,6 +189,21 @@ type ApplyDefaultCapacityResult struct {
 	UpdatedAccounts        int64
 }
 
+type RetireAccountResult struct {
+	Archived            bool
+	ReplacedAllocations int
+	ClosedAllocations   int
+}
+
+type retireAllocation struct {
+	id            int64
+	cardID        int64
+	state         string
+	validUntil    time.Time
+	cardStatus    string
+	cardExpiresAt *time.Time
+}
+
 func New(db *sql.DB, credentials ...*credential.Keyring) *Repository {
 	var keyring *credential.Keyring
 	if len(credentials) > 0 {
@@ -285,11 +302,15 @@ func (r *Repository) UpsertSyncedAccount(ctx context.Context, seed SyncedAccount
 		return models.Account{}, false, ErrInvalidSetting
 	}
 	var existingID int64
-	err := r.db.QueryRowContext(ctx, `SELECT id FROM chatgpt_accounts WHERE monitor_account_id=?`, seed.MonitorAccountID).Scan(&existingID)
+	var archivedAt sql.NullString
+	err := r.db.QueryRowContext(ctx, `SELECT id,archived_at FROM chatgpt_accounts WHERE monitor_account_id=?`, seed.MonitorAccountID).Scan(&existingID, &archivedAt)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return models.Account{}, false, err
 	}
 	if existingID > 0 {
+		if archivedAt.Valid {
+			return models.Account{}, false, ErrAccountArchived
+		}
 		result, err := r.db.ExecContext(ctx, `UPDATE chatgpt_accounts
 			SET display_username=?, account_expiry=?, monitor_status=?,
 			    status=CASE
@@ -692,6 +713,7 @@ func (r *Repository) InventoryMetrics(ctx context.Context, now time.Time) (Inven
 			coalesce(avg(max_concurrent_users),0)
 		FROM chatgpt_accounts
 		WHERE datetime(account_expiry) > datetime(?)
+		  AND archived_at IS NULL
 		  AND status IN ('available','unknown_monitor','full')
 		  AND monitor_status != 'dead_banned'`, formatTime(stamp)).
 		Scan(&metrics.Capacity, &metrics.Used, &metrics.EligibleAccounts, &metrics.AverageAccountCapacity); err != nil {
@@ -882,13 +904,13 @@ func (r *Repository) ListActiveAllocations(ctx context.Context) ([]AdminAllocati
 
 func (r *Repository) Account(ctx context.Context, accountID int64) (models.Account, error) {
 	row := r.db.QueryRowContext(ctx, `SELECT id,display_username,account_expiry,max_concurrent_users,current_allocations,monitor_account_id,monitor_status,status,last_allocated_at,source_url_key_id,source_url_secret
-		FROM chatgpt_accounts WHERE id=?`, accountID)
+		FROM chatgpt_accounts WHERE id=? AND archived_at IS NULL`, accountID)
 	return r.scanAccount(row)
 }
 
 func (r *Repository) ListAccounts(ctx context.Context) ([]models.Account, error) {
 	rows, err := r.db.QueryContext(ctx, `SELECT id,display_username,account_expiry,max_concurrent_users,current_allocations,monitor_account_id,monitor_status,status,last_allocated_at,source_url_key_id,source_url_secret
-		FROM chatgpt_accounts ORDER BY id ASC`)
+		FROM chatgpt_accounts WHERE archived_at IS NULL ORDER BY id ASC`)
 	if err != nil {
 		return nil, err
 	}
@@ -920,7 +942,7 @@ func (r *Repository) UpdateAccount(ctx context.Context, accountID int64, update 
 		        WHEN ?='available' AND current_allocations >= ? THEN 'full'
 		        ELSE ?
 		    END, updated_at=?
-		WHERE id=?`,
+		WHERE id=? AND archived_at IS NULL`,
 		update.DisplayUsername, formatTime(update.AccountExpiry.UTC()), update.MaxConcurrentUsers, nullable(update.MonitorAccountID),
 		defaultString(update.MonitorStatus, "unknown_monitor"), defaultString(update.Status, "available"), update.MaxConcurrentUsers, defaultString(update.Status, "available"), formatTime(now), accountID)
 	if err != nil {
@@ -1055,7 +1077,8 @@ func (r *Repository) ApplyDefaultAccountCapacity(ctx context.Context) (ApplyDefa
 		        WHEN status='full' THEN 'available'
 		        ELSE status
 		    END,
-		    updated_at=?`,
+		    updated_at=?
+		WHERE archived_at IS NULL`,
 		capacity, capacity, formatTime(now))
 	if err != nil {
 		return ApplyDefaultCapacityResult{}, err
@@ -1078,7 +1101,7 @@ func (r *Repository) UpdateAccountMonitorStatus(ctx context.Context, accountID i
 		        ELSE status
 		    END,
 		    updated_at=?
-		WHERE id=?`,
+		WHERE id=? AND archived_at IS NULL`,
 		nullable(monitorAccountID), defaultString(monitorStatus, "unknown_monitor"),
 		defaultString(monitorStatus, "unknown_monitor"), defaultString(monitorStatus, "unknown_monitor"), formatTime(now), accountID)
 	if err != nil {
@@ -1091,23 +1114,134 @@ func (r *Repository) UpdateAccountMonitorStatus(ctx context.Context, accountID i
 	return r.Account(ctx, accountID)
 }
 
-func (r *Repository) DeleteAccount(ctx context.Context, accountID int64) error {
-	active, err := r.ActiveAllocationCount(ctx, accountID)
+func (r *Repository) RetireAccount(ctx context.Context, accountID int64) (RetireAccountResult, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return RetireAccountResult{}, err
 	}
-	if active > 0 {
-		return ErrAccountAllocated
+	defer tx.Rollback()
+	now := r.now().UTC()
+	var exists int64
+	if err := tx.QueryRowContext(ctx, `SELECT id FROM chatgpt_accounts WHERE id=? AND archived_at IS NULL`, accountID).Scan(&exists); err != nil {
+		return RetireAccountResult{}, err
 	}
-	result, err := r.db.ExecContext(ctx, "DELETE FROM chatgpt_accounts WHERE id=?", accountID)
+	rows, err := tx.QueryContext(ctx, `SELECT a.id,a.card_id,a.allocation_state,a.valid_until,c.status,c.expires_at
+		FROM allocations a
+		JOIN cards c ON c.id=a.card_id
+		WHERE a.account_id=? AND a.active=1 AND a.allocation_state IN ('primary','grace')
+		ORDER BY a.id ASC`, accountID)
 	if err != nil {
-		return err
+		return RetireAccountResult{}, err
 	}
-	affected, _ := result.RowsAffected()
-	if affected != 1 {
-		return sql.ErrNoRows
+	allocations := make([]retireAllocation, 0)
+	for rows.Next() {
+		var item retireAllocation
+		var validUntilRaw string
+		var cardExpiresRaw sql.NullString
+		if err := rows.Scan(&item.id, &item.cardID, &item.state, &validUntilRaw, &item.cardStatus, &cardExpiresRaw); err != nil {
+			rows.Close()
+			return RetireAccountResult{}, err
+		}
+		item.validUntil, err = parseTime(validUntilRaw)
+		if err != nil {
+			rows.Close()
+			return RetireAccountResult{}, err
+		}
+		if cardExpiresRaw.Valid {
+			expiresAt, parseErr := parseTime(cardExpiresRaw.String)
+			if parseErr != nil {
+				rows.Close()
+				return RetireAccountResult{}, parseErr
+			}
+			item.cardExpiresAt = &expiresAt
+		}
+		allocations = append(allocations, item)
 	}
-	return nil
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return RetireAccountResult{}, err
+	}
+	rows.Close()
+
+	result := RetireAccountResult{Archived: true}
+	for _, item := range allocations {
+		effectivePrimary := item.state == "primary" && item.cardStatus == "redeemed" && item.cardExpiresAt != nil && item.cardExpiresAt.After(now) && item.validUntil.After(now)
+		if !effectivePrimary {
+			terminalState := "expired"
+			if item.state == "grace" {
+				terminalState = "replaced"
+			} else if item.cardStatus == "revoked" {
+				terminalState = "revoked"
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE allocations
+				SET allocation_state=?,active=0,replaced_at=?,replacement_reason='account_retired',updated_at=?
+				WHERE id=? AND active=1`, terminalState, formatTime(now), formatTime(now), item.id); err != nil {
+				return RetireAccountResult{}, err
+			}
+			result.ClosedAllocations++
+			continue
+		}
+
+		newAccountID, err := selectCandidateAccountExcluding(ctx, tx, now, *item.cardExpiresAt, true, accountID)
+		if errors.Is(err, ErrNoAccountCapacity) {
+			return RetireAccountResult{}, ErrAccountReplacementUnavailable
+		}
+		if err != nil {
+			return RetireAccountResult{}, err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE allocations
+			SET allocation_state='replaced',active=0,replaced_at=?,replacement_reason='account_retired',updated_at=?
+			WHERE id=? AND active=1 AND allocation_state='primary'`, formatTime(now), formatTime(now), item.id); err != nil {
+			return RetireAccountResult{}, err
+		}
+		if err := reserveAccountCapacity(ctx, tx, newAccountID, now); errors.Is(err, ErrNoAccountCapacity) {
+			return RetireAccountResult{}, ErrAccountReplacementUnavailable
+		} else if err != nil {
+			return RetireAccountResult{}, err
+		}
+		insert, err := tx.ExecContext(ctx, `INSERT INTO allocations
+			(card_id,account_id,allocated_at,valid_until,allocation_state,active,created_at,updated_at)
+			VALUES (?,?,?,?,'primary',1,?,?)`, item.cardID, newAccountID, formatTime(now), formatTime(item.validUntil), formatTime(now), formatTime(now))
+		if err != nil {
+			return RetireAccountResult{}, err
+		}
+		newAllocationID, err := insert.LastInsertId()
+		if err != nil {
+			return RetireAccountResult{}, err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE allocations SET superseded_by_allocation_id=?,updated_at=? WHERE id=?`, newAllocationID, formatTime(now), item.id); err != nil {
+			return RetireAccountResult{}, err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO replacement_history
+			(card_id,old_account_id,new_account_id,reason,detected_at,replaced_at,grace_until,operator,created_at)
+			VALUES (?,?,?,'account_retired',?,?,NULL,'admin',?)`, item.cardID, accountID, newAccountID, formatTime(now), formatTime(now), formatTime(now)); err != nil {
+			return RetireAccountResult{}, err
+		}
+		result.ReplacedAllocations++
+	}
+
+	archive, err := tx.ExecContext(ctx, `UPDATE chatgpt_accounts
+		SET archived_at=?,status='disabled',current_allocations=0,
+			display_password_secret=x'',display_password_key_id='',
+			display_2fa_secret=x'',display_2fa_key_id='',
+			source_url_secret=NULL,source_url_key_id=NULL,updated_at=?
+		WHERE id=? AND archived_at IS NULL`, formatTime(now), formatTime(now), accountID)
+	if err != nil {
+		return RetireAccountResult{}, err
+	}
+	if affected, _ := archive.RowsAffected(); affected != 1 {
+		return RetireAccountResult{}, sql.ErrNoRows
+	}
+	if err := auditWithTx(ctx, tx, r.now, "account.retired", "account", accountID, map[string]any{
+		"replaced_allocations": result.ReplacedAllocations,
+		"closed_allocations":   result.ClosedAllocations,
+	}); err != nil {
+		return RetireAccountResult{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return RetireAccountResult{}, err
+	}
+	return result, nil
 }
 
 func (r *Repository) CreateMonitorSyncRun(ctx context.Context, total int) (int64, error) {
@@ -1201,7 +1335,7 @@ func (r *Repository) ReencryptCredentials(ctx context.Context) (int64, error) {
 		return 0, err
 	}
 	defer tx.Rollback()
-	rows, err := tx.QueryContext(ctx, `SELECT id,display_password_key_id,display_password_secret,display_2fa_key_id,display_2fa_secret,source_url_key_id,source_url_secret FROM chatgpt_accounts ORDER BY id ASC`)
+	rows, err := tx.QueryContext(ctx, `SELECT id,display_password_key_id,display_password_secret,display_2fa_key_id,display_2fa_secret,source_url_key_id,source_url_secret FROM chatgpt_accounts WHERE archived_at IS NULL ORDER BY id ASC`)
 	if err != nil {
 		return 0, err
 	}
@@ -1441,6 +1575,7 @@ func selectCandidateAccount(ctx context.Context, tx *sql.Tx, now, cardExpiresAt 
 func selectCandidateAccountExcluding(ctx context.Context, tx *sql.Tx, now, cardExpiresAt time.Time, monitorAvailable bool, excludedAccountID int64) (int64, error) {
 	row := tx.QueryRowContext(ctx, `SELECT id FROM chatgpt_accounts
 		WHERE datetime(account_expiry) > datetime(?)
+		  AND archived_at IS NULL
 		  AND status='available'
 		  AND current_allocations < max_concurrent_users
 		  AND monitor_status != 'dead_banned'
@@ -1566,7 +1701,7 @@ func reserveAccountCapacity(ctx context.Context, tx *sql.Tx, accountID int64, no
 	result, err := tx.ExecContext(ctx, `UPDATE chatgpt_accounts
 		SET current_allocations=current_allocations+1,last_allocated_at=?,updated_at=?,
 		    status=CASE WHEN current_allocations+1 >= max_concurrent_users THEN 'full' ELSE status END
-		WHERE id=? AND current_allocations < max_concurrent_users AND datetime(account_expiry) > datetime(?)`,
+		WHERE id=? AND archived_at IS NULL AND current_allocations < max_concurrent_users AND datetime(account_expiry) > datetime(?)`,
 		formatTime(now), formatTime(now), accountID, formatTime(now))
 	if err != nil {
 		return err

@@ -23,7 +23,7 @@ type Repository interface {
 	UpsertSyncedAccount(context.Context, repository.SyncedAccount) (models.Account, bool, error)
 	UpdateAccount(context.Context, int64, repository.AccountUpdate) (models.Account, error)
 	UpdateAccountMonitorStatus(context.Context, int64, string, string) (models.Account, error)
-	DeleteAccount(context.Context, int64) error
+	RetireAccount(context.Context, int64) (repository.RetireAccountResult, error)
 	Account(context.Context, int64) (models.Account, error)
 	ListAccounts(context.Context) ([]models.Account, error)
 	AccountCapacitySettings(context.Context) (repository.AccountCapacitySettings, error)
@@ -199,6 +199,10 @@ func (s *Service) PullFromMonitor(ctx context.Context) (PullSyncResult, error) {
 			AccountExpiry:    item.AccountExpiry,
 			MonitorStatus:    normalizeMonitorStatus(item.MonitorStatus),
 		})
+		if errors.Is(err, repository.ErrAccountArchived) {
+			skipped++
+			continue
+		}
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return PullSyncResult{}, err
@@ -301,15 +305,15 @@ func (s *Service) Update(ctx context.Context, id int64, input UpdateInput) (mode
 	return account, err
 }
 
-func (s *Service) Delete(ctx context.Context, id int64) error {
+func (s *Service) Delete(ctx context.Context, id int64) (repository.RetireAccountResult, error) {
 	if id <= 0 {
-		return ErrValidation
+		return repository.RetireAccountResult{}, ErrValidation
 	}
-	err := s.repo.DeleteAccount(ctx, id)
+	result, err := s.repo.RetireAccount(ctx, id)
 	if errors.Is(err, sql.ErrNoRows) {
-		return ErrNotFound
+		return repository.RetireAccountResult{}, ErrNotFound
 	}
-	return err
+	return result, err
 }
 
 func (s *Service) SyncStatus(ctx context.Context, id int64) (SyncResult, error) {

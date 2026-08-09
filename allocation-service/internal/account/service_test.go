@@ -21,11 +21,31 @@ func (r *pullRepository) CreateAccount(context.Context, repository.AccountSeed) 
 }
 
 func (r *pullRepository) UpsertSyncedAccount(_ context.Context, seed repository.SyncedAccount) (models.Account, bool, error) {
+	if seed.MonitorAccountID == "archived" {
+		return models.Account{}, false, repository.ErrAccountArchived
+	}
 	if seed.MonitorAccountID == "write-failure" {
 		return models.Account{}, false, errors.New("injected write failure")
 	}
 	r.seeds = append(r.seeds, seed)
 	return models.Account{ID: int64(len(r.seeds)), MonitorAccountID: seed.MonitorAccountID, MonitorStatus: seed.MonitorStatus}, true, nil
+}
+
+func TestPullFromMonitorSkipsArchivedMonitorAccount(t *testing.T) {
+	now := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
+	repo := &pullRepository{}
+	service := NewService(repo, pullMonitor{items: []monitorfacade.StatusResult{
+		{MonitorAccountID: "archived", MonitorStatus: "alive", AccountExpiry: now.Add(time.Hour)},
+		{MonitorAccountID: "new", MonitorStatus: "alive", AccountExpiry: now.Add(2 * time.Hour)},
+	}})
+	service.SetNow(func() time.Time { return now })
+	result, err := service.PullFromMonitor(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Total != 2 || result.Created != 1 || result.Updated != 0 || result.Skipped != 1 || result.Failed != 0 || len(result.Accounts) != 1 || result.Accounts[0].MonitorAccountID != "new" {
+		t.Fatalf("unexpected archived pull result: %+v", result)
+	}
 }
 
 func (r *pullRepository) UpdateAccount(context.Context, int64, repository.AccountUpdate) (models.Account, error) {
@@ -36,8 +56,8 @@ func (r *pullRepository) UpdateAccountMonitorStatus(context.Context, int64, stri
 	return models.Account{}, errors.New("unexpected UpdateAccountMonitorStatus call")
 }
 
-func (r *pullRepository) DeleteAccount(context.Context, int64) error {
-	return errors.New("unexpected DeleteAccount call")
+func (r *pullRepository) RetireAccount(context.Context, int64) (repository.RetireAccountResult, error) {
+	return repository.RetireAccountResult{}, errors.New("unexpected RetireAccount call")
 }
 func (r *pullRepository) Account(context.Context, int64) (models.Account, error) {
 	return models.Account{}, errors.New("unexpected Account call")

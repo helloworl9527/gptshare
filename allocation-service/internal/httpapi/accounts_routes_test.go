@@ -393,7 +393,7 @@ func TestBatchMonitorSyncFailSafeAndRecovery(t *testing.T) {
 	}
 }
 
-func TestAccountValidationAndAllocatedDeleteHTTP(t *testing.T) {
+func TestAccountValidationAndSafeRetirementHTTP(t *testing.T) {
 	phaseOne := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"provider_account_id":"local-phase-one","email":"local@example.test","status":"alive","auth_expiry":"` + time.Now().UTC().Add(24*time.Hour).Format(time.RFC3339Nano) + `"}`))
@@ -413,8 +413,52 @@ func TestAccountValidationAndAllocatedDeleteHTTP(t *testing.T) {
 	}
 	accountID := createLocalAccountForHTTP(t, client, server.URL, csrf)
 	deleted := deleteRaw(t, client, server.URL+"/api/admin/accounts/"+itoa(accountID), csrf)
-	if deleted.StatusCode != http.StatusNoContent {
+	deletedBody := readBody(t, deleted)
+	if deleted.StatusCode != http.StatusOK || !strings.Contains(deletedBody, `"archived":true`) || !strings.Contains(deletedBody, `"replaced_allocations":0`) || !strings.Contains(deletedBody, `"closed_allocations":0`) || !strings.Contains(deletedBody, `"request_id":`) {
 		t.Fatalf("delete status=%d body=%s", deleted.StatusCode, readBody(t, deleted))
+	}
+	repeated := deleteRaw(t, client, server.URL+"/api/admin/accounts/"+itoa(accountID), csrf)
+	if repeated.StatusCode != http.StatusNotFound || !strings.Contains(readBody(t, repeated), `"code":"not_found"`) {
+		t.Fatalf("repeat delete status=%d", repeated.StatusCode)
+	}
+
+	repoValue, ok := testRepositories.Load(server.URL)
+	if !ok {
+		t.Fatal("test repository not registered")
+	}
+	repo := repoValue.(*repository.Repository)
+	sourceID, err := repo.CreateAccount(context.Background(), repository.AccountSeed{DisplayUsername: "retire-source", DisplayPassword: "password", DisplayTOTPSecret: "totp", AccountExpiry: time.Now().UTC().Add(24 * time.Hour), MaxConcurrentUsers: 2, MonitorStatus: "alive"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		cardID, err := repo.CreateCard(context.Background(), repository.CardSeed{CodeHash: []byte{byte(210 + i)}, CodeSuffix: "HTTP", DurationDays: 7})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := repo.RedeemCard(context.Background(), cardID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := repo.CreateAccount(context.Background(), repository.AccountSeed{DisplayUsername: "small-backup", DisplayPassword: "password", DisplayTOTPSecret: "totp", AccountExpiry: time.Now().UTC().Add(24 * time.Hour), MaxConcurrentUsers: 1, MonitorStatus: "alive"}); err != nil {
+		t.Fatal(err)
+	}
+	conflict := deleteRaw(t, client, server.URL+"/api/admin/accounts/"+itoa(sourceID), csrf)
+	conflictBody := readBody(t, conflict)
+	if conflict.StatusCode != http.StatusConflict || !strings.Contains(conflictBody, `"code":"account_replacement_unavailable"`) || !strings.Contains(conflictBody, `"request_id":`) {
+		t.Fatalf("retire conflict status=%d body=%s", conflict.StatusCode, conflictBody)
+	}
+	var archived sql.NullString
+	var active int
+	dbValue, _ := testDatabases.Load(server.URL)
+	if err := dbValue.(*sql.DB).QueryRow(`SELECT archived_at FROM chatgpt_accounts WHERE id=?`, sourceID).Scan(&archived); err != nil {
+		t.Fatal(err)
+	}
+	if err := dbValue.(*sql.DB).QueryRow(`SELECT count(*) FROM allocations WHERE account_id=? AND active=1`, sourceID).Scan(&active); err != nil {
+		t.Fatal(err)
+	}
+	if archived.Valid || active != 2 {
+		t.Fatalf("conflict did not roll back archived=%v active=%d", archived.Valid, active)
 	}
 }
 

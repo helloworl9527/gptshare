@@ -67,6 +67,8 @@ function publicMessage(status, code) {
   if (status === 401) return '登录状态已失效，请重新登录。'
   if (status === 403) return '安全校验未通过，请刷新页面后重试。'
   if (status === 404) return '请求的账号或运行记录不存在。'
+  if (status === 409 && code === 'account_replacement_unavailable') return '备用账号容量不足，无法安全下线；本次操作未产生任何变更。'
+  if (status === 409 && code === 'account_allocated') return '该账号仍有分配，暂时无法下线。'
   if (status === 409) return '当前操作与账号状态冲突，请刷新后重试。'
   if (status === 422) return '请求参数未通过校验。'
   if (status === 503) return '上游服务暂时不可用，请稍后重试。'

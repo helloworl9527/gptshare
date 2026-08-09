@@ -104,7 +104,7 @@ describe('P2 admin views', () => {
     wrapper.unmount()
   })
 
-  it('edits account metadata and optional credentials without displaying stored secrets', async () => {
+	it('edits account metadata and optional credentials without displaying stored secrets', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(response({ accounts }))
       .mockResolvedValueOnce(response(accountSettings))
@@ -137,8 +137,33 @@ describe('P2 admin views', () => {
       max_concurrent_users: 3,
       status: 'available',
       monitor_status: 'alive',
-    })
+	})
     expect(wrapper.text()).toContain('账号已更新')
+    wrapper.unmount()
+  })
+
+  it('confirms safe retirement, reports migrations, and blocks repeated clicks', async () => {
+    let finishRetirement
+    const retirement = new Promise((resolve) => { finishRetirement = resolve })
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(response({ accounts }))
+      .mockResolvedValueOnce(response(accountSettings))
+      .mockResolvedValueOnce(response({ csrf_token: 'c'.repeat(43) }))
+      .mockImplementationOnce(() => retirement)
+      .mockResolvedValueOnce(response({ accounts: accounts.slice(1) }))
+      .mockResolvedValueOnce(response(accountSettings))
+    vi.stubGlobal('confirm', vi.fn(() => true))
+    const wrapper = await render(Accounts, fetchMock)
+    const retire = wrapper.findAll('button').find((button) => button.text() === '下线')
+    await retire.trigger('click')
+    await retire.trigger('click')
+    expect(window.confirm).toHaveBeenCalledOnce()
+    expect(window.confirm.mock.calls[0][0]).toContain('仍有效的卡密分配将自动迁移到备用账号')
+    expect(fetchMock.mock.calls.filter(([url, init]) => String(url) === '/api/admin/accounts/1' && init?.method === 'DELETE')).toHaveLength(1)
+    expect(retire.attributes('disabled')).toBeDefined()
+    finishRetirement(response({ archived: true, replaced_allocations: 2, closed_allocations: 1, request_id: 'retire-request' }))
+    await flushPromises()
+    expect(wrapper.text()).toContain('账号已下线：迁移 2 个有效分配，结束 1 个无效或宽限分配')
     wrapper.unmount()
   })
 

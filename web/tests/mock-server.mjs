@@ -181,7 +181,7 @@ const server = http.createServer(async (request, response) => {
     })
     return send(response, 200, { account: existing })
   }
-  if (account && request.method === 'DELETE') { if (!protect(request, response)) return; accounts = accounts.filter((item) => item.id !== Number(account[1])); return send(response, 204, null) }
+  if (account && request.method === 'DELETE') { if (!protect(request, response)) return; accounts = accounts.filter((item) => item.id !== Number(account[1])); return send(response, 200, { archived: true, replaced_allocations: 0, closed_allocations: 0, request_id: 'mock-retire-request' }) }
   if (url.pathname === '/api/admin/accounts/sync-status' && request.method === 'POST') { if (!protect(request, response)) return; return send(response, 200, { accounts, warnings: [], total: accounts.length, ok: accounts.length, failed: 0 }) }
 
   if (url.pathname === '/api/admin/cards' && request.method === 'GET') {
