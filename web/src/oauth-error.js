@@ -12,10 +12,38 @@ const CREDENTIAL_INCOMPLETE_CODES = new Set([
   'http_403',
 ])
 
+const CREDENTIAL_STATUS_ERRORS = {
+  credential_account_id_missing: {
+    title: '账号身份信息缺失',
+    detail: '授权已完成，但状态响应中没有目标账号 ID。请重新授权并确认使用了正确账号。',
+  },
+  credential_plan_unknown: {
+    title: '订阅套餐无法识别',
+    detail: '状态响应中的订阅套餐无法验证。请确认账号套餐后重新授权。',
+  },
+  credential_subscription_expiry_missing: {
+    title: '订阅到期时间缺失',
+    detail: '状态响应中没有可验证的订阅到期时间。请确认订阅状态后重新授权。',
+  },
+  credential_subscription_expired: {
+    title: '账号订阅已过期',
+    detail: '状态响应显示订阅已经到期。请续订后重新授权。',
+  },
+  credential_account_inactive: {
+    title: '账号当前未激活',
+    detail: '状态响应显示账号当前不可用。请先恢复账号状态，再重新授权。',
+  },
+  credential_evidence_unverified: {
+    title: '账号状态证据未验证',
+    detail: '状态响应未达到实时验证要求。请稍后重新授权；若持续出现，请联系维护人员。',
+  },
+}
+
 const KNOWN_CODES = new Set([
   ...CALLBACK_INVALID_CODES,
   ...SESSION_INVALID_CODES,
   ...CREDENTIAL_INCOMPLETE_CODES,
+  ...Object.keys(CREDENTIAL_STATUS_ERRORS),
   'oauth_state_mismatch',
   'oauth_authorization_denied',
   'provider_account_mismatch',
@@ -70,6 +98,14 @@ export function describeOAuthError(reason = {}) {
       title: '授权账号与目标账号不一致',
       detail: '当前授权的是另一个 OpenAI 账号，不能替换目标账号。请使用原账号重新开始授权。',
       recovery: 'restart_original_account',
+      code,
+      requestId,
+    }
+  }
+  if (Object.hasOwn(CREDENTIAL_STATUS_ERRORS, code)) {
+    return {
+      ...CREDENTIAL_STATUS_ERRORS[code],
+      recovery: 'restart_authorization',
       code,
       requestId,
     }

@@ -185,8 +185,6 @@ func (s *Service) applyResult(ctx context.Context, runID string, record accountR
 		if err := closeEpoch(tx, record.EpochID, StateDeadNormal, record.AuthExpiry, nil); err != nil {
 			return false, err
 		}
-	} else if outcome.supplementalUnavailable {
-		newCheck = CheckOK
 	} else if outcome.typed == nil && outcome.status != nil {
 		level = outcome.status.EvidenceLevel
 		if level == chatgpt.EvidenceLiveVerified {

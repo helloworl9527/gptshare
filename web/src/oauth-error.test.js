@@ -16,6 +16,12 @@ describe('OAuth callback error descriptions', () => {
     ['credential_status_incomplete', '未取得可验证的账号凭证', 'restart_authorization', '无法验证'],
     ['http_401', '未取得可验证的账号凭证', 'restart_authorization', '账号状态'],
     ['http_403', '未取得可验证的账号凭证', 'restart_authorization', '账号状态'],
+    ['credential_account_id_missing', '账号身份信息缺失', 'restart_authorization', '目标账号 ID'],
+    ['credential_plan_unknown', '订阅套餐无法识别', 'restart_authorization', '订阅套餐'],
+    ['credential_subscription_expiry_missing', '订阅到期时间缺失', 'restart_authorization', '订阅到期时间'],
+    ['credential_subscription_expired', '账号订阅已过期', 'restart_authorization', '续订'],
+    ['credential_account_inactive', '账号当前未激活', 'restart_authorization', '恢复账号状态'],
+    ['credential_evidence_unverified', '账号状态证据未验证', 'restart_authorization', '实时验证'],
     ['network_error', '授权服务暂时不可用', 'restart_authorization', '本地服务'],
   ])('maps %s to a safe recovery instruction', (code, title, recovery, detail) => {
     expect(describeOAuthError({ code })).toMatchObject({ code, title, recovery })

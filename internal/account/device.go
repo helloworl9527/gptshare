@@ -247,11 +247,11 @@ func (s *Service) prepareDeviceTokens(ctx context.Context, tokens chatgpt.TokenS
 		return preparedImport{}, &ServiceError{Kind: ErrorInvalid, Code: "device_access_token_missing"}
 	}
 	status, err := s.client.FetchStatus(ctx, tokens.AccessToken)
-	if err != nil && !acceptTrustedSupplementalFailure(&status, err, "device") {
+	if err != nil {
 		return preparedImport{}, classifyUpstream(err)
 	}
-	if status.EvidenceLevel != chatgpt.EvidenceLiveVerified || status.ProviderAccountID == "" || status.SubscriptionExpiry == nil || status.Plan == chatgpt.PlanUnknown || status.AccountState != chatgpt.StateActive {
-		return preparedImport{}, &ServiceError{Kind: ErrorInvalid, Code: "credential_status_incomplete"}
+	if err := validateCredentialStatus(status, s.now().UTC()); err != nil {
+		return preparedImport{}, err
 	}
 	if email := chatgpt.ExtractEmail(tokens.AccessToken, tokens.IDToken, status.ProviderAccountID); email != "" {
 		status.Email = email

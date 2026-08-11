@@ -222,6 +222,23 @@ func (f *fakeClient) FetchStatus(ctx context.Context, access string) (chatgpt.St
 	return status, nil
 }
 
+func TestSuccessfulStatusCheckClearsHistoricalHTTP401(t *testing.T) {
+	s, db, keyring, _, now := newTestService(t)
+	id := seedAccount(t, db, keyring, "acct-recovered", now.Add(24*time.Hour), now)
+	if _, err := db.Exec(`UPDATE accounts SET last_check_state='error',last_check_error_code='http_401',next_retry_at=? WHERE id=?`, formatTime(now), id); err != nil {
+		t.Fatal(err)
+	}
+	run, done, err := s.RefreshNow(context.Background(), id)
+	if err != nil || !done || run.AccountsOK != 1 || run.AccountsFailed != 0 {
+		t.Fatalf("run=%+v done=%v err=%v", run, done, err)
+	}
+	assertAccountState(t, db, id, StateAlive, CheckOK, false)
+	var checkError sql.NullString
+	if err := db.QueryRow("SELECT last_check_error_code FROM accounts WHERE id=?", id).Scan(&checkError); err != nil || checkError.Valid {
+		t.Fatalf("last_check_error_code=%v err=%v", checkError, err)
+	}
+}
+
 func TestExplicitAccountDisabledSignalsAutomaticallyFinalizeAndDeduplicate(t *testing.T) {
 	s, db, keyring, client, now := newTestService(t)
 	client.errors = map[string]*chatgpt.TypedError{"acct-a": candidate("account_disabled")}
@@ -689,7 +706,7 @@ func TestTransientStatusAfterRefreshDoesNotReuseRotatedRefreshToken(t *testing.T
 	}
 }
 
-func TestGenericAccountCheckDenialAfterRefreshPersistsCredentialsAndSucceeds(t *testing.T) {
+func TestGenericAccountCheckDenialAfterRefreshPersistsCredentialsAndRecordsError(t *testing.T) {
 	for _, test := range []struct {
 		name   string
 		code   string
@@ -714,17 +731,17 @@ func TestGenericAccountCheckDenialAfterRefreshPersistsCredentialsAndSucceeds(t *
 			if err != nil {
 				t.Fatal(err)
 			}
-			if run.AccountsOK != 1 || run.AccountsFailed != 0 || len(run.ErrorCounts) != 0 {
+			if run.AccountsOK != 0 || run.AccountsFailed != 1 || run.ErrorCounts[test.code] != 1 {
 				t.Fatalf("run=%+v", run)
 			}
-			assertAccountState(t, db, id, StateAlive, CheckOK, false)
+			assertAccountState(t, db, id, StateAlive, CheckError, false)
 			var plan, rawPlan string
 			var checkError sql.NullString
 			var envelope []byte
 			if err := db.QueryRow("SELECT plan,raw_plan,last_check_error_code,enc_credentials FROM accounts WHERE id=?", id).Scan(&plan, &rawPlan, &checkError, &envelope); err != nil {
 				t.Fatal(err)
 			}
-			if plan != "plus" || rawPlan != "chatgptplusplan" || checkError.Valid {
+			if plan != "plus" || rawPlan != "chatgptplusplan" || !checkError.Valid || checkError.String != test.code {
 				t.Fatalf("business snapshot changed: plan=%q raw=%q check_error=%v", plan, rawPlan, checkError)
 			}
 			plaintext, err := keyring.Open(envelope, credentialcrypto.CredentialAAD(id, "refresh"))
@@ -754,7 +771,7 @@ func TestGenericAccountCheckDenialAfterRefreshPersistsCredentialsAndSucceeds(t *
 	}
 }
 
-func TestLegacyRefreshCredentialTreatsGenericDenialAsSupplemental(t *testing.T) {
+func TestLegacyRefreshCredentialRecordsGenericDenial(t *testing.T) {
 	s, db, keyring, client, now := newTestService(t)
 	client.errors["acct-refresh"] = &chatgpt.TypedError{Kind: chatgpt.ErrorPermissionDenied, StatusCode: 401, EvidenceCode: "http_401", EvidenceLevel: chatgpt.EvidenceContractVerifiedLivePending, PreserveBusinessState: true}
 	id := seedAccountPayload(t, db, keyring, "acct-refresh", "refresh", credentialPayload{
@@ -767,10 +784,10 @@ func TestLegacyRefreshCredentialTreatsGenericDenialAsSupplemental(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if run.AccountsOK != 1 || run.AccountsFailed != 0 || client.exchanges.Load() != 0 {
+	if run.AccountsOK != 0 || run.AccountsFailed != 1 || run.ErrorCounts["http_401"] != 1 || client.exchanges.Load() != 0 {
 		t.Fatalf("run=%+v exchanges=%d", run, client.exchanges.Load())
 	}
-	assertAccountState(t, db, id, StateAlive, CheckOK, false)
+	assertAccountState(t, db, id, StateAlive, CheckError, false)
 	var envelope []byte
 	if err := db.QueryRow("SELECT enc_credentials FROM accounts WHERE id=?", id).Scan(&envelope); err != nil {
 		t.Fatal(err)
@@ -789,7 +806,7 @@ func TestLegacyRefreshCredentialTreatsGenericDenialAsSupplemental(t *testing.T) 
 	}
 }
 
-func TestDeviceCredentialRotationSurvivesGenericSupplementalDenial(t *testing.T) {
+func TestDeviceCredentialRotationSurvivesGenericDenialAndRecordsError(t *testing.T) {
 	s, db, keyring, client, now := newTestService(t)
 	accessExpiry := now.Add(time.Hour)
 	client.exchangeExpiry = &accessExpiry
@@ -802,10 +819,10 @@ func TestDeviceCredentialRotationSurvivesGenericSupplementalDenial(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if run.AccountsOK != 1 || run.AccountsFailed != 0 {
+	if run.AccountsOK != 0 || run.AccountsFailed != 1 || run.ErrorCounts["http_403"] != 1 {
 		t.Fatalf("run=%+v", run)
 	}
-	assertAccountState(t, db, id, StateAlive, CheckOK, false)
+	assertAccountState(t, db, id, StateAlive, CheckError, false)
 	var envelope []byte
 	if err := db.QueryRow("SELECT enc_credentials FROM accounts WHERE id=?", id).Scan(&envelope); err != nil {
 		t.Fatal(err)

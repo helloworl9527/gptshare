@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"chatgpt-monitor/internal/requestmeta"
 	"github.com/gin-gonic/gin"
 )
 
@@ -95,6 +96,7 @@ func requestID() gin.HandlerFunc {
 		id := hex.EncodeToString(value[:])
 		c.Set("request_id", id)
 		c.Header("X-Request-ID", id)
+		c.Request = c.Request.WithContext(requestmeta.WithRequestID(c.Request.Context(), id))
 		c.Next()
 	}
 }

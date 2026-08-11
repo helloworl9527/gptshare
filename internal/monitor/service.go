@@ -56,14 +56,13 @@ type accountRecord struct {
 }
 
 type pollResult struct {
-	status                  *chatgpt.StatusResult
-	typed                   *chatgpt.TypedError
-	supplementalUnavailable bool
-	endpoint                string
-	code                    string
-	generation              int64
-	reloadCredential        bool
-	skipped                 bool
+	status           *chatgpt.StatusResult
+	typed            *chatgpt.TypedError
+	endpoint         string
+	code             string
+	generation       int64
+	reloadCredential bool
+	skipped          bool
 }
 
 func New(db *sql.DB, client Client, cipher Cipher, cfg Config) (*Service, error) {
@@ -425,9 +424,6 @@ func (s *Service) pollCredentialSnapshot(ctx context.Context, record accountReco
 		}
 		outcome := errorPollResult("accounts_check", statusErr)
 		outcome.generation = record.Generation
-		if isTrustedOAuthSource(credentials.OAuthSource) && isGenericSupplementalDenial(outcome.typed) {
-			return pollResult{supplementalUnavailable: true, endpoint: "accounts_check", code: outcome.code, generation: record.Generation}
-		}
 		if outcome.typed == nil || !outcome.typed.Retryable || attempt == s.cfg.MaxRetries || s.retryPause(ctx, outcome.typed, attempt) != nil {
 			return outcome
 		}
@@ -453,20 +449,6 @@ func credentialNeedsRefresh(credentials credentialPayload, threshold time.Time) 
 		return !credentials.AccessExpiresAt.After(threshold)
 	}
 	return accessNeedsRefresh(credentials.Access, threshold)
-}
-
-func isGenericSupplementalDenial(typed *chatgpt.TypedError) bool {
-	return typed != nil && typed.Kind == chatgpt.ErrorPermissionDenied &&
-		(typed.EvidenceCode == "http_401" || typed.EvidenceCode == "http_403")
-}
-
-func isTrustedOAuthSource(source string) bool {
-	switch source {
-	case "oauth", "refresh", "device":
-		return true
-	default:
-		return false
-	}
 }
 
 func (s *Service) persistCredentialsCAS(ctx context.Context, record accountRecord, credentials credentialPayload) (bool, error) {

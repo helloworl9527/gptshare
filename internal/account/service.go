@@ -397,18 +397,18 @@ func (s *Service) prepare(ctx context.Context, input *TokenInput) (preparedImpor
 		tokens.RefreshToken = input.RefreshToken
 	}
 	status, err := s.client.FetchStatus(ctx, tokens.AccessToken)
-	trustedSource := ""
-	if kind == chatgpt.CredentialRefresh {
-		trustedSource = "refresh"
-	}
-	if err != nil && !acceptTrustedSupplementalFailure(&status, err, trustedSource) {
+	if err != nil {
 		return preparedImport{}, classifyUpstream(err)
 	}
-	if status.EvidenceLevel != chatgpt.EvidenceLiveVerified || status.ProviderAccountID == "" || status.SubscriptionExpiry == nil || status.Plan == chatgpt.PlanUnknown || status.AccountState != chatgpt.StateActive {
-		return preparedImport{}, &ServiceError{Kind: ErrorInvalid, Code: "credential_status_incomplete"}
+	if err := validateCredentialStatus(status, s.now().UTC()); err != nil {
+		return preparedImport{}, err
 	}
 	if email := chatgpt.ExtractEmail(tokens.AccessToken, tokens.IDToken, status.ProviderAccountID); email != "" {
 		status.Email = email
+	}
+	trustedSource := ""
+	if kind == chatgpt.CredentialRefresh {
+		trustedSource = "refresh"
 	}
 	payload, err := json.Marshal(newCredentialPayload(tokens, input.SessionToken, trustedSource))
 	tokens = chatgpt.TokenSet{}
@@ -432,19 +432,26 @@ func newCredentialPayload(tokens chatgpt.TokenSet, session, source string) crede
 	}
 }
 
-func acceptTrustedSupplementalFailure(status *chatgpt.StatusResult, err error, source string) bool {
-	if source == "" {
-		return false
+func validateCredentialStatus(status chatgpt.StatusResult, now time.Time) error {
+	code := ""
+	switch {
+	case strings.TrimSpace(status.ProviderAccountID) == "":
+		code = "credential_account_id_missing"
+	case status.Plan == chatgpt.PlanUnknown:
+		code = "credential_plan_unknown"
+	case status.SubscriptionExpiry == nil:
+		code = "credential_subscription_expiry_missing"
+	case !now.Before(status.SubscriptionExpiry.UTC()):
+		code = "credential_subscription_expired"
+	case status.AccountState != chatgpt.StateActive:
+		code = "credential_account_inactive"
+	case status.EvidenceLevel != chatgpt.EvidenceLiveVerified:
+		code = "credential_evidence_unverified"
 	}
-	var typed *chatgpt.TypedError
-	if !errors.As(err, &typed) || typed.Kind != chatgpt.ErrorPermissionDenied ||
-		(typed.EvidenceCode != "http_401" && typed.EvidenceCode != "http_403") {
-		return false
+	if code != "" {
+		return &ServiceError{Kind: ErrorInvalid, Code: code}
 	}
-	status.AccountState = chatgpt.StateActive
-	status.EvidenceLevel = chatgpt.EvidenceLiveVerified
-	status.EvidenceCode = source + "+accounts_check_" + typed.EvidenceCode
-	return true
+	return nil
 }
 
 func classifyUpstream(err error) error {

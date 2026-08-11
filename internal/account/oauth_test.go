@@ -113,8 +113,8 @@ func TestOAuthStartCompleteAndReplayProtection(t *testing.T) {
 	}
 }
 
-func TestOAuthGenericAccountCheckDenialIsNonBlocking(t *testing.T) {
-	service, _, _, closeDB := testService(t, "acct-oauth-denied")
+func TestOAuthGenericAccountCheckDenialFailsAndClearsSession(t *testing.T) {
+	service, database, _, closeDB := testService(t, "acct-oauth-denied")
 	defer closeDB()
 	client := service.client.(*fakeClient)
 	client.tokens = chatgpt.TokenSet{AccessToken: "oauth-access", RefreshToken: "oauth-refresh", IDToken: "oauth-id"}
@@ -125,12 +125,64 @@ func TestOAuthGenericAccountCheckDenialIsNonBlocking(t *testing.T) {
 	}
 	authorizationURL, _ := url.Parse(start.AuthorizationURL)
 	callback := "http://localhost:1455/auth/callback?code=denied-status&state=" + url.QueryEscape(authorizationURL.Query().Get("state"))
-	accountResult, err := service.CompleteOAuth(context.Background(), start.SessionID, callback)
-	if err != nil {
+	_, err = service.CompleteOAuth(context.Background(), start.SessionID, callback)
+	var serviceErr *ServiceError
+	if !errors.As(err, &serviceErr) || serviceErr.Code != "http_401" {
+		t.Fatalf("completion error=%v", err)
+	}
+	var state string
+	var sessionLength, accounts int
+	if err := database.DB().QueryRow("SELECT state,length(enc_session) FROM oauth_auth_sessions WHERE id=?", start.SessionID).Scan(&state, &sessionLength); err != nil {
 		t.Fatal(err)
 	}
-	if accountResult.Status != "alive" || accountResult.LastCheckState != "ok" {
-		t.Fatalf("account=%+v", accountResult)
+	if err := database.DB().QueryRow("SELECT count(*) FROM accounts").Scan(&accounts); err != nil {
+		t.Fatal(err)
+	}
+	if state != "failed" || sessionLength != 0 || accounts != 0 {
+		t.Fatalf("state=%q session_length=%d accounts=%d", state, sessionLength, accounts)
+	}
+}
+
+func TestOAuthStatusValidationReturnsStableErrorsWithoutCreatingAccount(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		code   string
+		mutate func(*chatgpt.StatusResult, time.Time)
+	}{
+		{name: "account id missing", code: "credential_account_id_missing", mutate: func(status *chatgpt.StatusResult, _ time.Time) { status.ProviderAccountID = "" }},
+		{name: "plan unknown", code: "credential_plan_unknown", mutate: func(status *chatgpt.StatusResult, _ time.Time) { status.Plan = chatgpt.PlanUnknown }},
+		{name: "expiry missing", code: "credential_subscription_expiry_missing", mutate: func(status *chatgpt.StatusResult, _ time.Time) { status.SubscriptionExpiry = nil }},
+		{name: "subscription expired", code: "credential_subscription_expired", mutate: func(status *chatgpt.StatusResult, now time.Time) { status.SubscriptionExpiry = &now }},
+		{name: "account inactive", code: "credential_account_inactive", mutate: func(status *chatgpt.StatusResult, _ time.Time) { status.AccountState = chatgpt.StatePermissionDenied }},
+		{name: "evidence unverified", code: "credential_evidence_unverified", mutate: func(status *chatgpt.StatusResult, _ time.Time) { status.EvidenceLevel = chatgpt.EvidenceUnverified }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service, database, _, closeDB := testService(t, "acct-oauth-fields")
+			defer closeDB()
+			client := service.client.(*fakeClient)
+			client.tokens = chatgpt.TokenSet{AccessToken: "oauth-access", RefreshToken: "oauth-refresh"}
+			test.mutate(&client.status, service.now().UTC())
+			start, err := service.StartOAuthImport(context.Background(), "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			authorizationURL, _ := url.Parse(start.AuthorizationURL)
+			callback := "http://localhost:1455/auth/callback?code=invalid-status&state=" + url.QueryEscape(authorizationURL.Query().Get("state"))
+			_, err = service.CompleteOAuth(context.Background(), start.SessionID, callback)
+			var serviceErr *ServiceError
+			if !errors.As(err, &serviceErr) || serviceErr.Code != test.code {
+				t.Fatalf("error=%v want=%s", err, test.code)
+			}
+			var state string
+			var sessionLength, accounts int
+			if err := database.DB().QueryRow("SELECT state,length(enc_session) FROM oauth_auth_sessions WHERE id=?", start.SessionID).Scan(&state, &sessionLength); err != nil {
+				t.Fatal(err)
+			}
+			_ = database.DB().QueryRow("SELECT count(*) FROM accounts").Scan(&accounts)
+			if state != "failed" || sessionLength != 0 || accounts != 0 {
+				t.Fatalf("state=%q session_length=%d accounts=%d", state, sessionLength, accounts)
+			}
+		})
 	}
 }
 

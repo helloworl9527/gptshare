@@ -227,11 +227,11 @@ func (s *Service) prepareOAuthTokens(ctx context.Context, tokens chatgpt.TokenSe
 		return preparedImport{}, &ServiceError{Kind: ErrorInvalid, Code: "oauth_token_incomplete"}
 	}
 	status, err := s.client.FetchStatus(ctx, tokens.AccessToken)
-	if err != nil && !acceptTrustedSupplementalFailure(&status, err, "oauth") {
+	if err != nil {
 		return preparedImport{}, classifyUpstream(err)
 	}
-	if status.EvidenceLevel != chatgpt.EvidenceLiveVerified || status.ProviderAccountID == "" || status.SubscriptionExpiry == nil || status.Plan == chatgpt.PlanUnknown || status.AccountState != chatgpt.StateActive {
-		return preparedImport{}, &ServiceError{Kind: ErrorInvalid, Code: "credential_status_incomplete"}
+	if err := validateCredentialStatus(status, s.now().UTC()); err != nil {
+		return preparedImport{}, err
 	}
 	if email := chatgpt.ExtractEmail(tokens.AccessToken, tokens.IDToken, status.ProviderAccountID); email != "" {
 		status.Email = email

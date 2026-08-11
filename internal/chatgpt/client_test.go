@@ -15,6 +15,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"chatgpt-monitor/internal/requestmeta"
 )
 
 func testJWT(t *testing.T, accountID, plan string, expiry any) string {
@@ -97,6 +99,108 @@ func TestExplicitLiveEvidenceLevel(t *testing.T) {
 	}
 	if result.EvidenceLevel != EvidenceLiveVerified || result.AccountState != StateActive {
 		t.Fatalf("result=%+v", result)
+	}
+}
+
+func TestFetchStatusCompatibilityRetrySucceeds(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			if r.Header.Get("X-Authorization") != "" || r.Header.Get("Chatgpt-Account-Id") != "" {
+				t.Fatalf("primary request used compatibility headers: %#v", r.Header)
+			}
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":{"code":"invalid_token"}}`))
+			return
+		}
+		if r.Header.Get("X-Authorization") != r.Header.Get("Authorization") || r.Header.Get("Chatgpt-Account-Id") != "acct-test" {
+			t.Fatalf("compatibility request headers=%#v", r.Header)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"accounts": map[string]any{"acct-test": map[string]any{
+			"account":     map[string]any{"account_id": "acct-test"},
+			"entitlement": map[string]any{"subscription_plan": "chatgptplusplan", "expires_at": "2026-08-19T00:00:00Z"},
+		}}})
+	}))
+	defer server.Close()
+
+	result, err := NewClient(Config{StatusURL: server.URL, EvidenceLevel: EvidenceLiveVerified}).FetchStatus(context.Background(), testJWT(t, "acct-test", "plus", nil))
+	if err != nil || calls != 2 || result.EvidenceCode != "access_claim+accounts_check_compat_2xx" || result.EvidenceLevel != EvidenceLiveVerified {
+		t.Fatalf("result=%+v calls=%d err=%v", result, calls, err)
+	}
+}
+
+func TestFetchStatusCompatibilityRetryStillDenied(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 2 && (r.Header.Get("X-Authorization") == "" || r.Header.Get("Chatgpt-Account-Id") != "acct-test") {
+			t.Fatalf("compatibility headers missing: %#v", r.Header)
+		}
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"error":{"code":"insufficient_scope"}}`))
+	}))
+	defer server.Close()
+
+	_, err := NewClient(Config{StatusURL: server.URL}).FetchStatus(context.Background(), testJWT(t, "acct-test", "plus", nil))
+	var typed *TypedError
+	if !errors.As(err, &typed) || typed.EvidenceCode != "http_403" || calls != 2 {
+		t.Fatalf("error=%#v calls=%d", err, calls)
+	}
+}
+
+func TestFetchStatusExplicitRevocationDoesNotRetry(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":{"code":"token_revoked"}}`))
+	}))
+	defer server.Close()
+
+	_, err := NewClient(Config{StatusURL: server.URL}).FetchStatus(context.Background(), testJWT(t, "acct-test", "plus", nil))
+	var typed *TypedError
+	if !errors.As(err, &typed) || typed.EvidenceCode != "token_revoked" || calls != 1 {
+		t.Fatalf("error=%#v calls=%d", err, calls)
+	}
+}
+
+func TestFetchStatusRejectsMismatchedAccount(t *testing.T) {
+	for _, body := range []string{
+		`{"accounts":{"other-account":{"account":{"account_id":"other-account"},"entitlement":{"subscription_plan":"chatgptplusplan","expires_at":"2026-08-19T00:00:00Z"}}}}`,
+		`{"accounts":{"acct-test":{"account":{"account_id":"other-account"},"entitlement":{"subscription_plan":"chatgptplusplan","expires_at":"2026-08-19T00:00:00Z"}}}}`,
+	} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(body))
+		}))
+		_, err := NewClient(Config{StatusURL: server.URL}).FetchStatus(context.Background(), testJWT(t, "acct-test", "plus", nil))
+		server.Close()
+		var typed *TypedError
+		if !errors.As(err, &typed) || typed.EvidenceCode != "provider_account_mismatch" || typed.EvidenceLevel != EvidenceUnverified {
+			t.Fatalf("error=%#v", err)
+		}
+	}
+}
+
+func TestFetchStatusDoesNotFollowCrossOriginRedirect(t *testing.T) {
+	targetCalls := 0
+	target := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		targetCalls++
+		if r.Header.Get("Authorization") != "" || r.Header.Get("X-Authorization") != "" || r.Header.Get("Chatgpt-Account-Id") != "" {
+			t.Fatalf("credentials reached redirect target: %#v", r.Header)
+		}
+	}))
+	defer target.Close()
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Location", target.URL)
+		w.WriteHeader(http.StatusTemporaryRedirect)
+	}))
+	defer source.Close()
+
+	_, err := NewClient(Config{StatusURL: source.URL}).FetchStatus(context.Background(), testJWT(t, "acct-test", "plus", nil))
+	var typed *TypedError
+	if !errors.As(err, &typed) || typed.EvidenceCode != "unexpected_non_json" || targetCalls != 0 {
+		t.Fatalf("error=%#v target_calls=%d", err, targetCalls)
 	}
 }
 
@@ -416,15 +520,18 @@ func TestGenericStatusDenialDebugLogContainsOnlySafeDiagnostics(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	defer slog.SetDefault(previous)
 	client := NewClient(Config{StatusURL: server.URL})
-	result, err := client.FetchStatus(context.Background(), testJWT(t, "acct-test", "plus", nil))
+	ctx := requestmeta.WithRequestID(context.Background(), "safe-request-123")
+	result, err := client.FetchStatus(ctx, testJWT(t, "acct-test", "plus", nil))
 	if err == nil || result.ResponseHash == "" {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
 	logged := logs.String()
-	if !strings.Contains(logged, "endpoint=accounts_check") || !strings.Contains(logged, "status_code=401") || !strings.Contains(logged, "response_hash="+result.ResponseHash) {
+	if !strings.Contains(logged, "request_id=safe-request-123") || !strings.Contains(logged, "request_stage=primary") ||
+		!strings.Contains(logged, "request_stage=compatibility_retry") || !strings.Contains(logged, "request_config=browser_account_headers") ||
+		!strings.Contains(logged, "status_code=401") || !strings.Contains(logged, "response_hash="+result.ResponseHash) {
 		t.Fatalf("safe diagnostics missing: %s", logged)
 	}
-	if strings.Contains(logged, secretMarker) || strings.Contains(logged, "Bearer ") {
+	if strings.Contains(logged, secretMarker) || strings.Contains(logged, "Bearer ") || strings.Contains(logged, "acct-test") {
 		t.Fatalf("sensitive response data reached logs: %s", logged)
 	}
 }

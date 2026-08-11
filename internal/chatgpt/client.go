@@ -15,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"chatgpt-monitor/internal/requestmeta"
 )
 
 const (
@@ -202,7 +204,11 @@ func (c *Client) RefreshExpiredAccess(ctx context.Context, expiredAccessToken, r
 		return result, tokens, err
 	}
 	result.AccountState = StateAccessExpiredRefreshable
-	result.EvidenceCode = "access_expired+refresh+accounts_check_2xx"
+	if result.EvidenceCode == "access_claim+accounts_check_compat_2xx" {
+		result.EvidenceCode = "access_expired+refresh+accounts_check_compat_2xx"
+	} else {
+		result.EvidenceCode = "access_expired+refresh+accounts_check_2xx"
+	}
 	return result, tokens, nil
 }
 
@@ -261,31 +267,89 @@ func (c *Client) FetchStatus(ctx context.Context, accessToken string) (StatusRes
 		return result, newTypedError(ErrorContractChanged, 0, "provider_account_claim_missing", EvidenceContractVerifiedLivePending, false, false, true, nil)
 	}
 
+	status, body, hash, doErr := c.fetchStatusAttempt(ctx, accessToken, result.ProviderAccountID, false)
+	result.ResponseHash = hash
+	if doErr != nil {
+		setStatusError(&result, doErr)
+		c.logStatusAttempt(ctx, "primary", "browser", status, hash, result, false)
+		return result, doErr
+	}
+	if shouldRetryStatusCompatibility(status, body) {
+		c.logStatusAttempt(ctx, "primary", "browser", status, hash, result, false)
+		status, body, hash, doErr = c.fetchStatusAttempt(ctx, accessToken, result.ProviderAccountID, true)
+		result.ResponseHash = hash
+		if doErr != nil {
+			setStatusError(&result, doErr)
+			c.logStatusAttempt(ctx, "compatibility_retry", "browser_account_headers", status, hash, result, false)
+			return result, doErr
+		}
+		parsed, parseErr := c.parseStatusResponse(result, accessToken, status, body, true)
+		c.logStatusAttempt(ctx, "compatibility_retry", "browser_account_headers", status, hash, parsed, parseErr == nil)
+		return parsed, parseErr
+	}
+	parsed, parseErr := c.parseStatusResponse(result, accessToken, status, body, false)
+	c.logStatusAttempt(ctx, "primary", "browser", status, hash, parsed, parseErr == nil)
+	return parsed, parseErr
+}
+
+func (c *Client) fetchStatusAttempt(ctx context.Context, accessToken, providerAccountID string, compatibility bool) (int, []byte, string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.statusURL, nil)
 	if err != nil {
-		return result, transient("status_request_create", err)
+		return 0, nil, "", transient("status_request_create", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(accessToken))
+	token := strings.TrimSpace(accessToken)
+	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Origin", "https://chatgpt.com")
 	req.Header.Set("Referer", "https://chatgpt.com/")
 	req.Header.Set("User-Agent", statusUserAgent)
-	status, body, hash, doErr := c.do(req)
-	result.ResponseHash = hash
-	if doErr != nil {
-		var typed *Error
-		if errors.As(doErr, &typed) {
-			result.AccountState = stateForError(typed.Kind)
-			result.EvidenceCode = typed.EvidenceCode
-			result.EvidenceLevel = typed.EvidenceLevel
-		}
-		return result, doErr
+	if compatibility {
+		req.Header.Set("X-Authorization", "Bearer "+token)
+		req.Header.Set("Chatgpt-Account-Id", providerAccountID)
 	}
+	return c.doWithClient(c.statusHTTPClient(req.URL), req)
+}
+
+func (c *Client) statusHTTPClient(origin *url.URL) *http.Client {
+	client := *c.httpClient
+	configuredRedirect := c.httpClient.CheckRedirect
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if !sameOrigin(origin, req.URL) {
+			return http.ErrUseLastResponse
+		}
+		if configuredRedirect != nil {
+			return configuredRedirect(req, via)
+		}
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		return nil
+	}
+	return &client
+}
+
+func sameOrigin(left, right *url.URL) bool {
+	return left != nil && right != nil && strings.EqualFold(left.Scheme, right.Scheme) && strings.EqualFold(left.Host, right.Host)
+}
+
+func shouldRetryStatusCompatibility(status int, body []byte) bool {
+	if status != http.StatusUnauthorized && status != http.StatusForbidden {
+		return false
+	}
+	var typed *TypedError
+	return errors.As(classifyHTTP(status, body), &typed) && typed.Kind == ErrorPermissionDenied &&
+		(typed.EvidenceCode == "http_401" || typed.EvidenceCode == "http_403")
+}
+
+func (c *Client) parseStatusResponse(result StatusResult, accessToken string, status int, body []byte, compatibility bool) (StatusResult, error) {
 	if status >= 200 && status < 300 {
 		if !json.Valid(body) {
 			return result, newTypedError(ErrorContractChanged, status, "status_non_json", EvidenceContractVerifiedLivePending, false, false, true, nil)
 		}
 		account, parseErr := parseAccountCheck(body, result.ProviderAccountID)
+		if errors.Is(parseErr, errProviderAccountNotFound) {
+			return result, newTypedError(ErrorContractChanged, status, "provider_account_mismatch", EvidenceUnverified, false, false, true, parseErr)
+		}
 		if parseErr != nil {
 			return result, newTypedError(ErrorContractChanged, status, "account_check_contract_changed", EvidenceContractVerifiedLivePending, false, false, true, parseErr)
 		}
@@ -297,20 +361,39 @@ func (c *Client) FetchStatus(ctx context.Context, accessToken string) (StatusRes
 		}
 		result.AccountState = StateActive
 		result.EvidenceCode = "access_claim+accounts_check_2xx"
+		if compatibility {
+			result.EvidenceCode = "access_claim+accounts_check_compat_2xx"
+		}
 		result.EvidenceLevel = c.evidenceLevel
 		result.Email = ExtractEmail(accessToken, "", result.ProviderAccountID)
 		return result, nil
 	}
 	classified := classifyHTTP(status, body)
-	if typed, ok := classified.(*Error); ok {
+	setStatusError(&result, classified)
+	return result, classified
+}
+
+func setStatusError(result *StatusResult, err error) {
+	var typed *TypedError
+	if errors.As(err, &typed) {
 		result.AccountState = stateForError(typed.Kind)
 		result.EvidenceCode = typed.EvidenceCode
 		result.EvidenceLevel = typed.EvidenceLevel
-		if typed.Kind == ErrorPermissionDenied && (status == http.StatusUnauthorized || status == http.StatusForbidden) {
-			slog.DebugContext(ctx, "ChatGPT supplemental account check denied", "endpoint", "accounts_check", "status_code", status, "response_hash", hash)
-		}
 	}
-	return result, classified
+}
+
+func (c *Client) logStatusAttempt(ctx context.Context, stage, config string, status int, hash string, result StatusResult, responseVerified bool) {
+	slog.DebugContext(ctx, "ChatGPT account status request completed",
+		"request_id", requestmeta.RequestID(ctx),
+		"request_stage", stage,
+		"request_config", config,
+		"status_code", status,
+		"response_hash", hash,
+		"has_account_id", responseVerified && result.ProviderAccountID != "",
+		"has_plan", responseVerified && result.Plan != PlanUnknown,
+		"has_subscription_expiry", responseVerified && result.SubscriptionExpiry != nil,
+		"has_live_evidence", responseVerified && result.EvidenceLevel == EvidenceLiveVerified,
+	)
 }
 
 type accountCheckResult struct {
@@ -328,6 +411,8 @@ type accountCheckEntry struct {
 	} `json:"entitlement"`
 }
 
+var errProviderAccountNotFound = errors.New("provider account not found")
+
 func parseAccountCheck(body []byte, providerAccountID string) (accountCheckResult, error) {
 	var payload struct {
 		Accounts map[string]accountCheckEntry `json:"accounts"`
@@ -341,19 +426,16 @@ func parseAccountCheck(body []byte, providerAccountID string) (accountCheckResul
 	var selected *accountCheckEntry
 	for key, account := range payload.Accounts {
 		if key == providerAccountID || account.Account.AccountID == providerAccountID {
+			if account.Account.AccountID != providerAccountID {
+				return accountCheckResult{}, errProviderAccountNotFound
+			}
 			copy := account
 			selected = &copy
 			break
 		}
 	}
-	if selected == nil && len(payload.Accounts) == 1 {
-		for _, account := range payload.Accounts {
-			copy := account
-			selected = &copy
-		}
-	}
 	if selected == nil {
-		return accountCheckResult{}, fmt.Errorf("provider account not found")
+		return accountCheckResult{}, errProviderAccountNotFound
 	}
 	result := accountCheckResult{RawPlan: selected.Entitlement.SubscriptionPlan}
 	if len(selected.Entitlement.ExpiresAt) > 0 && string(selected.Entitlement.ExpiresAt) != "null" {
@@ -428,7 +510,11 @@ func normalizePlan(raw string) Plan {
 }
 
 func (c *Client) do(req *http.Request) (int, []byte, string, error) {
-	resp, err := c.httpClient.Do(req)
+	return c.doWithClient(c.httpClient, req)
+}
+
+func (c *Client) doWithClient(client *http.Client, req *http.Request) (int, []byte, string, error) {
+	resp, err := client.Do(req)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 			return 0, nil, "", newTypedError(ErrorUpstreamTransient, 0, "upstream_timeout", EvidenceContractVerifiedLivePending, true, false, true, err)
