@@ -247,6 +247,26 @@ tbody tr { border-left: 4px solid var(--green); }
 .modal-form { display: grid; gap: 10px; margin-top: 18px; }
 .modal-form label { color: #3d4c45; font-size: 13px; font-weight: 650; }
 .modal-form input, .modal-form select { width: 100%; min-height: 44px; border: 1px solid #cdd7d2; border-radius: 3px; background: #fff; color: var(--ink); padding: 10px 12px; }
+.credentials-panel { margin-top: 20px; border: 1px solid var(--line); border-left: 4px solid var(--cyan); background: #f8fbfa; padding: 18px; }
+.credentials-heading { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+.credentials-heading .section-index { margin-bottom: 4px; }
+.credentials-heading h3 { margin: 0; font: 650 18px var(--display); }
+.credentials-heading button { min-height: 38px; padding: 0 13px; }
+.credential-values { display: grid; gap: 15px; margin-top: 18px; }
+.credential-field { display: grid; gap: 7px; min-width: 0; }
+.credential-field label, .credential-label { color: #3d4c45; font-size: 12px; font-weight: 700; }
+.credential-control { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 7px; min-width: 0; }
+.credential-control input { width: 100%; min-width: 0; min-height: 42px; border: 1px solid #cdd7d2; border-radius: 3px; background: #fff; color: var(--ink); padding: 9px 11px; font: 650 12px var(--mono); }
+.credential-control code { min-width: 0; overflow-wrap: anywhere; border: 1px solid var(--line); background: #fff; padding: 11px; font: 650 12px/1.5 var(--mono); }
+.credential-control .refresh-button { min-height: 38px; padding: 0 11px; }
+.password-visibility-button { display: grid; place-items: center; min-width: 38px; }
+.eye-icon { position: relative; display: block; width: 18px; height: 12px; border: 2px solid currentColor; border-radius: 50%; }
+.eye-icon::after { content: ''; position: absolute; left: 50%; top: 50%; width: 4px; height: 4px; border-radius: 50%; background: currentColor; transform: translate(-50%, -50%); }
+.eye-icon.is-visible::before { content: ''; position: absolute; left: -3px; top: 4px; z-index: 1; width: 20px; height: 2px; background: currentColor; transform: rotate(-35deg); }
+.credential-code { color: var(--ink); font: 750 24px var(--mono); font-variant-numeric: tabular-nums; }
+.credential-countdown { color: var(--muted); font: 650 11px var(--mono); white-space: nowrap; }
+.credential-alert { margin: 13px 0 0; border-left: 3px solid var(--red); background: #fff2f2; color: #91252b !important; padding: 10px 12px; font-size: 12px; }
+.credential-copy-status { margin: 0; color: var(--green-dark) !important; font-size: 12px; }
 .duration-shortcuts { display: flex; flex-wrap: wrap; gap: 8px; }
 .duration-shortcuts button { min-width: 64px; }
 .field-hint { color: var(--muted); line-height: 1.5; }

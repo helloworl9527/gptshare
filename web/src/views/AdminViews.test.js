@@ -142,6 +142,90 @@ describe('P2 admin views', () => {
     wrapper.unmount()
   })
 
+  it('reveals credentials only on demand, corrects clock skew, updates TOTP, copies, and clears on close', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-08-11T12:00:05Z'))
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    vi.stubGlobal('navigator', { clipboard: { writeText } })
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(response({ accounts }))
+      .mockResolvedValueOnce(response(accountSettings))
+      .mockResolvedValueOnce(response({ csrf_token: 'c'.repeat(43) }))
+      .mockResolvedValueOnce(response({
+        account_id: 1,
+        password: 'revealed-password-value',
+        totp: { secret: 'JBSWY3DPEHPK3PXP', period: 30, digits: 6, algorithm: 'SHA1' },
+        server_time: '2026-08-11T12:00:25Z',
+        request_id: 'reveal-request',
+      }))
+    const wrapper = await render(Accounts, fetchMock)
+    await wrapper.findAll('button').find((button) => button.text() === '编辑').trigger('click')
+    expect(fetchMock.mock.calls.map(([url]) => String(url))).not.toContain('/api/admin/accounts/1/credentials/reveal')
+
+    await wrapper.findAll('button').find((button) => button.text() === '查看凭据').trigger('click')
+    await flushPromises()
+    const password = wrapper.get('#revealed-password')
+    expect(password.attributes('type')).toBe('password')
+    expect(password.element.value).toBe('revealed-password-value')
+    expect(wrapper.get('#revealed-totp-secret').text()).toBe('JBSWY3DPEHPK3PXP')
+    await vi.waitFor(() => expect(wrapper.get('#revealed-totp-code').text()).toMatch(/^\d{6}$/))
+    expect(wrapper.text()).toContain('5 秒')
+
+    await wrapper.get('[aria-label="显示密码"]').trigger('click')
+    expect(wrapper.get('#revealed-password').attributes('type')).toBe('text')
+    await wrapper.findAll('.credentials-panel button').find((button) => button.text() === '复制').trigger('click')
+    await flushPromises()
+    expect(writeText).toHaveBeenCalledWith('revealed-password-value')
+    expect(wrapper.text()).toContain('密码已复制')
+
+    const firstCode = wrapper.get('#revealed-totp-code').text()
+    await vi.advanceTimersByTimeAsync(6_000)
+    await vi.waitFor(() => expect(wrapper.get('#revealed-totp-code').text()).not.toBe(firstCode))
+    expect(wrapper.get('#revealed-totp-code').text()).toMatch(/^\d{6}$/)
+
+    await wrapper.get('[role="dialog"] .icon-button').trigger('click')
+    expect(wrapper.html()).not.toContain('revealed-password-value')
+    expect(wrapper.html()).not.toContain('JBSWY3DPEHPK3PXP')
+    await vi.advanceTimersByTimeAsync(31_000)
+    expect(wrapper.find('#revealed-totp-code').exists()).toBe(false)
+    wrapper.unmount()
+    vi.useRealTimers()
+  })
+
+  it('keeps an invalid Secret copyable, reports TOTP failure, and clears on session expiry', async () => {
+    const writeText = vi.fn().mockRejectedValue(new Error('denied'))
+    vi.stubGlobal('navigator', { clipboard: { writeText } })
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(response({ accounts }))
+      .mockResolvedValueOnce(response(accountSettings))
+      .mockResolvedValueOnce(response({ csrf_token: 'c'.repeat(43) }))
+      .mockResolvedValueOnce(response({
+        account_id: 1,
+        password: 'temporary-password',
+        totp: { secret: 'INVALID-SECRET!', period: 30, digits: 6, algorithm: 'SHA1' },
+        server_time: new Date().toISOString(),
+        request_id: 'invalid-secret-request',
+      }))
+    const wrapper = await render(Accounts, fetchMock)
+    await wrapper.findAll('button').find((button) => button.text() === '编辑').trigger('click')
+    await wrapper.findAll('button').find((button) => button.text() === '查看凭据').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('#revealed-totp-secret').text()).toBe('INVALID-SECRET!')
+    expect(wrapper.text()).toContain('2FA Secret 格式无效，无法生成动态验证码')
+    const copyButtons = wrapper.findAll('.credentials-panel button').filter((button) => button.text() === '复制')
+    await copyButtons[1].trigger('click')
+    await flushPromises()
+    expect(writeText).toHaveBeenCalledWith('INVALID-SECRET!')
+    expect(wrapper.text()).toContain('2FA Secret复制失败，请手动选择')
+
+    window.dispatchEvent(new CustomEvent('session-expired'))
+    await flushPromises()
+    expect(wrapper.html()).not.toContain('temporary-password')
+    expect(wrapper.html()).not.toContain('INVALID-SECRET!')
+    expect(wrapper.findAll('button').some((button) => button.text() === '查看凭据')).toBe(true)
+    wrapper.unmount()
+  })
+
   it('confirms safe retirement, reports migrations, and blocks repeated clicks', async () => {
     let finishRetirement
     const retirement = new Promise((resolve) => { finishRetirement = resolve })

@@ -14,8 +14,9 @@ import (
 )
 
 var (
-	ErrValidation = errors.New("account validation failed")
-	ErrNotFound   = errors.New("account not found")
+	ErrValidation             = errors.New("account validation failed")
+	ErrNotFound               = errors.New("account not found")
+	ErrCredentialsUnavailable = errors.New("account credentials unavailable")
 )
 
 type Repository interface {
@@ -32,6 +33,8 @@ type Repository interface {
 	CreateMonitorSyncRun(context.Context, int) (int64, error)
 	FinishMonitorSyncRun(context.Context, int64, string, int, int, string) error
 	LatestMonitorSyncRun(context.Context) (repository.MonitorSyncRun, error)
+	Credentials(context.Context, int64) (repository.AccountCredentials, error)
+	Audit(context.Context, string, string, int64, map[string]any) error
 }
 
 type MonitorImporter interface {
@@ -84,6 +87,12 @@ type SyncResult struct {
 type ListResult struct {
 	Accounts []models.Account
 	Warnings []string
+}
+
+type RevealedCredentials struct {
+	AccountID  int64
+	Password   string
+	TOTPSecret string
 }
 
 type BatchSyncResult struct {
@@ -434,6 +443,26 @@ func (s *Service) Get(ctx context.Context, id int64) (models.Account, error) {
 		return models.Account{}, ErrNotFound
 	}
 	return account, err
+}
+
+func (s *Service) RevealCredentials(ctx context.Context, id int64) (RevealedCredentials, error) {
+	if _, err := s.Get(ctx, id); err != nil {
+		return RevealedCredentials{}, err
+	}
+	credentials, err := s.repo.Credentials(ctx, id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return RevealedCredentials{}, ErrNotFound
+	}
+	if errors.Is(err, repository.ErrAccountCredentialsUnavailable) {
+		return RevealedCredentials{}, ErrCredentialsUnavailable
+	}
+	if err != nil {
+		return RevealedCredentials{}, err
+	}
+	if err := s.repo.Audit(ctx, "accounts.credentials.reveal", "account", id, nil); err != nil {
+		return RevealedCredentials{}, err
+	}
+	return RevealedCredentials{AccountID: id, Password: credentials.Password, TOTPSecret: credentials.TOTPSecret}, nil
 }
 
 func (s *Service) List(ctx context.Context) ([]models.Account, error) {

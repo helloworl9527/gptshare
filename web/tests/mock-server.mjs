@@ -3,6 +3,7 @@ import http from 'node:http'
 const csrf = 'test-csrf-token-with-sufficient-entropy-0000001'
 let scenario = 'default'
 let accounts = []
+let accountCredentials = new Map()
 let cards = []
 let defaultAccountCapacity = 3
 const monitorAccounts = [
@@ -20,6 +21,11 @@ function resetData() {
     { id: 2, display_username: 'amber-allocation@example.test', account_expiry: '2026-07-28T00:00:00Z', max_concurrent_users: 2, current_allocations: 2, monitor_status: 'unknown_monitor', status: 'full' },
     { id: 3, display_username: 'banned@example.test', account_expiry: '2026-08-03T00:00:00Z', max_concurrent_users: 2, current_allocations: 0, monitor_status: 'dead_banned', status: 'available' },
   ]
+  accountCredentials = new Map([
+    [1, { password: 'north-account-password', secret: 'JBSWY3DPEHPK3PXP' }],
+    [2, { password: 'amber-account-password', secret: 'JBSWY3DPEHPK3PXP' }],
+    [3, { password: 'banned-account-password', secret: 'JBSWY3DPEHPK3PXP' }],
+  ])
   cards = [
     { id: 1, code_suffix: 'ABCD', duration_days: 7, status: 'unused', created_at: '2026-07-24T00:00:00Z', updated_at: '2026-07-24T00:00:00Z' },
     { id: 2, code_suffix: 'EFGH', duration_days: 30, status: 'redeemed', redeemed_at: '2026-07-24T01:00:00Z', expires_at: '2026-08-23T00:00:00Z', created_at: '2026-07-24T00:00:00Z', updated_at: '2026-07-24T01:00:00Z' },
@@ -164,6 +170,23 @@ const server = http.createServer(async (request, response) => {
   if (url.pathname === '/api/admin/accounts/apply-default-capacity' && request.method === 'POST') { if (!protect(request, response)) return; accounts = accounts.map((item) => ({ ...item, max_concurrent_users: defaultAccountCapacity, status: item.current_allocations >= defaultAccountCapacity ? 'full' : item.status === 'full' ? 'available' : item.status })); return send(response, 200, { default_account_capacity: defaultAccountCapacity, updated_accounts: accounts.length }) }
   const accountAction = url.pathname.match(/^\/api\/admin\/accounts\/(\d+)\/sync-status$/)
   if (accountAction && request.method === 'POST') { if (!protect(request, response)) return; return send(response, 200, { account: accounts.find((item) => item.id === Number(accountAction[1])) || accounts[0], warnings: [] }) }
+  const accountCredentialReveal = url.pathname.match(/^\/api\/admin\/accounts\/(\d+)\/credentials\/reveal$/)
+  if (accountCredentialReveal && request.method === 'GET') {
+    if (!protect(request, response)) return
+    if (request.headers['x-csrf-token'] !== csrf) return send(response, 403, { code: 'csrf_rejected' })
+    const accountID = Number(accountCredentialReveal[1])
+    const existing = accounts.find((item) => item.id === accountID)
+    if (!existing) return send(response, 404, { code: 'not_found' })
+    const credentials = accountCredentials.get(accountID)
+    if (!credentials) return send(response, 409, { code: 'account_credentials_unavailable' })
+    return send(response, 200, {
+      account_id: accountID,
+      password: credentials.password,
+      totp: { secret: credentials.secret, period: 30, digits: 6, algorithm: 'SHA1' },
+      server_time: new Date(Math.floor(Date.now() / 30_000) * 30_000 + 5_000).toISOString(),
+      request_id: 'mock-account-credential-reveal',
+    })
+  }
   const account = url.pathname.match(/^\/api\/admin\/accounts\/(\d+)$/)
   if (account && request.method === 'PUT') {
     if (!protect(request, response)) return
@@ -179,6 +202,13 @@ const server = http.createServer(async (request, response) => {
       monitor_account_id: body.monitor_account_id,
       source_url: body.source_url,
     })
+    const previousCredentials = accountCredentials.get(existing.id) || { password: '', secret: '' }
+    if (body.display_password || body.display_2fa_secret) {
+      accountCredentials.set(existing.id, {
+        password: body.display_password || previousCredentials.password,
+        secret: body.display_2fa_secret || previousCredentials.secret,
+      })
+    }
     return send(response, 200, { account: existing })
   }
   if (account && request.method === 'DELETE') { if (!protect(request, response)) return; accounts = accounts.filter((item) => item.id !== Number(account[1])); return send(response, 200, { archived: true, replaced_allocations: 0, closed_allocations: 0, request_id: 'mock-retire-request' }) }

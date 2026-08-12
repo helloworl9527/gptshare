@@ -5,7 +5,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"io"
 	"log/slog"
 	"net/http"
 	"net/http/cookiejar"
@@ -14,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -32,6 +32,8 @@ import (
 	"github.com/pquerna/otp/hotp"
 	"golang.org/x/crypto/bcrypt"
 )
+
+var testAccountLogs sync.Map
 
 func TestAdminAccountCRUDSyncDegradeAndLeakRedaction(t *testing.T) {
 	phaseOne := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -166,6 +168,133 @@ func TestAdminAccountCRUDSyncDegradeAndLeakRedaction(t *testing.T) {
 	}
 	if strings.Contains(offlineBody, "offline-password-sentinel") || strings.Contains(offlineBody, "offline-totp-sentinel") || strings.Contains(offlineBody, "offline-monitor-token") {
 		t.Fatalf("offline response leaked credential: %s", offlineBody)
+	}
+}
+
+func TestAdminAccountCredentialRevealSecurityContract(t *testing.T) {
+	server := testAccountsTLSServer(t, "http://127.0.0.1:1")
+	defer server.Close()
+	authed := authedAccountClient(t, server)
+	csrf := getCSRF(t, authed, server.URL)
+	accountID := createLocalAccountForHTTP(t, authed, server.URL, csrf)
+
+	unauthenticated := &http.Client{Transport: server.Client().Transport}
+	response := getRaw(t, unauthenticated, server.URL+"/api/admin/accounts/"+itoa(accountID)+"/credentials/reveal")
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated reveal status=%d body=%s", response.StatusCode, readBody(t, response))
+	}
+	if response.Header.Get("Cache-Control") != "no-store" {
+		t.Fatalf("unauthenticated reveal Cache-Control=%q", response.Header.Get("Cache-Control"))
+	}
+
+	response = getRaw(t, authed, server.URL+"/api/admin/accounts/"+itoa(accountID)+"/credentials/reveal")
+	if response.StatusCode != http.StatusForbidden {
+		t.Fatalf("reveal without csrf status=%d body=%s", response.StatusCode, readBody(t, response))
+	}
+	if response.Header.Get("Cache-Control") != "no-store" {
+		t.Fatalf("csrf rejection Cache-Control=%q", response.Header.Get("Cache-Control"))
+	}
+
+	response = getAccountCredentials(t, authed, server.URL, accountID, csrf)
+	body := readBody(t, response)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("reveal status=%d body=%s", response.StatusCode, body)
+	}
+	if response.Header.Get("Cache-Control") != "no-store" {
+		t.Fatalf("reveal Cache-Control=%q", response.Header.Get("Cache-Control"))
+	}
+	var revealed struct {
+		AccountID int64  `json:"account_id"`
+		Password  string `json:"password"`
+		TOTP      struct {
+			Secret    string `json:"secret"`
+			Period    int    `json:"period"`
+			Digits    int    `json:"digits"`
+			Algorithm string `json:"algorithm"`
+		} `json:"totp"`
+		ServerTime string `json:"server_time"`
+		RequestID  string `json:"request_id"`
+	}
+	if err := json.Unmarshal([]byte(body), &revealed); err != nil {
+		t.Fatal(err)
+	}
+	if revealed.AccountID != accountID || revealed.Password != "secret-password" || revealed.TOTP.Secret != "secret-totp" || revealed.TOTP.Period != 30 || revealed.TOTP.Digits != 6 || revealed.TOTP.Algorithm != "SHA1" || revealed.RequestID == "" {
+		t.Fatalf("unexpected reveal payload: %+v", revealed)
+	}
+	if _, err := time.Parse(time.RFC3339Nano, revealed.ServerTime); err != nil {
+		t.Fatalf("invalid server_time %q: %v", revealed.ServerTime, err)
+	}
+
+	dbValue, ok := testDatabases.Load(server.URL)
+	if !ok {
+		t.Fatal("test database not registered")
+	}
+	db := dbValue.(*sql.DB)
+	var action, targetType, metadata string
+	var targetID int64
+	if err := db.QueryRow(`SELECT action,target_type,target_id,metadata_json FROM audit_events WHERE action='accounts.credentials.reveal' ORDER BY id DESC LIMIT 1`).Scan(&action, &targetType, &targetID, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if action != "accounts.credentials.reveal" || targetType != "account" || targetID != accountID || metadata != "{}" {
+		t.Fatalf("unexpected reveal audit: action=%q target_type=%q target_id=%d metadata=%q", action, targetType, targetID, metadata)
+	}
+	for _, sensitive := range []string{revealed.Password, revealed.TOTP.Secret} {
+		if strings.Contains(action+targetType+metadata, sensitive) {
+			t.Fatalf("audit contains revealed credential %q", sensitive)
+		}
+	}
+	logsValue, ok := testAccountLogs.Load(server.URL)
+	if !ok {
+		t.Fatal("test account logs not registered")
+	}
+	logs := logsValue.(*bytes.Buffer).String()
+	for _, sensitive := range []string{revealed.Password, revealed.TOTP.Secret, body} {
+		if strings.Contains(logs, sensitive) {
+			t.Fatalf("runtime log contains credential reveal data")
+		}
+	}
+
+	response = getAccountCredentials(t, authed, server.URL, accountID+9999, csrf)
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf("missing account reveal status=%d body=%s", response.StatusCode, readBody(t, response))
+	}
+
+	repoValue, ok := testRepositories.Load(server.URL)
+	if !ok {
+		t.Fatal("test repository not registered")
+	}
+	pending, _, err := repoValue.(*repository.Repository).UpsertSyncedAccount(context.Background(), repository.SyncedAccount{
+		MonitorAccountID: "pending-reveal",
+		DisplayUsername:  "pending-reveal@example.test",
+		AccountExpiry:    time.Now().UTC().Add(24 * time.Hour),
+		MonitorStatus:    "alive",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response = getAccountCredentials(t, authed, server.URL, pending.ID, csrf)
+	missingBody := readBody(t, response)
+	if response.StatusCode != http.StatusConflict || !strings.Contains(missingBody, `"code":"account_credentials_unavailable"`) {
+		t.Fatalf("missing credentials status=%d body=%s", response.StatusCode, missingBody)
+	}
+
+	corruptID := createLocalAccountForHTTP(t, authed, server.URL, csrf)
+	if _, err := db.Exec(`UPDATE chatgpt_accounts SET display_password_secret=? WHERE id=?`, []byte("corrupt-ciphertext"), corruptID); err != nil {
+		t.Fatal(err)
+	}
+	response = getAccountCredentials(t, authed, server.URL, corruptID, csrf)
+	corruptBody := readBody(t, response)
+	if response.StatusCode != http.StatusInternalServerError || !strings.Contains(corruptBody, `"code":"internal_error"`) || strings.Contains(corruptBody, "secret-password") || strings.Contains(corruptBody, "secret-totp") {
+		t.Fatalf("corrupt credentials status=%d body=%s", response.StatusCode, corruptBody)
+	}
+
+	archivedID := createLocalAccountForHTTP(t, authed, server.URL, csrf)
+	if _, err := db.Exec(`UPDATE chatgpt_accounts SET archived_at=? WHERE id=?`, time.Now().UTC().Format(time.RFC3339Nano), archivedID); err != nil {
+		t.Fatal(err)
+	}
+	response = getAccountCredentials(t, authed, server.URL, archivedID, csrf)
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf("archived reveal status=%d body=%s", response.StatusCode, readBody(t, response))
 	}
 }
 
@@ -581,13 +710,16 @@ func testAccountsTLSServer(t *testing.T, monitorBaseURL string) *httptest.Server
 	allocator := allocatorsvc.NewService(repo, monitor)
 	userQuery := userquerysvc.NewService(repo)
 	metrics := metricssvc.NewService(repo)
-	router := NewRouter(database, manager, Config{Origin: "https://127.0.0.1", Accounts: accounts, Cards: cards, Allocator: allocator, UserQuery: userQuery, Metrics: metrics}, slog.New(slog.NewJSONHandler(io.Discard, nil)))
+	var logs bytes.Buffer
+	router := NewRouter(database, manager, Config{Origin: "https://127.0.0.1", Accounts: accounts, Cards: cards, Allocator: allocator, UserQuery: userQuery, Metrics: metrics}, slog.New(slog.NewJSONHandler(&logs, nil)))
 	server := httptest.NewTLSServer(router)
 	testRepositories.Store(server.URL, repo)
 	testDatabases.Store(server.URL, database.DB())
+	testAccountLogs.Store(server.URL, &logs)
 	t.Cleanup(func() {
 		testRepositories.Delete(server.URL)
 		testDatabases.Delete(server.URL)
+		testAccountLogs.Delete(server.URL)
 		server.Close()
 		database.Close()
 	})
@@ -647,6 +779,20 @@ func deleteRaw(t *testing.T, client *http.Client, url, csrf string) *http.Respon
 		t.Fatal(err)
 	}
 	req.Header.Set("Origin", "https://127.0.0.1")
+	req.Header.Set(csrfHeader, csrf)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
+func getAccountCredentials(t *testing.T, client *http.Client, baseURL string, accountID int64, csrf string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, baseURL+"/api/admin/accounts/"+itoa(accountID)+"/credentials/reveal", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	req.Header.Set(csrfHeader, csrf)
 	resp, err := client.Do(req)
 	if err != nil {

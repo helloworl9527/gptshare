@@ -1,10 +1,11 @@
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { api } from '../api/client.js'
 import AdminShell from '../components/AdminShell.vue'
 import FocusModal from '../components/FocusModal.vue'
 import StatePanel from '../components/StatePanel.vue'
 import { accountTone, formatDateTime } from '../lib/vitals.js'
+import { generateTOTP, secondsUntilNextPeriod } from '../lib/totp.js'
 
 const accounts = ref([])
 const loading = ref(true)
@@ -15,6 +16,25 @@ const search = ref('')
 const modal = ref('')
 const busy = ref(false)
 const editingAccount = ref(null)
+const credentials = reactive({
+  password: '',
+  secret: '',
+  code: '',
+  remaining: 0,
+  period: 30,
+  digits: 6,
+  algorithm: 'SHA1',
+  clockOffsetMs: 0,
+  revealed: false,
+  loading: false,
+  passwordVisible: false,
+  error: '',
+  totpError: '',
+  copyStatus: '',
+})
+let credentialTimer
+let credentialGeneration = 0
+let lastTOTPCounter = -1
 const settings = ref({ default_account_capacity: 3 })
 const defaultCapacity = ref(3)
 const editForm = reactive({
@@ -92,6 +112,7 @@ async function updateAccount() {
       ...editForm,
       account_expiry: new Date(editForm.account_expiry).toISOString(),
     })
+    clearRevealedCredentials()
     modal.value = ''
     editingAccount.value = null
     notice.value = '账号已更新。'
@@ -186,6 +207,7 @@ function pullSyncErrorLabel(code) {
 }
 
 function openEdit(account) {
+  clearRevealedCredentials()
   editingAccount.value = account
   Object.assign(editForm, {
     display_username: account.display_username || '',
@@ -201,6 +223,87 @@ function openEdit(account) {
   modal.value = 'edit'
 }
 
+function closeEdit() {
+  clearRevealedCredentials()
+  modal.value = ''
+  editingAccount.value = null
+}
+
+function clearRevealedCredentials() {
+  credentialGeneration += 1
+  if (credentialTimer) window.clearInterval(credentialTimer)
+  credentialTimer = undefined
+  lastTOTPCounter = -1
+  Object.assign(credentials, {
+    password: '', secret: '', code: '', remaining: 0,
+    period: 30, digits: 6, algorithm: 'SHA1', clockOffsetMs: 0,
+    revealed: false, loading: false, passwordVisible: false,
+    error: '', totpError: '', copyStatus: '',
+  })
+}
+
+async function refreshCredentialTOTP(generation) {
+  if (generation !== credentialGeneration || !credentials.revealed) return
+  const correctedNow = Date.now() + credentials.clockOffsetMs
+  credentials.remaining = secondsUntilNextPeriod(correctedNow, credentials.period)
+  const counter = Math.floor(correctedNow / 1000 / credentials.period)
+  if (counter === lastTOTPCounter && (credentials.code || credentials.totpError)) return
+  try {
+    const code = await generateTOTP(credentials.secret, correctedNow, credentials)
+    if (generation !== credentialGeneration || !credentials.revealed) return
+    credentials.code = code
+    credentials.totpError = ''
+    lastTOTPCounter = counter
+  } catch {
+    if (generation !== credentialGeneration || !credentials.revealed) return
+    credentials.code = ''
+    credentials.totpError = '2FA Secret 格式无效，无法生成动态验证码。'
+    lastTOTPCounter = counter
+  }
+}
+
+async function revealCredentials() {
+  if (!editingAccount.value || credentials.loading) return
+  const accountID = editingAccount.value.id
+  clearRevealedCredentials()
+  credentials.loading = true
+  const generation = credentialGeneration
+  try {
+    const result = await api.revealAllocationAccountCredentials(accountID)
+    if (generation !== credentialGeneration || editingAccount.value?.id !== accountID || modal.value !== 'edit') return
+    const serverTime = Date.parse(result.server_time)
+    Object.assign(credentials, {
+      password: result.password,
+      secret: result.totp.secret,
+      period: result.totp.period,
+      digits: result.totp.digits,
+      algorithm: result.totp.algorithm,
+      clockOffsetMs: Number.isFinite(serverTime) ? serverTime - Date.now() : 0,
+      revealed: true,
+      loading: false,
+      error: '',
+    })
+    await refreshCredentialTOTP(generation)
+    if (generation !== credentialGeneration) return
+    credentialTimer = window.setInterval(() => { void refreshCredentialTOTP(generation) }, 500)
+  } catch (reason) {
+    if (generation !== credentialGeneration) return
+    credentials.loading = false
+    credentials.error = reason.message || '凭据暂时无法读取。'
+  }
+}
+
+async function copyCredential(value, label) {
+  credentials.copyStatus = ''
+  try {
+    if (!value || !navigator.clipboard?.writeText) throw new Error('clipboard unavailable')
+    await navigator.clipboard.writeText(value)
+    credentials.copyStatus = `${label}已复制。`
+  } catch {
+    credentials.copyStatus = `${label}复制失败，请手动选择。`
+  }
+}
+
 function toLocalDatetime(value) {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return ''
@@ -208,7 +311,19 @@ function toLocalDatetime(value) {
   return local.toISOString().slice(0, 16)
 }
 
-onMounted(load)
+function handleSessionExpired() {
+  clearRevealedCredentials()
+}
+
+onMounted(() => {
+  window.addEventListener('session-expired', handleSessionExpired)
+  void load()
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('session-expired', handleSessionExpired)
+  clearRevealedCredentials()
+})
 </script>
 
 <template>
@@ -314,13 +429,70 @@ onMounted(load)
       </div>
     </section>
 
-    <FocusModal v-if="modal === 'edit'" title="编辑账号" @close="modal = ''; editingAccount = null">
+    <FocusModal v-if="modal === 'edit'" title="编辑账号" @close="closeEdit">
+      <section class="credentials-panel" aria-labelledby="credentials-title">
+        <div class="credentials-heading">
+          <div>
+            <p class="section-index">
+              SAVED CREDENTIALS
+            </p>
+            <h3 id="credentials-title">
+              已保存凭据
+            </h3>
+          </div>
+          <button v-if="!credentials.revealed" class="refresh-button" type="button" :disabled="credentials.loading" @click="revealCredentials">
+            {{ credentials.loading ? '正在读取…' : '查看凭据' }}
+          </button>
+        </div>
+        <p v-if="credentials.error" class="credential-alert" role="alert">
+          {{ credentials.error }}
+        </p>
+        <div v-if="credentials.revealed" class="credential-values">
+          <div class="credential-field">
+            <label for="revealed-password">密码</label>
+            <div class="credential-control">
+              <input id="revealed-password" :value="credentials.password" :type="credentials.passwordVisible ? 'text' : 'password'" readonly autocomplete="off">
+              <button class="icon-button password-visibility-button" type="button" :aria-label="credentials.passwordVisible ? '隐藏密码' : '显示密码'" :title="credentials.passwordVisible ? '隐藏密码' : '显示密码'" @click="credentials.passwordVisible = !credentials.passwordVisible">
+                <span class="eye-icon" :class="{ 'is-visible': credentials.passwordVisible }" aria-hidden="true" />
+              </button>
+              <button class="refresh-button" type="button" @click="copyCredential(credentials.password, '密码')">
+                复制
+              </button>
+            </div>
+          </div>
+          <div class="credential-field">
+            <span class="credential-label">2FA Secret</span>
+            <div class="credential-control">
+              <code id="revealed-totp-secret">{{ credentials.secret }}</code>
+              <button class="refresh-button" type="button" @click="copyCredential(credentials.secret, '2FA Secret')">
+                复制
+              </button>
+            </div>
+          </div>
+          <div class="credential-field">
+            <span class="credential-label">当前验证码</span>
+            <div v-if="!credentials.totpError" class="credential-control">
+              <strong id="revealed-totp-code" class="credential-code">{{ credentials.code || '------' }}</strong>
+              <span class="credential-countdown">{{ credentials.remaining }} 秒</span>
+              <button class="refresh-button" type="button" :disabled="!credentials.code" @click="copyCredential(credentials.code, '验证码')">
+                复制
+              </button>
+            </div>
+            <p v-else class="credential-alert" role="alert">
+              {{ credentials.totpError }}
+            </p>
+          </div>
+          <p v-if="credentials.copyStatus" class="credential-copy-status" role="status">
+            {{ credentials.copyStatus }}
+          </p>
+        </div>
+      </section>
       <form class="modal-form" @submit.prevent="updateAccount">
         <label for="edit-display-username">邮箱</label>
         <input id="edit-display-username" v-model="editForm.display_username" required readonly autocomplete="off">
-        <label for="edit-display-password">新密码</label>
+        <label for="edit-display-password">替换密码</label>
         <input id="edit-display-password" v-model="editForm.display_password" type="password" autocomplete="new-password" placeholder="留空不修改">
-        <label for="edit-display-totp">新 2FA Secret</label>
+        <label for="edit-display-totp">替换 2FA Secret</label>
         <input id="edit-display-totp" v-model="editForm.display_2fa_secret" autocomplete="off" placeholder="留空不修改">
         <label for="edit-source-url">账号来源链接</label>
         <input id="edit-source-url" v-model="editForm.source_url" type="url" maxlength="2048" autocomplete="off" placeholder="https://…（留空清除）">

@@ -68,6 +68,7 @@ function publicMessage(status, code) {
   if (status === 403) return '安全校验未通过，请刷新页面后重试。'
   if (status === 404) return '请求的账号或运行记录不存在。'
   if (status === 409 && code === 'account_replacement_unavailable') return '备用账号容量不足，无法安全下线；本次操作未产生任何变更。'
+  if (status === 409 && code === 'account_credentials_unavailable') return '该账号尚未保存完整凭据。'
   if (status === 409 && code === 'account_allocated') return '该账号仍有分配，暂时无法下线。'
   if (status === 409) return '当前操作与账号状态冲突，请刷新后重试。'
   if (status === 422) return '请求参数未通过校验。'
@@ -103,6 +104,7 @@ export const api = {
 	allocations: () => request('/api/admin/allocations'),
 	allocationAccounts: () => request('/api/admin/accounts'),
 	allocationAccount: (id) => request(`/api/admin/accounts/${encodeURIComponent(id)}`),
+	revealAllocationAccountCredentials: (id) => request(`/api/admin/accounts/${encodeURIComponent(id)}/credentials/reveal`, { requireCSRF: true }),
 	accountSettings: () => request('/api/admin/account-settings'),
 	updateAccountSettings: (body) => request('/api/admin/account-settings', { method: 'PUT', body }),
 	pullMonitorAccounts: () => request('/api/admin/accounts/pull-monitor', { method: 'POST', body: {} }),

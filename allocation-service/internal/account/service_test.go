@@ -80,6 +80,14 @@ func (r *pullRepository) LatestMonitorSyncRun(context.Context) (repository.Monit
 	return repository.MonitorSyncRun{}, nil
 }
 
+func (r *pullRepository) Credentials(context.Context, int64) (repository.AccountCredentials, error) {
+	return repository.AccountCredentials{}, errors.New("unexpected Credentials call")
+}
+
+func (r *pullRepository) Audit(context.Context, string, string, int64, map[string]any) error {
+	return errors.New("unexpected Audit call")
+}
+
 type pullMonitor struct {
 	items []monitorfacade.StatusResult
 }

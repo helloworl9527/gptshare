@@ -22,6 +22,7 @@ var (
 	ErrAccountAllocated              = errors.New("account has active allocations")
 	ErrAccountArchived               = errors.New("account is archived")
 	ErrAccountReplacementUnavailable = errors.New("account replacement unavailable")
+	ErrAccountCredentialsUnavailable = errors.New("account credentials unavailable")
 	ErrCapacityTooSmall              = errors.New("max concurrent users is below current allocations")
 	ErrCardStateConflict             = errors.New("card state does not allow this operation")
 	ErrCardDurationLimit             = errors.New("card duration cannot exceed 30 days from redemption")
@@ -1311,9 +1312,15 @@ func (r *Repository) Credentials(ctx context.Context, accountID int64) (AccountC
 	if r.credentials == nil {
 		return AccountCredentials{}, credential.ErrInvalidKeyring
 	}
-	passwordKeyID, passwordCiphertext, totpKeyID, totpCiphertext, err := r.EncryptedCredentials(ctx, accountID)
-	if err != nil {
+	var passwordKeyID, totpKeyID string
+	var passwordCiphertext, totpCiphertext []byte
+	if err := r.db.QueryRowContext(ctx, `SELECT display_password_key_id,display_password_secret,display_2fa_key_id,display_2fa_secret
+		FROM chatgpt_accounts WHERE id=? AND archived_at IS NULL`, accountID).
+		Scan(&passwordKeyID, &passwordCiphertext, &totpKeyID, &totpCiphertext); err != nil {
 		return AccountCredentials{}, err
+	}
+	if strings.TrimSpace(passwordKeyID) == "" || len(passwordCiphertext) == 0 || strings.TrimSpace(totpKeyID) == "" || len(totpCiphertext) == 0 {
+		return AccountCredentials{}, ErrAccountCredentialsUnavailable
 	}
 	password, err := r.credentials.Open(accountID, credential.CredentialPassword, passwordKeyID, passwordCiphertext)
 	if err != nil {

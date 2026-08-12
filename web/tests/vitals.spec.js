@@ -1,7 +1,24 @@
 import { expect, test } from '@playwright/test'
+import { createHmac } from 'node:crypto'
 import path from 'node:path'
 
 const screenshots = path.resolve('..', '.workflow', 'screenshots')
+
+function totpAt(secret, timestamp) {
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'
+  const clean = secret.toUpperCase().replace(/=+$/, '').replace(/\s+/g, '')
+  let bits = ''
+  for (const character of clean) bits += alphabet.indexOf(character).toString(2).padStart(5, '0')
+  const key = Buffer.from(Array.from({ length: Math.floor(bits.length / 8) }, (_, index) => Number.parseInt(bits.slice(index * 8, index * 8 + 8), 2)))
+  const counter = Math.floor(timestamp / 1000 / 30)
+  const message = Buffer.alloc(8)
+  message.writeUInt32BE(Math.floor(counter / 0x100000000), 0)
+  message.writeUInt32BE(counter >>> 0, 4)
+  const digest = createHmac('sha1', key).update(message).digest()
+  const offset = digest[digest.length - 1] & 0x0f
+  const binary = digest.readUInt32BE(offset) & 0x7fffffff
+  return String(binary % 1_000_000).padStart(6, '0')
+}
 
 async function scenario(request, name, reset = false) {
   const response = await request.post('http://127.0.0.1:4174/__test/scenario', { data: { name, reset } })
@@ -35,12 +52,33 @@ test('unified admin covers both domains, credential completion and reveal', asyn
   await expect(page.getByText('pulled-sync@example.test')).toBeVisible()
   await expect(page.getByText('pending_credentials')).toBeVisible()
   await page.getByRole('row', { name: /pulled-sync@example.test/ }).getByRole('button', { name: '编辑' }).click()
-  await page.getByLabel('新密码').fill('completed-password')
-  await page.getByLabel('新 2FA Secret').fill('JBSWY3DPEHPK3PXP')
+  await page.getByLabel('替换密码').fill('completed-password')
+  await page.getByLabel('替换 2FA Secret').fill('JBSWY3DPEHPK3PXP')
   await page.getByLabel('账号来源链接').fill('https://accounts.example.test/orders/42')
   await page.getByRole('dialog').getByRole('button', { name: '保存修改' }).click()
   await expect(page.getByText('账号已更新')).toBeVisible()
   await expect(page.getByRole('row', { name: /pulled-sync@example.test/ }).getByRole('link', { name: '打开来源' })).toHaveAttribute('href', 'https://accounts.example.test/orders/42')
+
+  await page.getByRole('row', { name: /pulled-sync@example.test/ }).getByRole('button', { name: '编辑' }).click()
+  const firstRevealResponse = page.waitForResponse((response) => response.url().includes('/credentials/reveal') && response.status() === 200)
+  await page.getByRole('button', { name: '查看凭据' }).click()
+  const firstReveal = await (await firstRevealResponse).json()
+  await expect(page.getByLabel('密码', { exact: true })).toHaveAttribute('type', 'password')
+  await expect(page.getByLabel('密码', { exact: true })).toHaveValue('completed-password')
+  await expect(page.locator('#revealed-totp-secret')).toHaveText('JBSWY3DPEHPK3PXP')
+  await expect(page.locator('#revealed-totp-code')).toHaveText(totpAt(firstReveal.totp.secret, Date.parse(firstReveal.server_time)))
+  await page.getByLabel('账号来源链接').fill('https://accounts.example.test/orders/84')
+  await page.getByRole('dialog').getByRole('button', { name: '保存修改' }).click()
+  await expect(page.getByText('账号已更新')).toBeVisible()
+
+  await page.getByRole('row', { name: /pulled-sync@example.test/ }).getByRole('button', { name: '编辑' }).click()
+  const secondRevealResponse = page.waitForResponse((response) => response.url().includes('/credentials/reveal') && response.status() === 200)
+  await page.getByRole('button', { name: '查看凭据' }).click()
+  const secondReveal = await (await secondRevealResponse).json()
+  await expect(page.getByLabel('密码', { exact: true })).toHaveValue('completed-password')
+  await expect(page.locator('#revealed-totp-secret')).toHaveText('JBSWY3DPEHPK3PXP')
+  await expect(page.locator('#revealed-totp-code')).toHaveText(totpAt(secondReveal.totp.secret, Date.parse(secondReveal.server_time)))
+  await page.getByRole('dialog').getByRole('button', { name: '关闭弹窗' }).click()
   await page.screenshot({ path: path.join(screenshots, `mstep04-accounts-${testInfo.project.name}.png`), fullPage: true })
 
   await page.getByRole('link', { name: '卡密', exact: true }).click()

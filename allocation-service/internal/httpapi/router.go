@@ -136,6 +136,9 @@ func RegisterAdminRoutes(router *gin.Engine, cfg Config, boundary AdminBoundary)
 }
 
 func registerProtectedAdminRoutes(router *gin.Engine, cfg Config, boundary AdminBoundary) {
+	if cfg.Accounts != nil {
+		router.GET("/api/admin/accounts/:id/credentials/reveal", noStore(), boundary.RequireSession, boundary.RequireCSRF, revealAccountCredentialsHandler(cfg.Accounts))
+	}
 	admin := router.Group("/api/admin", boundary.RequireSession)
 	admin.GET("/ping", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok", "request_id": c.GetString("request_id")})
@@ -247,6 +250,8 @@ func writeAccountError(c *gin.Context, err error) {
 		writeError(c, http.StatusUnprocessableEntity, "validation_failed", "request validation failed")
 	case errors.Is(err, accountsvc.ErrNotFound):
 		writeError(c, http.StatusNotFound, "not_found", "account not found")
+	case errors.Is(err, accountsvc.ErrCredentialsUnavailable):
+		writeError(c, http.StatusConflict, "account_credentials_unavailable", "account credentials are unavailable")
 	case errors.Is(err, repository.ErrAccountAllocated):
 		writeError(c, http.StatusConflict, "account_allocated", "allocated account cannot be deleted")
 	case errors.Is(err, repository.ErrAccountReplacementUnavailable):
@@ -373,6 +378,33 @@ func getAccountHandler(service *accountsvc.Service) gin.HandlerFunc {
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"account": serializeAccount(account), "request_id": c.GetString("request_id")})
+	}
+}
+
+func revealAccountCredentialsHandler(service *accountsvc.Service) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Header("Cache-Control", "no-store")
+		id, ok := accountIDParam(c)
+		if !ok {
+			return
+		}
+		credentials, err := service.RevealCredentials(c.Request.Context(), id)
+		if err != nil {
+			writeAccountError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"account_id": credentials.AccountID,
+			"password":   credentials.Password,
+			"totp": gin.H{
+				"secret":    credentials.TOTPSecret,
+				"period":    30,
+				"digits":    6,
+				"algorithm": "SHA1",
+			},
+			"server_time": time.Now().UTC().Format(time.RFC3339Nano),
+			"request_id":  c.GetString("request_id"),
+		})
 	}
 }
 
@@ -1247,6 +1279,13 @@ func securityHeaders() gin.HandlerFunc {
 		c.Header("Content-Security-Policy", "default-src 'self'; frame-ancestors 'none'; base-uri 'self'")
 		c.Header("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
 		c.Header("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		c.Next()
+	}
+}
+
+func noStore() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Header("Cache-Control", "no-store")
 		c.Next()
 	}
 }
