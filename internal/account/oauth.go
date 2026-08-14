@@ -271,6 +271,9 @@ func (s *Service) completeOAuth(ctx context.Context, record oauthRecord, payload
 			return 0, err
 		}
 	}
+	if err := enqueueAuthorizationEvent(ctx, tx, accountID, payload.Reauthorize, now); err != nil {
+		return 0, internalError("allocation_sync_enqueue")
+	}
 	if _, err := tx.ExecContext(ctx, `UPDATE oauth_auth_sessions SET account_id=?,enc_session=x'',credential_key_id='',state='authorized',updated_at=? WHERE id=?`,
 		accountID, now.Format(time.RFC3339Nano), record.id); err != nil {
 		return 0, internalError("oauth_session_complete")

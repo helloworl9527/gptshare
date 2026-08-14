@@ -12,6 +12,7 @@ import (
 
 	"allocation-service/platform/supervisor"
 	"chatgpt-monitor/internal/account"
+	"chatgpt-monitor/internal/allocationsync"
 	"chatgpt-monitor/internal/auth"
 	"chatgpt-monitor/internal/chatgpt"
 	"chatgpt-monitor/internal/config"
@@ -100,6 +101,16 @@ func main() {
 		logger.Error("notification consumer initialization failed", "error_code", "notification_config_invalid")
 		os.Exit(1)
 	}
+	allocationSink, err := allocationsync.NewHTTPSink(cfg.AllocationAccountEventURL, cfg.AllocationAccountEventAPIKey, nil)
+	if err != nil {
+		logger.Error("allocation account event sink initialization failed", "error_code", "allocation_event_config_invalid")
+		os.Exit(1)
+	}
+	allocationConsumer, err := allocationsync.NewConsumer(database.DB(), allocationSink, logger)
+	if err != nil {
+		logger.Error("allocation account outbox initialization failed", "error_code", "allocation_event_config_invalid")
+		os.Exit(1)
+	}
 	background := supervisor.New(logger, supervisor.Config{})
 	if err := background.GoManaged(ctx, "poller", "monitor", func(taskCtx context.Context) error {
 		return monitorService.RunScheduler(taskCtx, logger)
@@ -109,6 +120,10 @@ func main() {
 	}
 	if err := background.GoManaged(ctx, "outbox", "monitor", notificationConsumer.Run); err != nil {
 		logger.Error("notification consumer registration failed", "error_code", "background_registration_failed")
+		os.Exit(1)
+	}
+	if err := background.GoManaged(ctx, "allocation-account-outbox", "monitor", allocationConsumer.Run); err != nil {
+		logger.Error("allocation account outbox registration failed", "error_code", "background_registration_failed")
 		os.Exit(1)
 	}
 

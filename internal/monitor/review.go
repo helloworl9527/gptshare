@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"allocation-service/accountsync"
+	"chatgpt-monitor/internal/allocationsync"
 	"chatgpt-monitor/internal/chatgpt"
 )
 
@@ -111,6 +113,9 @@ func (s *Service) finalizeLegacyPendingBans(ctx context.Context) error {
 		if _, err := insertAlert(ctx, tx, item.accountID, item.epochID, detected); err != nil {
 			return err
 		}
+		if _, err := allocationsync.EnqueueAccountTx(ctx, tx, item.accountID, accountsync.EventAccountBanned, detected); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }
@@ -198,6 +203,9 @@ func (s *Service) ReviewEvidence(ctx context.Context, request ReviewRequest) (Re
 			}
 			if created {
 				result.AlertsCreated++
+			}
+			if _, err := allocationsync.EnqueueAccountTx(ctx, tx, item.accountID, accountsync.EventAccountBanned, detected); err != nil {
+				return ReviewResult{}, err
 			}
 		} else {
 			if _, err := tx.ExecContext(ctx, `UPDATE accounts SET last_check_state='contract_changed',last_check_error_code='evidence_rejected',pause_reason='contract_changed',updated_at=? WHERE id=?`, formatTime(now), item.accountID); err != nil {

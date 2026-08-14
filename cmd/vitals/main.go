@@ -14,6 +14,7 @@ import (
 	allocationmodule "allocation-service/module"
 	"allocation-service/platform/supervisor"
 	"chatgpt-monitor/internal/account"
+	"chatgpt-monitor/internal/allocationsync"
 	"chatgpt-monitor/internal/auth"
 	"chatgpt-monitor/internal/chatgpt"
 	credentialcrypto "chatgpt-monitor/internal/crypto"
@@ -105,6 +106,10 @@ func run(logger *slog.Logger) error {
 		return errors.New("allocation_database_initialization_failed")
 	}
 	defer allocationModule.Close()
+	allocationOutbox, err := allocationsync.NewConsumer(monitorStore.DB(), allocationModule, logger)
+	if err != nil {
+		return errors.New("allocation_account_outbox_initialization_failed")
+	}
 
 	runner := supervisor.New(logger, supervisor.Config{PanicThreshold: 3})
 	replacementInterval, err := testReplacementInterval()
@@ -118,6 +123,9 @@ func run(logger *slog.Logger) error {
 	}
 	if err := runner.GoManaged(ctx, "outbox", "monitor", injectPanic("outbox", outbox.Run)); err != nil {
 		return errors.New("monitor_outbox_registration_failed")
+	}
+	if err := runner.GoManaged(ctx, "allocation-account-outbox", "monitor", injectPanic("allocation-account-outbox", allocationOutbox.Run)); err != nil {
+		return errors.New("allocation_account_outbox_registration_failed")
 	}
 	if err := runner.GoManaged(ctx, "replacement", "allocation", injectPanic("replacement", func(taskCtx context.Context) error {
 		allocationModule.RunReplacementEvery(taskCtx, replacementInterval)

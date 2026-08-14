@@ -62,6 +62,10 @@ func TestOAuthStartCompleteAndReplayProtection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var syncEvents int
+	if err := database.DB().QueryRow("SELECT count(*) FROM allocation_account_outbox WHERE account_id=?", accountResult.ID).Scan(&syncEvents); err != nil || syncEvents != 1 {
+		t.Fatalf("oauth allocation sync events=%d err=%v", syncEvents, err)
+	}
 	if accountResult.Credential.Type != "refresh" || client.oauthCode != "code-one" || client.oauthVerifier == "" {
 		t.Fatalf("account=%+v code=%q verifier configured=%v", accountResult, client.oauthCode, client.oauthVerifier != "")
 	}

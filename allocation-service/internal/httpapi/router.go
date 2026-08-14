@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"allocation-service/accountsync"
 	accountsvc "allocation-service/internal/account"
 	allocatorsvc "allocation-service/internal/allocator"
 	"allocation-service/internal/auth"
@@ -59,12 +60,14 @@ type HealthChecker interface {
 }
 
 type Config struct {
-	Origin    string
-	Accounts  *accountsvc.Service
-	Cards     *cardsvc.Service
-	Allocator *allocatorsvc.Service
-	UserQuery *userquerysvc.Service
-	Metrics   *metricssvc.Service
+	Origin             string
+	Accounts           *accountsvc.Service
+	Cards              *cardsvc.Service
+	Allocator          *allocatorsvc.Service
+	UserQuery          *userquerysvc.Service
+	Metrics            *metricssvc.Service
+	AccountEventSink   accountsync.Sink
+	AccountEventAPIKey string
 }
 
 type AdminBoundary struct {
@@ -82,9 +85,46 @@ func NewRouter(health HealthChecker, manager *auth.Manager, cfg Config, logger *
 	router.RedirectTrailingSlash = false
 	router.Use(requestID(), securityHeaders(), accessLog(logger), recovery(logger))
 	router.GET("/health", healthHandler(health, logger))
+	if cfg.AccountEventSink != nil {
+		router.POST("/api/internal/v1/monitor-account-events", monitorAccountEventHandler(cfg.AccountEventSink, cfg.AccountEventAPIKey))
+	}
 	RegisterPublicRoutes(router, cfg)
 	registerStandaloneAdminRoutes(router, manager, cfg)
 	return router
+}
+
+func monitorAccountEventHandler(sink accountsync.Sink, apiKey string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		authorization := c.GetHeader("Authorization")
+		provided := strings.TrimPrefix(authorization, "Bearer ")
+		if !strings.HasPrefix(authorization, "Bearer ") || len(apiKey) < 32 || len(provided) != len(apiKey) || subtle.ConstantTimeCompare([]byte(provided), []byte(apiKey)) != 1 {
+			writeError(c, http.StatusUnauthorized, "unauthorized", "authentication required")
+			return
+		}
+		body := http.MaxBytesReader(c.Writer, c.Request.Body, 32<<10)
+		decoder := json.NewDecoder(body)
+		decoder.DisallowUnknownFields()
+		var event accountsync.Event
+		if err := decoder.Decode(&event); err != nil {
+			writeError(c, http.StatusBadRequest, "invalid_event", "event payload is invalid")
+			return
+		}
+		var trailing any
+		if err := decoder.Decode(&trailing); err != io.EOF {
+			writeError(c, http.StatusBadRequest, "invalid_event", "event payload is invalid")
+			return
+		}
+		if err := event.Validate(); err != nil {
+			writeError(c, http.StatusUnprocessableEntity, "invalid_event", "event payload is invalid")
+			return
+		}
+		result, err := sink.ApplyMonitorAccountEvent(c.Request.Context(), event)
+		if err != nil {
+			writeError(c, http.StatusInternalServerError, "event_processing_failed", "event could not be processed")
+			return
+		}
+		c.JSON(http.StatusOK, result)
+	}
 }
 
 // RegisterPublicRoutes mounts only the public UI and card APIs on an existing

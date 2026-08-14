@@ -34,6 +34,9 @@ func TestRejectsBadSecrets(t *testing.T) {
 		{"empty monitor API key", func(v map[string]string) { delete(v, "ALLOCATION_MONITOR_API_KEY") }},
 		{"example monitor API key", func(v map[string]string) { v["ALLOCATION_MONITOR_API_KEY"] = "change-me" }},
 		{"short monitor API key", func(v map[string]string) { v["ALLOCATION_MONITOR_API_KEY"] = "short" }},
+		{"empty account event API key", func(v map[string]string) { delete(v, "ALLOCATION_ACCOUNT_EVENT_API_KEY") }},
+		{"short account event API key", func(v map[string]string) { v["ALLOCATION_ACCOUNT_EVENT_API_KEY"] = "short" }},
+		{"reused account event API key", func(v map[string]string) { v["ALLOCATION_ACCOUNT_EVENT_API_KEY"] = strings.Repeat("k", 32) }},
 		{"example admin password hash", func(v map[string]string) {
 			v["ALLOCATION_ADMIN_PASSWORD_HASH"] = "__REPLACE_WITH_BCRYPT_COST_12_OR_HIGHER__"
 		}},
@@ -140,6 +143,7 @@ func validValues() map[string]string {
 		"ALLOCATION_APP_ORIGIN":               "https://127.0.0.1:9090",
 		"ALLOCATION_MONITOR_BASE_URL":         "http://127.0.0.1:8080",
 		"ALLOCATION_MONITOR_API_KEY":          strings.Repeat("k", 32),
+		"ALLOCATION_ACCOUNT_EVENT_API_KEY":    strings.Repeat("e", 32),
 		"ALLOCATION_ADMIN_USER":               "admin",
 		"ALLOCATION_ADMIN_PASSWORD_HASH":      "$2b$12$01234567890123456789012345678901234567890123456789012",
 		"ALLOCATION_ADMIN_TOTP_SECRET":        base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString([]byte(strings.Repeat("t", 20))),

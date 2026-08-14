@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"time"
 
+	"allocation-service/accountsync"
+	"chatgpt-monitor/internal/allocationsync"
 	"chatgpt-monitor/internal/chatgpt"
 )
 
@@ -272,6 +274,9 @@ func (s *Service) applyResult(ctx context.Context, runID string, record accountR
 	}
 	if currentStatus != StateDeadBanned && newStatus == StateDeadBanned {
 		if _, err := insertAlert(ctx, tx, record.ID, record.EpochID, now); err != nil {
+			return false, err
+		}
+		if _, err := allocationsync.EnqueueAccountTx(ctx, tx, record.ID, accountsync.EventAccountBanned, now); err != nil {
 			return false, err
 		}
 	}

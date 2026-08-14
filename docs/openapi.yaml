@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: ChatGPT Monitor API
-  version: 0.6.0
+  version: 0.7.0
   description: STEP-07 API contract. Authentication uses same-origin Secure cookies; credentials, OAuth PKCE verifiers/codes, OAuth device codes, channel secrets, and raw upstream evidence are never returned. Notification channels are configuration-only and remain disconnected.
   license:
     name: Proprietary
@@ -212,6 +212,87 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/CSRFRejected'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/accounts/{accountId}/ban:
+    parameters:
+      - $ref: '#/components/parameters/AccountID'
+    post:
+      operationId: banAccount
+      summary: Atomically mark an account banned and queue its allocation snapshot
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+        - $ref: '#/components/parameters/CSRFToken'
+      responses:
+        '200':
+          description: Account is banned; repeated requests are idempotent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountBanResult'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/CSRFRejected'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/accounts/{accountId}/sync-allocation:
+    parameters:
+      - $ref: '#/components/parameters/AccountID'
+    post:
+      operationId: retryAccountAllocationSync
+      summary: Queue the latest credential-free account snapshot for allocation
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+        - $ref: '#/components/parameters/CSRFToken'
+      responses:
+        '200':
+          description: Latest account snapshot queued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Account'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/CSRFRejected'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/internal/v1/monitor-account-events:
+    post:
+      operationId: applyMonitorAccountEvent
+      summary: Idempotently apply a credential-free monitor account event
+      security:
+        - accountEventBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MonitorAccountEvent'
+      responses:
+        '200':
+          description: Event applied, recognized as duplicate, or ignored as stale
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MonitorAccountEventResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '422':
           $ref: '#/components/responses/ValidationFailed'
         '500':
@@ -788,6 +869,9 @@ components:
     allocationServiceBearer:
       type: http
       scheme: bearer
+    accountEventBearer:
+      type: http
+      scheme: bearer
   headers:
     RequestID:
       schema:
@@ -1255,7 +1339,7 @@ components:
     Account:
       type: object
       additionalProperties: false
-      required: [id, provider_account_id, email, label, plan, current_expiry, auth_expiry, status, last_check_state, near_expiry, polling_paused, last_authorized_at, credential]
+      required: [id, provider_account_id, email, label, plan, current_expiry, auth_expiry, status, last_check_state, near_expiry, polling_paused, last_authorized_at, credential, allocation_sync]
       properties:
         id:
           type: integer
@@ -1317,6 +1401,86 @@ components:
           format: date-time
         credential:
           $ref: '#/components/schemas/CredentialSummary'
+        allocation_sync:
+          $ref: '#/components/schemas/AllocationSyncStatus'
+    AllocationSyncStatus:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [pending, processing, retrying, delivered, failed]
+        event_id:
+          type: string
+        version:
+          type: integer
+          format: int64
+          minimum: 1
+        error_code:
+          type: string
+    AccountBanResult:
+      type: object
+      additionalProperties: false
+      required: [account, already_banned]
+      properties:
+        account:
+          $ref: '#/components/schemas/Account'
+        already_banned:
+          type: boolean
+    MonitorAccountEvent:
+      type: object
+      additionalProperties: false
+      required: [event_id, version, event_type, occurred_at, provider_account_id, plan, subscription_expiry, status]
+      properties:
+        event_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+        version:
+          type: integer
+          format: int64
+          minimum: 1
+        event_type:
+          type: string
+          enum: [account.created, account.updated, account.dead_banned, account.reauthorized]
+        occurred_at:
+          type: string
+          format: date-time
+        provider_account_id:
+          type: string
+          minLength: 1
+          maxLength: 512
+        email:
+          type: string
+          format: email
+        plan:
+          type: string
+          enum: [free, plus, team, unknown]
+        subscription_expiry:
+          type: string
+          format: date-time
+        status:
+          type: string
+          enum: [alive, dead_normal, dead_banned]
+    MonitorAccountEventResult:
+      type: object
+      additionalProperties: false
+      required: [disposition, created, updated, migrated, pending]
+      properties:
+        disposition:
+          type: string
+          enum: [applied, duplicate, stale]
+        created:
+          type: boolean
+        updated:
+          type: boolean
+        migrated:
+          type: integer
+          minimum: 0
+        pending:
+          type: integer
+          minimum: 0
     DeviceStartRequest:
       type: object
       additionalProperties: false

@@ -81,6 +81,10 @@ func TestDeviceStartEncryptsSessionAndRejectsHighFrequencyPolls(t *testing.T) {
 	if err != nil || poll.State != "authorized" || poll.Account == nil || poll.Account.Credential.Type != "device" || client.pollCalls != 3 {
 		t.Fatalf("authorized poll=%+v calls=%d err=%v", poll, client.pollCalls, err)
 	}
+	var syncEvents int
+	if err := database.DB().QueryRow("SELECT count(*) FROM allocation_account_outbox WHERE account_id=?", poll.Account.ID).Scan(&syncEvents); err != nil || syncEvents != 1 {
+		t.Fatalf("device allocation sync events=%d err=%v", syncEvents, err)
+	}
 	accountID := poll.Account.ID
 	var credentialEnvelope []byte
 	if err := database.DB().QueryRow("SELECT enc_credentials FROM accounts WHERE id=?", accountID).Scan(&credentialEnvelope); err != nil {

@@ -14,6 +14,7 @@ const recovered = ref(false)
 const notice = ref('')
 const working = ref(false)
 const confirming = ref(false)
+const confirmingBan = ref(false)
 const cancelButton = ref(null)
 
 const statusLabel = computed(() => ({ alive: account.value?.near_expiry ? '临期存活' : '存活', dead_banned: '异常封号', dead_normal: '正常退役' })[account.value?.status] || '未知')
@@ -56,6 +57,31 @@ async function remove() {
 	try { await api.removeMonitorAccount(route.params.id); await router.replace('/monitor/accounts') }
   catch (reason) { notice.value = reason.message; confirming.value = false }
   finally { working.value = false }
+}
+
+async function ban() {
+  working.value = true
+  notice.value = ''
+  try {
+    const result = await api.banMonitorAccount(route.params.id)
+    account.value = result.account
+    confirmingBan.value = false
+    notice.value = result.already_banned ? '账号已处于封禁状态，已检查二期同步队列。' : '账号已标记封禁，二期迁移已进入同步队列。'
+  } catch (reason) {
+    notice.value = reason.message
+    confirmingBan.value = false
+  } finally { working.value = false }
+}
+
+async function retryAllocationSync() {
+  working.value = true
+  notice.value = ''
+  try {
+    account.value = await api.retryMonitorAccountSync(route.params.id)
+    notice.value = '已重新排队最新账号快照。'
+  } catch (reason) {
+    notice.value = reason.message
+  } finally { working.value = false }
 }
 
 onMounted(load)
@@ -131,7 +157,11 @@ watch(confirming, async (open) => { if (open) { await nextTick(); cancelButton.v
                 <dt>凭证类型</dt><dd translate="no">
                   {{ account.credential?.type?.toUpperCase() || 'UNKNOWN' }}
                 </dd>
-              </div><div><dt>凭证状态</dt><dd>{{ account.credential?.configured ? '已加密配置' : '未配置' }}</dd></div><div><dt>授权边界</dt><dd>{{ dateTime(account.auth_expiry) }}</dd></div><div><dt>轮询状态</dt><dd>{{ account.polling_paused ? '已暂停' : '运行中' }}</dd></div>
+              </div><div><dt>凭证状态</dt><dd>{{ account.credential?.configured ? '已加密配置' : '未配置' }}</dd></div><div><dt>授权边界</dt><dd>{{ dateTime(account.auth_expiry) }}</dd></div><div><dt>轮询状态</dt><dd>{{ account.polling_paused ? '已暂停' : '运行中' }}</dd></div><div>
+                <dt>二期同步</dt><dd translate="no">
+                  {{ account.allocation_sync?.status || 'pending' }}
+                </dd>
+              </div>
             </dl><p class="privacy-note">
               这里只显示类型与配置状态，不显示令牌片段、密文或密钥标识。
             </p>
@@ -153,7 +183,11 @@ watch(confirming, async (open) => { if (open) { await nextTick(); cancelButton.v
               令牌重新授权
             </RouterLink><RouterLink class="button-link" :to="{ name: 'import', query: { reauthorize: account.id, mode: 'device' } }">
               设备码重新授权
-            </RouterLink><button class="danger-button" type="button" @click="confirming = true">
+            </RouterLink><button v-if="account.allocation_sync?.status === 'failed'" type="button" :disabled="working" @click="retryAllocationSync">
+              重试二期同步
+            </button><button v-if="account.status !== 'dead_banned'" class="danger-button" type="button" :disabled="working" @click="confirmingBan = true">
+              标记封禁
+            </button><button class="danger-button" type="button" @click="confirming = true">
               移除账号
             </button>
           </div>
@@ -167,6 +201,19 @@ watch(confirming, async (open) => { if (open) { await nextTick(); cancelButton.v
                 保留账号
               </button><button class="danger-button" type="button" :disabled="working" @click="remove">
                 确认移除
+              </button>
+            </div>
+          </section>
+        </div>
+        <div v-if="confirmingBan" class="modal-backdrop" role="presentation" @click.self="confirmingBan = false" @keydown.esc="confirmingBan = false">
+          <section class="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="ban-title">
+            <h2 id="ban-title">
+              将这个账号标记为封禁？
+            </h2><p>账号会立即停止监控和新分配，二期会尝试迁移当前有效乘客。容量不足时将保留待迁移记录。</p><div class="action-row">
+              <button type="button" @click="confirmingBan = false">
+                取消
+              </button><button class="danger-button" type="button" :disabled="working" @click="ban">
+                确认封禁
               </button>
             </div>
           </section>

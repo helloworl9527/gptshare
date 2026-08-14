@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"allocation-service/accountsync"
+	"chatgpt-monitor/internal/allocationsync"
 	"chatgpt-monitor/internal/chatgpt"
 	credentialcrypto "chatgpt-monitor/internal/crypto"
 )
@@ -88,6 +90,19 @@ type Account struct {
 	PollingPaused      bool              `json:"polling_paused"`
 	LastAuthorizedAt   time.Time         `json:"last_authorized_at"`
 	Credential         CredentialSummary `json:"credential"`
+	AllocationSync     SyncStatus         `json:"allocation_sync"`
+}
+
+type SyncStatus struct {
+	Status    string `json:"status"`
+	EventID   string `json:"event_id,omitempty"`
+	Version   int64  `json:"version,omitempty"`
+	ErrorCode string `json:"error_code,omitempty"`
+}
+
+type BanResult struct {
+	Account       Account `json:"account"`
+	AlreadyBanned bool    `json:"already_banned"`
 }
 
 type credentialPayload struct {
@@ -124,6 +139,15 @@ func (s *Service) ImportByToken(ctx context.Context, input *TokenInput) (Account
 	}
 	defer zero(prepared.plaintext)
 	return s.importPrepared(ctx, input.Label, prepared)
+}
+
+func enqueueAuthorizationEvent(ctx context.Context, tx *sql.Tx, accountID int64, reauthorized bool, now time.Time) error {
+	eventType := accountsync.EventAccountCreated
+	if reauthorized {
+		eventType = accountsync.EventAccountReauthorized
+	}
+	_, err := allocationsync.EnqueueAccountTx(ctx, tx, accountID, eventType, now)
+	return err
 }
 
 func (s *Service) importPrepared(ctx context.Context, inputLabel string, prepared preparedImport) (Account, error) {
@@ -168,6 +192,9 @@ func (s *Service) importPrepared(ctx context.Context, inputLabel string, prepare
 	if _, err := tx.ExecContext(ctx, `INSERT INTO authorization_epochs(account_id,started_at,auth_expiry)
 		VALUES (?,?,?)`, accountID, now.Format(time.RFC3339Nano), expiry.Format(time.RFC3339Nano)); err != nil {
 		return Account{}, internalError("epoch_insert")
+	}
+	if err := enqueueAuthorizationEvent(ctx, tx, accountID, false, now); err != nil {
+		return Account{}, internalError("allocation_sync_enqueue")
 	}
 	if err := tx.Commit(); err != nil {
 		return Account{}, internalError("transaction_commit")
@@ -223,6 +250,9 @@ func (s *Service) ReauthorizeByToken(ctx context.Context, accountID int64, input
 	}
 	if _, err := tx.ExecContext(ctx, "INSERT INTO authorization_epochs(account_id,started_at,auth_expiry) VALUES (?,?,?)", accountID, stamp, expiry.Format(time.RFC3339Nano)); err != nil {
 		return Account{}, internalError("epoch_insert")
+	}
+	if err := enqueueAuthorizationEvent(ctx, tx, accountID, true, now); err != nil {
+		return Account{}, internalError("allocation_sync_enqueue")
 	}
 	if err := tx.Commit(); err != nil {
 		return Account{}, internalError("transaction_commit")
@@ -286,8 +316,10 @@ func (s *Service) Get(ctx context.Context, accountID int64) (Account, error) {
 
 const accountSelect = `SELECT a.id,a.provider_account_id,a.label,a.plan,a.current_expiry,a.auth_expiry,a.status,
 	a.last_alive_at,a.dead_at,a.death_type,a.banned_survival_days,a.last_check_state,a.last_check_error_code,a.next_retry_at,a.polling_paused,
-	e.started_at,a.token_type,length(a.enc_credentials)>0,a.email
-	FROM accounts a JOIN authorization_epochs e ON e.id=(SELECT e2.id FROM authorization_epochs e2 WHERE e2.account_id=a.id ORDER BY e2.started_at DESC,e2.id DESC LIMIT 1)`
+	e.started_at,a.token_type,length(a.enc_credentials)>0,a.email,
+	COALESCE(o.delivery_status,'pending'),COALESCE(o.event_id,''),COALESCE(o.account_version,0),COALESCE(o.last_error_code,'')
+	FROM accounts a JOIN authorization_epochs e ON e.id=(SELECT e2.id FROM authorization_epochs e2 WHERE e2.account_id=a.id ORDER BY e2.started_at DESC,e2.id DESC LIMIT 1)
+	LEFT JOIN allocation_account_outbox o ON o.event_id=(SELECT o2.event_id FROM allocation_account_outbox o2 WHERE o2.account_id=a.id ORDER BY o2.account_version DESC LIMIT 1)`
 
 type scanner interface{ Scan(...any) error }
 
@@ -299,7 +331,8 @@ func scanAccount(row scanner, now time.Time, nearExpiryDays int) (Account, error
 	var configured bool
 	if err := row.Scan(&account.ID, &account.ProviderAccountID, &account.Label, &account.Plan, &currentExpiry, &authExpiry, &account.Status,
 		&lastAlive, &deadAt, &deathType, &survival, &account.LastCheckState, &lastError, &nextRetry, &account.PollingPaused,
-		&authorizedAt, &credentialType, &configured, &email); err != nil {
+		&authorizedAt, &credentialType, &configured, &email,
+		&account.AllocationSync.Status, &account.AllocationSync.EventID, &account.AllocationSync.Version, &account.AllocationSync.ErrorCode); err != nil {
 		return Account{}, err
 	}
 	parsedAuth, err := time.Parse(time.RFC3339Nano, authExpiry)

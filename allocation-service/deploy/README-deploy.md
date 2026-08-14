@@ -1,5 +1,13 @@
 # Allocation Service Deployment
 
+一期自动同步要求配置 `ALLOCATION_ACCOUNT_EVENT_API_KEY`，并在一期配置相同密钥及
+`ALLOCATION_ACCOUNT_EVENT_URL=https://<allocation-host>/api/internal/v1/monitor-account-events`。
+除回环测试地址外 webhook 必须使用 HTTPS。密钥至少 32 字节，必须独立生成，不得
+复用管理员 session/CSRF、一期 monitor API 或凭据加密密钥。
+
+升级后 allocation 数据库 schema 版本为 9。服务启动前先备份 SQLite 文件并运行
+迁移；新账号将以 `pending_credentials` 创建，管理员补齐密码和 2FA 后才可分配。
+
 This release is a local artifact only. Do not upload, publish, or switch production
 traffic without separate user authorization.
 

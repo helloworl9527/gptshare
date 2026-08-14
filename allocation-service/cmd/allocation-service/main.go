@@ -76,7 +76,10 @@ func main() {
 	}
 	server := &http.Server{
 		Addr:              cfg.ListenAddr,
-		Handler:           httpapi.NewRouter(database, authManager, httpapi.Config{Origin: cfg.AppOrigin, Accounts: accounts, Cards: cards, Allocator: allocator, UserQuery: userQuery, Metrics: metrics}, logger),
+		Handler: httpapi.NewRouter(database, authManager, httpapi.Config{
+			Origin: cfg.AppOrigin, Accounts: accounts, Cards: cards, Allocator: allocator, UserQuery: userQuery, Metrics: metrics,
+			AccountEventSink: repo, AccountEventAPIKey: cfg.AccountEventAPIKey,
+		}, logger),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,

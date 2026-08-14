@@ -84,6 +84,10 @@ func TestImportEncryptsSnapshotsAndRejectsDuplicate(t *testing.T) {
 	if account.Plan != "plus" || account.Status != "alive" || !account.Credential.Configured || account.Credential.Type != "access" {
 		t.Fatalf("account=%+v", account)
 	}
+	var syncEvents int
+	if err := database.DB().QueryRow("SELECT count(*) FROM allocation_account_outbox WHERE account_id=?", account.ID).Scan(&syncEvents); err != nil || syncEvents != 1 {
+		t.Fatalf("allocation sync events=%d err=%v", syncEvents, err)
+	}
 	var envelope []byte
 	var keyID, authExpiry string
 	if err := database.DB().QueryRow("SELECT enc_credentials,credential_key_id,auth_expiry FROM accounts WHERE id=?", account.ID).Scan(&envelope, &keyID, &authExpiry); err != nil {
@@ -108,6 +112,9 @@ func TestImportEncryptsSnapshotsAndRejectsDuplicate(t *testing.T) {
 	database.DB().QueryRow("SELECT count(*) FROM accounts WHERE deleted_at IS NULL").Scan(&count)
 	if count != 1 {
 		t.Fatalf("active accounts=%d", count)
+	}
+	if err := database.DB().QueryRow("SELECT count(*) FROM allocation_account_outbox").Scan(&syncEvents); err != nil || syncEvents != 1 {
+		t.Fatalf("duplicate import changed allocation sync events=%d err=%v", syncEvents, err)
 	}
 }
 
@@ -329,6 +336,46 @@ func TestDeleteIsIdempotentScrubsAndAllowsReimport(t *testing.T) {
 	database.DB().QueryRow("SELECT count(*) FROM authorization_epochs WHERE account_id=?", account.ID).Scan(&oldEpochs)
 	if oldEpochs != 1 {
 		t.Fatalf("old epochs=%d", oldEpochs)
+	}
+}
+
+func TestManualBanIsAtomicAndIdempotent(t *testing.T) {
+	service, database, _, closeDB := testService(t, "acct-manual-ban")
+	defer closeDB()
+	created, err := service.ImportByToken(context.Background(), &TokenInput{AccessToken: "manual-ban-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.Ban(context.Background(), created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.AlreadyBanned || result.Account.Status != "dead_banned" || !result.Account.PollingPaused {
+		t.Fatalf("ban result=%+v", result)
+	}
+	var activeEpochs, changes, alerts, events int
+	if err := database.DB().QueryRow("SELECT count(*) FROM authorization_epochs WHERE account_id=? AND ended_at IS NULL", created.ID).Scan(&activeEpochs); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.DB().QueryRow("SELECT count(*) FROM status_change_log WHERE account_id=? AND evidence_code='manual_admin_ban'", created.ID).Scan(&changes); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.DB().QueryRow("SELECT count(*) FROM alert_events WHERE account_id=? AND event_type='abnormal_ban'", created.ID).Scan(&alerts); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.DB().QueryRow("SELECT count(*) FROM allocation_account_outbox WHERE account_id=?", created.ID).Scan(&events); err != nil {
+		t.Fatal(err)
+	}
+	if activeEpochs != 0 || changes != 1 || alerts != 1 || events != 2 {
+		t.Fatalf("active_epochs=%d changes=%d alerts=%d events=%d", activeEpochs, changes, alerts, events)
+	}
+	repeated, err := service.Ban(context.Background(), created.ID)
+	if err != nil || !repeated.AlreadyBanned {
+		t.Fatalf("repeated ban=%+v err=%v", repeated, err)
+	}
+	var repeatedEvents int
+	if err := database.DB().QueryRow("SELECT count(*) FROM allocation_account_outbox WHERE account_id=?", created.ID).Scan(&repeatedEvents); err != nil || repeatedEvents != events {
+		t.Fatalf("repeated events=%d err=%v", repeatedEvents, err)
 	}
 }
 

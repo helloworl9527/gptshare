@@ -33,6 +33,7 @@ type Config struct {
 	AppOrigin                    string
 	MonitorBaseURL               string
 	MonitorAPIKey                string
+	AccountEventAPIKey           string
 	AdminUser                    string
 	AdminPasswordHash            string
 	AdminTOTPSecret              []byte
@@ -92,6 +93,7 @@ func LoadWithLookup(lookup func(string) (string, bool)) (Config, error) {
 		AppOrigin:                    appOrigin,
 		MonitorBaseURL:               monitorBaseURL,
 		MonitorAPIKey:                get("ALLOCATION_MONITOR_API_KEY", ""),
+		AccountEventAPIKey:           get("ALLOCATION_ACCOUNT_EVENT_API_KEY", ""),
 		AdminUser:                    get("ALLOCATION_ADMIN_USER", ""),
 		AdminPasswordHash:            get("ALLOCATION_ADMIN_PASSWORD_HASH", ""),
 		AdminTOTPSecret:              totp,
@@ -120,6 +122,9 @@ func (c Config) Validate(lookup func(string) (string, bool)) error {
 	if !validPlainSecret(c.MonitorAPIKey) {
 		return errors.New("ALLOCATION_MONITOR_API_KEY must be an independently generated value of at least 32 bytes")
 	}
+	if !validPlainSecret(c.AccountEventAPIKey) {
+		return errors.New("ALLOCATION_ACCOUNT_EVENT_API_KEY must be an independently generated value of at least 32 bytes")
+	}
 	if c.AdminUser == "" {
 		return errors.New("ALLOCATION_ADMIN_USER is required")
 	}
@@ -138,7 +143,7 @@ func (c Config) Validate(lookup func(string) (string, bool)) error {
 	if _, ok := c.CredentialMasterKeys[c.CredentialActiveKeyID]; !ok {
 		return errors.New("ALLOCATION_CREDENTIAL_ACTIVE_KEY_ID is not present in ALLOCATION_CREDENTIAL_MASTER_KEYS")
 	}
-	materials := [][]byte{[]byte(c.MonitorAPIKey), c.AdminTOTPSecret, c.SessionSigningKey, c.CSRFSigningKey}
+	materials := [][]byte{[]byte(c.MonitorAPIKey), []byte(c.AccountEventAPIKey), c.AdminTOTPSecret, c.SessionSigningKey, c.CSRFSigningKey}
 	materials = append(materials, c.CredentialMasterKeyMaterials...)
 	if err := rejectDuplicateMaterials("allocation secret", materials); err != nil {
 		return err

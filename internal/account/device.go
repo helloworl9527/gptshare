@@ -289,6 +289,9 @@ func (s *Service) completeDevice(ctx context.Context, record deviceRecord, paylo
 			return 0, err
 		}
 	}
+	if err := enqueueAuthorizationEvent(ctx, tx, accountID, payload.Reauthorize, now); err != nil {
+		return 0, internalError("allocation_sync_enqueue")
+	}
 	if _, err := tx.ExecContext(ctx, `UPDATE device_auth_sessions SET account_id=?,enc_device_code=x'',credential_key_id='',state='authorized',updated_at=? WHERE id=?`, accountID, now.Format(time.RFC3339Nano), record.id); err != nil {
 		return 0, internalError("device_session_complete")
 	}

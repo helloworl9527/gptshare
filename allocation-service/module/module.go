@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"time"
 
+	"allocation-service/accountsync"
 	accountsvc "allocation-service/internal/account"
 	allocatorsvc "allocation-service/internal/allocator"
 	cardsvc "allocation-service/internal/card"
@@ -88,6 +89,10 @@ func (m *Module) Health(ctx context.Context) error {
 		return errors.New("allocation module is not initialized")
 	}
 	return m.store.Health(ctx)
+}
+
+func (m *Module) ApplyMonitorAccountEvent(ctx context.Context, event accountsync.Event) (accountsync.Result, error) {
+	return m.repo.ApplyMonitorAccountEvent(ctx, event)
 }
 
 func (m *Module) RegisterPublicRoutes(router *gin.Engine) {

@@ -32,6 +32,11 @@ type BatchAccountService interface {
 	ImportTokenBatch(context.Context, *account.BatchTokenInput) (account.BatchTokenResult, error)
 }
 
+type AllocationSyncAccountService interface {
+	Ban(context.Context, int64) (account.BanResult, error)
+	RetryAllocationSync(context.Context, int64) (account.Account, error)
+}
+
 func registerAccountRoutes(router *gin.Engine, manager *auth.Manager, service AccountService, cfg Config) {
 	router.GET("/api/accounts", requireSession(manager), func(c *gin.Context) {
 		accounts, err := service.List(c.Request.Context())
@@ -53,6 +58,32 @@ func registerAccountRoutes(router *gin.Engine, manager *auth.Manager, service Ac
 		}
 		c.JSON(http.StatusOK, result)
 	})
+	if syncService, ok := service.(AllocationSyncAccountService); ok {
+		router.POST("/api/accounts/:id/ban", requireSession(manager), requireOrigin(cfg.Origin), requireSessionCSRF(manager), func(c *gin.Context) {
+			id, valid := accountID(c)
+			if !valid {
+				return
+			}
+			result, err := syncService.Ban(c.Request.Context(), id)
+			if err != nil {
+				writeAccountError(c, err)
+				return
+			}
+			c.JSON(http.StatusOK, result)
+		})
+		router.POST("/api/accounts/:id/sync-allocation", requireSession(manager), requireOrigin(cfg.Origin), requireSessionCSRF(manager), func(c *gin.Context) {
+			id, valid := accountID(c)
+			if !valid {
+				return
+			}
+			result, err := syncService.RetryAllocationSync(c.Request.Context(), id)
+			if err != nil {
+				writeAccountError(c, err)
+				return
+			}
+			c.JSON(http.StatusOK, result)
+		})
+	}
 	router.POST("/api/accounts/import/token", requireSession(manager), requireOrigin(cfg.Origin), requireSessionCSRF(manager), func(c *gin.Context) {
 		var input account.TokenInput
 		if !bindJSON(c, &input, 64<<10) {

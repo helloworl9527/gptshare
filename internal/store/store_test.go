@@ -36,8 +36,8 @@ func TestOpenAppliesAndRepeatsMigrations(t *testing.T) {
 	if err := second.db.QueryRow("SELECT count(*) FROM schema_migrations").Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != 6 {
-		t.Fatalf("migration count = %d, want 6", count)
+	if count != 7 {
+		t.Fatalf("migration count = %d, want 7", count)
 	}
 	assertRequiredSchema(t, second.db)
 	assertPragmas(t, second.db)
@@ -70,7 +70,7 @@ func TestAccountsEmailMigrationFromSchemaThree(t *testing.T) {
 
 	upgraded, err := Open(ctx, dbPath, repositoryMigrations(t))
 	if err != nil {
-		t.Fatalf("upgrade to schema 6: %v", err)
+		t.Fatalf("upgrade to schema 7: %v", err)
 	}
 	defer upgraded.Close()
 	after := rowCounts(t, upgraded.db, "accounts", "authorization_epochs", "status_change_log")
@@ -97,7 +97,7 @@ func TestAccountsEmailMigrationFromSchemaThree(t *testing.T) {
 	if err := upgraded.db.QueryRow("PRAGMA user_version").Scan(&userVersion); err != nil {
 		t.Fatal(err)
 	}
-	if migrationCount != 6 || userVersion != 6 {
+	if migrationCount != 7 || userVersion != 7 {
 		t.Fatalf("migration_count=%d user_version=%d", migrationCount, userVersion)
 	}
 }
@@ -418,7 +418,7 @@ func rowCounts(t *testing.T, db *sql.DB, tables ...string) map[string]int {
 
 func assertRequiredSchema(t *testing.T, db *sql.DB) {
 	t.Helper()
-	for _, table := range []string{"accounts", "authorization_epochs", "status_change_log", "poll_runs", "alert_events", "device_auth_sessions", "oauth_auth_sessions", "settings", "settings_audit", "admin_login_attempts", "admin_sessions", "schema_migrations"} {
+	for _, table := range []string{"accounts", "authorization_epochs", "status_change_log", "poll_runs", "alert_events", "allocation_account_outbox", "device_auth_sessions", "oauth_auth_sessions", "settings", "settings_audit", "admin_login_attempts", "admin_sessions", "schema_migrations"} {
 		if !tableExists(t, db, table) {
 			t.Errorf("missing table %s", table)
 		}

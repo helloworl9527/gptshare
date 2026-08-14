@@ -19,22 +19,24 @@ import (
 const minimumKeyBytes = 32
 
 type Config struct {
-	Environment             string
-	ListenAddr              string
-	DBPath                  string
-	MigrationsDir           string
-	CredentialMasterKeys    map[string][]byte
-	CredentialActiveKeyID   string
-	JWTSigningKey           []byte
-	RateLimitKey            []byte
-	AllocationServiceAPIKey string
-	AdminUser               string
-	AdminPasswordHash       string
-	AdminTOTPSecret         []byte
-	AppOrigin               string
-	TrustLoopbackProxy      bool
-	DevTLSCert              string
-	DevTLSKey               string
+	Environment                  string
+	ListenAddr                   string
+	DBPath                       string
+	MigrationsDir                string
+	CredentialMasterKeys        map[string][]byte
+	CredentialActiveKeyID       string
+	JWTSigningKey               []byte
+	RateLimitKey                []byte
+	AllocationServiceAPIKey     string
+	AllocationAccountEventURL   string
+	AllocationAccountEventAPIKey string
+	AdminUser                    string
+	AdminPasswordHash            string
+	AdminTOTPSecret              []byte
+	AppOrigin                    string
+	TrustLoopbackProxy           bool
+	DevTLSCert                   string
+	DevTLSKey                    string
 }
 
 func Load() (Config, error) {
@@ -76,22 +78,24 @@ func load(lookup func(string) (string, bool)) (Config, error) {
 	appOrigin := get("APP_ORIGIN", "https://"+listenAddr)
 
 	cfg := Config{
-		Environment:             get("APP_ENV", "development"),
-		ListenAddr:              listenAddr,
-		DBPath:                  get("DB_PATH", filepath.Join("data", "chatgpt-monitor.db")),
-		MigrationsDir:           get("MIGRATIONS_DIR", "migrations"),
-		CredentialMasterKeys:    masterKeys,
-		CredentialActiveKeyID:   get("CREDENTIAL_ACTIVE_KEY_ID", ""),
-		JWTSigningKey:           jwtKey,
-		RateLimitKey:            rateKey,
-		AllocationServiceAPIKey: get("ALLOCATION_SERVICE_API_KEY", ""),
-		AdminUser:               get("ADMIN_USER", ""),
-		AdminPasswordHash:       get("ADMIN_PASSWORD_HASH", ""),
-		AdminTOTPSecret:         totp,
-		AppOrigin:               appOrigin,
-		TrustLoopbackProxy:      trustProxy,
-		DevTLSCert:              get("DEV_TLS_CERT", ""),
-		DevTLSKey:               get("DEV_TLS_KEY", ""),
+		Environment:                  get("APP_ENV", "development"),
+		ListenAddr:                   listenAddr,
+		DBPath:                       get("DB_PATH", filepath.Join("data", "chatgpt-monitor.db")),
+		MigrationsDir:                get("MIGRATIONS_DIR", "migrations"),
+		CredentialMasterKeys:         masterKeys,
+		CredentialActiveKeyID:        get("CREDENTIAL_ACTIVE_KEY_ID", ""),
+		JWTSigningKey:                jwtKey,
+		RateLimitKey:                 rateKey,
+		AllocationServiceAPIKey:      get("ALLOCATION_SERVICE_API_KEY", ""),
+		AllocationAccountEventURL:    get("ALLOCATION_ACCOUNT_EVENT_URL", ""),
+		AllocationAccountEventAPIKey: get("ALLOCATION_ACCOUNT_EVENT_API_KEY", ""),
+		AdminUser:                    get("ADMIN_USER", ""),
+		AdminPasswordHash:            get("ADMIN_PASSWORD_HASH", ""),
+		AdminTOTPSecret:              totp,
+		AppOrigin:                    appOrigin,
+		TrustLoopbackProxy:           trustProxy,
+		DevTLSCert:                   get("DEV_TLS_CERT", ""),
+		DevTLSKey:                    get("DEV_TLS_KEY", ""),
 	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
@@ -143,8 +147,14 @@ func (c Config) Validate() error {
 	if !validAllocationServiceAPIKey(c.AllocationServiceAPIKey) {
 		return errors.New("ALLOCATION_SERVICE_API_KEY must be an independently generated value of at least 32 bytes")
 	}
+	if err := validateAllocationEventEndpoint(c.AllocationAccountEventURL); err != nil {
+		return err
+	}
+	if !validAllocationServiceAPIKey(c.AllocationAccountEventAPIKey) {
+		return errors.New("ALLOCATION_ACCOUNT_EVENT_API_KEY must be an independently generated value of at least 32 bytes")
+	}
 
-	materials := [][]byte{c.JWTSigningKey, c.RateLimitKey, c.AdminTOTPSecret, []byte(c.AllocationServiceAPIKey)}
+	materials := [][]byte{c.JWTSigningKey, c.RateLimitKey, c.AdminTOTPSecret, []byte(c.AllocationServiceAPIKey), []byte(c.AllocationAccountEventAPIKey)}
 	for _, key := range c.CredentialMasterKeys {
 		materials = append(materials, key)
 	}
@@ -156,6 +166,20 @@ func (c Config) Validate() error {
 		}
 	}
 	return nil
+}
+
+func validateAllocationEventEndpoint(value string) error {
+	endpoint, err := url.Parse(value)
+	if err != nil || endpoint.Host == "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" || endpoint.Path != "/api/internal/v1/monitor-account-events" {
+		return errors.New("ALLOCATION_ACCOUNT_EVENT_URL must be the allocation monitor event endpoint")
+	}
+	if endpoint.Scheme == "https" {
+		return nil
+	}
+	if endpoint.Scheme == "http" && isLoopbackHost(endpoint.Hostname()) {
+		return nil
+	}
+	return errors.New("ALLOCATION_ACCOUNT_EVENT_URL must use HTTPS except for loopback addresses")
 }
 
 func validAllocationServiceAPIKey(value string) bool {
