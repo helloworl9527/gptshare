@@ -896,26 +896,36 @@ func TestCardStateTransitionsRevokeReleaseAndExtend(t *testing.T) {
 	if allocation.ValidUntil != now.Add(7*24*time.Hour) {
 		t.Fatalf("valid_until=%s", allocation.ValidUntil)
 	}
-	extended, err := repo.ExtendCard(context.Background(), cardID, 14)
+	extended, err := repo.ExtendCard(context.Background(), cardID, 45)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if extended.ExpiresAt == nil || !extended.ExpiresAt.Equal(now.Add(21*24*time.Hour)) {
+	if extended.ExpiresAt == nil || !extended.ExpiresAt.Equal(now.Add(52*24*time.Hour)) {
 		t.Fatalf("extended expires_at=%v", extended.ExpiresAt)
 	}
 	var allocationUntil string
 	if err := db.DB().QueryRow("SELECT valid_until FROM allocations WHERE id=?", allocation.ID).Scan(&allocationUntil); err != nil {
 		t.Fatal(err)
 	}
-	if allocationUntil != formatTime(now.Add(21*24*time.Hour)) {
+	if allocationUntil != formatTime(now.Add(52*24*time.Hour)) {
 		t.Fatalf("allocation valid_until=%s", allocationUntil)
 	}
-	extended, err = repo.ExtendCard(context.Background(), cardID, 9)
-	if err != nil || extended.ExpiresAt == nil || !extended.ExpiresAt.Equal(now.Add(30*24*time.Hour)) {
+	extended, err = repo.ExtendCard(context.Background(), cardID, 38)
+	if err != nil || extended.ExpiresAt == nil || !extended.ExpiresAt.Equal(now.Add(90*24*time.Hour)) {
 		t.Fatalf("extend to maximum card=%+v err=%v", extended, err)
 	}
 	if _, err := repo.ExtendCard(context.Background(), cardID, 1); !errors.Is(err, ErrCardDurationLimit) {
 		t.Fatalf("extend beyond maximum err=%v want=%v", err, ErrCardDurationLimit)
+	}
+	var cardUntilAfterLimit string
+	if err := db.DB().QueryRow("SELECT expires_at FROM cards WHERE id=?", cardID).Scan(&cardUntilAfterLimit); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DB().QueryRow("SELECT valid_until FROM allocations WHERE id=?", allocation.ID).Scan(&allocationUntil); err != nil {
+		t.Fatal(err)
+	}
+	if want := formatTime(now.Add(90 * 24 * time.Hour)); cardUntilAfterLimit != want || allocationUntil != want {
+		t.Fatalf("over-limit extension partially updated card=%s allocation=%s want=%s", cardUntilAfterLimit, allocationUntil, want)
 	}
 	revoked, err := repo.RevokeCard(context.Background(), cardID)
 	if err != nil {
@@ -923,6 +933,9 @@ func TestCardStateTransitionsRevokeReleaseAndExtend(t *testing.T) {
 	}
 	if revoked.Status != "revoked" || revoked.RevokedAt == nil {
 		t.Fatalf("revoked card=%+v", revoked)
+	}
+	if _, err := repo.ExtendCard(context.Background(), cardID, 1); !errors.Is(err, ErrCardStateConflict) {
+		t.Fatalf("revoked extension err=%v want=%v", err, ErrCardStateConflict)
 	}
 	active, err := repo.ActiveAllocationCount(context.Background(), accountID)
 	if err != nil {
@@ -947,12 +960,18 @@ func TestCardStateTransitionsRevokeReleaseAndExtend(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := repo.ExtendCard(context.Background(), expiringID, 1); !errors.Is(err, ErrCardStateConflict) {
+		t.Fatalf("unused extension err=%v want=%v", err, ErrCardStateConflict)
+	}
 	repo.SetNow(func() time.Time { return now })
 	expiringAllocation, err := repo.RedeemCard(context.Background(), expiringID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	repo.SetNow(func() time.Time { return now.Add(8 * 24 * time.Hour) })
+	if _, err := repo.ExtendCard(context.Background(), expiringID, 1); !errors.Is(err, ErrCardStateConflict) {
+		t.Fatalf("elapsed extension err=%v want=%v", err, ErrCardStateConflict)
+	}
 	expiredCount, err := repo.ExpireDueCards(context.Background(), now.Add(8*24*time.Hour))
 	if err != nil {
 		t.Fatal(err)
@@ -967,11 +986,58 @@ func TestCardStateTransitionsRevokeReleaseAndExtend(t *testing.T) {
 	if expiredCard.Status != "expired" {
 		t.Fatalf("expired status=%s", expiredCard.Status)
 	}
+	if _, err := repo.ExtendCard(context.Background(), expiringID, 1); !errors.Is(err, ErrCardStateConflict) {
+		t.Fatalf("expired extension err=%v want=%v", err, ErrCardStateConflict)
+	}
 	if err := db.DB().QueryRow("SELECT allocation_state,active FROM allocations WHERE id=?", expiringAllocation.ID).Scan(&allocationState, &allocationActive); err != nil {
 		t.Fatal(err)
 	}
 	if allocationState != "expired" || allocationActive != 0 {
 		t.Fatalf("expired allocation state=%s active=%d", allocationState, allocationActive)
+	}
+	ninetyID, err := repo.CreateCard(context.Background(), CardSeed{CodeHash: hashFor(202), CodeSuffix: suffixFor(202), DurationDays: 90})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.RedeemCard(context.Background(), ninetyID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.ExtendCard(context.Background(), ninetyID, 1); !errors.Is(err, ErrCardDurationLimit) {
+		t.Fatalf("90-day card extension err=%v want=%v", err, ErrCardDurationLimit)
+	}
+}
+
+func TestRedeemUsesExactDurationDaysThroughNinety(t *testing.T) {
+	db := openStore(t)
+	defer db.Close()
+	repo := New(db.DB(), testCredentialKeyring(t))
+	now := time.Date(2026, 8, 1, 12, 34, 56, 0, time.UTC)
+	repo.SetNow(func() time.Time { return now })
+	if _, err := repo.CreateAccount(context.Background(), AccountSeed{
+		DisplayUsername: "duration-range", DisplayPassword: "secret-password", DisplayTOTPSecret: "secret-totp",
+		AccountExpiry: now.Add(30 * 24 * time.Hour), MaxConcurrentUsers: 3,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for index, days := range []int{31, 45, 90} {
+		cardID, err := repo.CreateCard(context.Background(), CardSeed{
+			CodeHash: hashFor(300 + index), CodeSuffix: suffixFor(300 + index), DurationDays: days,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		allocation, err := repo.RedeemCard(context.Background(), cardID)
+		if err != nil {
+			t.Fatalf("redeem duration=%d: %v", days, err)
+		}
+		want := now.Add(time.Duration(days) * 24 * time.Hour)
+		card, err := repo.CardByID(context.Background(), cardID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if card.ExpiresAt == nil || !card.ExpiresAt.Equal(want) || !allocation.ValidUntil.Equal(want) {
+			t.Fatalf("duration=%d card_expires=%v allocation_until=%s want=%s", days, card.ExpiresAt, allocation.ValidUntil, want)
+		}
 	}
 }
 

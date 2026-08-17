@@ -17,7 +17,10 @@ import (
 	"allocation-service/internal/repository"
 )
 
-const alphabet = "23456789ABCDEFGHJKMNPQRSTUVWXYZ"
+const (
+	alphabet        = "23456789ABCDEFGHJKMNPQRSTUVWXYZ"
+	maxDurationDays = 90
+)
 
 var (
 	ErrValidation      = errors.New("card validation failed")
@@ -259,11 +262,11 @@ func generateCode() (string, error) {
 }
 
 func validExtensionDuration(days int) bool {
-	return days >= 1 && days <= 30
+	return days >= 1 && days <= maxDurationDays
 }
 
 func validGeneratedDuration(days int) bool {
-	return validExtensionDuration(days) || days == 90
+	return days >= 1 && days <= maxDurationDays
 }
 
 func validStoredDuration(days int) bool {

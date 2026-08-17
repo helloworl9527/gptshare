@@ -16,8 +16,17 @@ const busy = ref(false)
 const generated = ref([])
 const revealed = reactive({})
 const form = reactive({ quantity: 10, duration_days: 30, format: 'csv', extend_days: 7, selected: null })
+const durationPresets = [7, 14, 30, 90]
 
 const visible = computed(() => cards.value)
+const remainingExtensionDays = computed(() => {
+  if (!form.selected?.redeemed_at || !form.selected?.expires_at) return 0
+  const redeemedAt = new Date(form.selected.redeemed_at).getTime()
+  const expiresAt = new Date(form.selected.expires_at).getTime()
+  if (!Number.isFinite(redeemedAt) || !Number.isFinite(expiresAt)) return 0
+  const usedDays = Math.round((expiresAt - redeemedAt) / (24 * 60 * 60 * 1000))
+  return Math.max(0, 90 - usedDays)
+})
 
 async function load() {
   loading.value = true
@@ -105,6 +114,20 @@ async function extend() {
   } finally {
     busy.value = false
   }
+}
+
+function openExtend(card) {
+  form.selected = card
+  form.extend_days = Math.min(7, remainingDays(card)) || 1
+  modal.value = 'extend'
+}
+
+function remainingDays(card) {
+  if (!card?.redeemed_at || !card?.expires_at) return 0
+  const redeemedAt = new Date(card.redeemed_at).getTime()
+  const expiresAt = new Date(card.expires_at).getTime()
+  if (!Number.isFinite(redeemedAt) || !Number.isFinite(expiresAt)) return 0
+  return Math.max(0, 90 - Math.round((expiresAt - redeemedAt) / (24 * 60 * 60 * 1000)))
 }
 
 onMounted(load)
@@ -199,7 +222,7 @@ onMounted(load)
                 <button v-else type="button" :aria-label="`查看尾号 ${card.code_suffix} 的卡密明文`" @click="reveal(card)">
                   查看
                 </button>
-                <button type="button" :disabled="card.status !== 'redeemed'" @click="form.selected = card; modal = 'extend'">
+                <button type="button" :disabled="card.status !== 'redeemed' || remainingDays(card) === 0" @click="openExtend(card)">
                   延期
                 </button>
                 <button class="danger-button" type="button" :disabled="card.status === 'revoked' || card.status === 'expired'" @click="revoke(card)">
@@ -216,18 +239,14 @@ onMounted(load)
       <form class="modal-form" @submit.prevent="modal === 'generate' ? generate() : exportBatch()">
         <label for="quantity">数量</label>
         <input id="quantity" v-model.number="form.quantity" type="number" min="1" max="1000" required>
-        <label for="duration">时长档位</label>
-        <select id="duration" v-model.number="form.duration_days">
-          <option :value="7">
-            7 天
-          </option><option :value="14">
-            14 天
-          </option><option :value="30">
-            30 天
-          </option><option :value="90">
-            90 天
-          </option>
-        </select>
+        <label for="duration">有效期天数</label>
+        <input id="duration" v-model.number="form.duration_days" type="number" min="1" max="90" step="1" required>
+        <small>可输入 1–90 天任意整数。</small>
+        <div class="action-row" aria-label="常用有效期">
+          <button v-for="days in durationPresets" :key="days" type="button" @click="form.duration_days = days">
+            {{ days }} 天
+          </button>
+        </div>
         <template v-if="modal === 'export'">
           <label for="format">导出格式</label>
           <select id="format" v-model="form.format">
@@ -246,7 +265,8 @@ onMounted(load)
     <FocusModal v-if="modal === 'extend'" title="延期卡密" @close="modal = ''">
       <form class="modal-form" @submit.prevent="extend">
         <label for="extend-days">延期天数</label>
-        <input id="extend-days" v-model.number="form.extend_days" type="number" min="1" max="365" required>
+        <input id="extend-days" v-model.number="form.extend_days" type="number" min="1" :max="remainingExtensionDays" step="1" required>
+        <small>当前最多可延期 {{ remainingExtensionDays }} 天，总有效期上限为 90 天。</small>
         <button class="primary-action" type="submit" :disabled="busy">
           确认延期
         </button>

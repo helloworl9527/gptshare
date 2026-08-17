@@ -317,7 +317,7 @@ func writeCardError(c *gin.Context, err error) {
 	case errors.Is(err, cardsvc.ErrValidation):
 		writeError(c, http.StatusUnprocessableEntity, "validation_failed", "request validation failed")
 	case errors.Is(err, cardsvc.ErrDurationLimit):
-		writeError(c, http.StatusUnprocessableEntity, "card_duration_limit_exceeded", "card validity cannot exceed 30 days from redemption")
+		writeError(c, http.StatusUnprocessableEntity, "card_duration_limit_exceeded", "card validity cannot exceed 90 days from redemption")
 	case errors.Is(err, cardsvc.ErrNotFound):
 		writeError(c, http.StatusNotFound, "not_found", "card not found")
 	case errors.Is(err, cardsvc.ErrConflict), errors.Is(err, repository.ErrCardStateConflict):
@@ -372,17 +372,17 @@ type accountSettingsRequest struct {
 
 type generateCardsRequest struct {
 	Quantity     int `json:"quantity" binding:"required,min=1,max=1000"`
-	DurationDays int `json:"duration_days" binding:"required"`
+	DurationDays int `json:"duration_days" binding:"required,min=1,max=90"`
 }
 
 type exportCardsRequest struct {
 	Quantity     int    `json:"quantity" binding:"required,min=1,max=1000"`
-	DurationDays int    `json:"duration_days" binding:"required"`
+	DurationDays int    `json:"duration_days" binding:"required,min=1,max=90"`
 	Format       string `json:"format" binding:"required,oneof=csv txt"`
 }
 
 type extendCardRequest struct {
-	Days int `json:"days" binding:"required"`
+	Days int `json:"days" binding:"required,min=1,max=90"`
 }
 
 type redeemCardRequest struct {

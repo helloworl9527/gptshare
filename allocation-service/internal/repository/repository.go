@@ -25,7 +25,7 @@ var (
 	ErrAccountCredentialsUnavailable = errors.New("account credentials unavailable")
 	ErrCapacityTooSmall              = errors.New("max concurrent users is below current allocations")
 	ErrCardStateConflict             = errors.New("card state does not allow this operation")
-	ErrCardDurationLimit             = errors.New("card duration cannot exceed 30 days from redemption")
+	ErrCardDurationLimit             = errors.New("card duration cannot exceed 90 days from redemption")
 	ErrNoAccountCapacity             = errors.New("no account capacity")
 	ErrCaptchaRequired               = errors.New("captcha required")
 	ErrCaptchaInvalid                = errors.New("captcha invalid")
@@ -522,8 +522,11 @@ func (r *Repository) ExtendCard(ctx context.Context, cardID int64, days int) (mo
 	if err != nil {
 		return models.Card{}, err
 	}
+	if !expiresAt.After(now) {
+		return models.Card{}, ErrCardStateConflict
+	}
 	extended := expiresAt.Add(time.Duration(days) * 24 * time.Hour)
-	if extended.After(redeemedAt.Add(30 * 24 * time.Hour)) {
+	if extended.After(redeemedAt.Add(90 * 24 * time.Hour)) {
 		return models.Card{}, ErrCardDurationLimit
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE cards SET expires_at=?, updated_at=? WHERE id=?`, formatTime(extended), formatTime(now), cardID); err != nil {

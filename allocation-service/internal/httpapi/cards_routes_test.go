@@ -63,21 +63,22 @@ func TestAdminCardsGenerateListExportAndPermission(t *testing.T) {
 			t.Fatalf("suffix mismatch card=%+v", card)
 		}
 	}
-	custom := postJSON(t, client, server.URL+"/api/admin/cards/generate", csrf, map[string]any{"quantity": 1, "duration_days": 5})
-	customBody := readBody(t, custom)
-	if custom.StatusCode != http.StatusCreated || !strings.Contains(customBody, `"duration_days":5`) {
-		t.Fatalf("custom duration status=%d body=%s", custom.StatusCode, customBody)
+	for _, days := range []int{1, 31, 45, 89, 90} {
+		custom := postJSON(t, client, server.URL+"/api/admin/cards/generate", csrf, map[string]any{"quantity": 1, "duration_days": days})
+		customBody := readBody(t, custom)
+		if custom.StatusCode != http.StatusCreated || !strings.Contains(customBody, `"duration_days":`+strconv.Itoa(days)) {
+			t.Fatalf("custom duration=%d status=%d body=%s", days, custom.StatusCode, customBody)
+		}
 	}
-	ninety := postJSON(t, client, server.URL+"/api/admin/cards/generate", csrf, map[string]any{"quantity": 1, "duration_days": 90})
-	ninetyBody := readBody(t, ninety)
-	if ninety.StatusCode != http.StatusCreated || !strings.Contains(ninetyBody, `"duration_days":90`) {
-		t.Fatalf("90-day duration status=%d body=%s", ninety.StatusCode, ninetyBody)
-	}
-	for _, invalidDays := range []int{0, 31, 89, 91} {
+	for _, invalidDays := range []int{-1, 0, 91} {
 		invalid := postJSON(t, client, server.URL+"/api/admin/cards/generate", csrf, map[string]any{"quantity": 1, "duration_days": invalidDays})
 		if invalid.StatusCode != http.StatusUnprocessableEntity {
 			t.Fatalf("invalid duration=%d status=%d body=%s", invalidDays, invalid.StatusCode, readBody(t, invalid))
 		}
+	}
+	nonInteger := postJSON(t, client, server.URL+"/api/admin/cards/generate", csrf, map[string]any{"quantity": 1, "duration_days": 31.5})
+	if nonInteger.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("non-integer duration status=%d body=%s", nonInteger.StatusCode, readBody(t, nonInteger))
 	}
 	list := getRaw(t, client, server.URL+"/api/admin/cards?status=unused&duration_days=30")
 	listBody := readBody(t, list)
@@ -88,6 +89,15 @@ func TestAdminCardsGenerateListExportAndPermission(t *testing.T) {
 		if strings.Contains(listBody, code) {
 			t.Fatalf("list leaked plaintext code %s: %s", code, listBody)
 		}
+	}
+	customList := getRaw(t, client, server.URL+"/api/admin/cards?status=unused&duration_days=45")
+	customListBody := readBody(t, customList)
+	if customList.StatusCode != http.StatusOK || !strings.Contains(customListBody, `"duration_days":45`) {
+		t.Fatalf("custom duration list status=%d body=%s", customList.StatusCode, customListBody)
+	}
+	invalidList := getRaw(t, client, server.URL+"/api/admin/cards?duration_days=91")
+	if invalidList.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("invalid duration list status=%d body=%s", invalidList.StatusCode, readBody(t, invalidList))
 	}
 	first := response.Cards[0]
 	unauthClient := &http.Client{Transport: server.Client().Transport}
@@ -120,7 +130,7 @@ func TestAdminCardsGenerateListExportAndPermission(t *testing.T) {
 	if legacyReveal.StatusCode != http.StatusOK || !strings.Contains(legacyBody, "明文不可用(旧批次)") || strings.Contains(legacyBody, "OLD1-") {
 		t.Fatalf("legacy reveal status=%d body=%s", legacyReveal.StatusCode, legacyBody)
 	}
-	csvExport := postJSON(t, client, server.URL+"/api/admin/cards/export", csrf, map[string]any{"quantity": 2, "duration_days": 7, "format": "csv"})
+	csvExport := postJSON(t, client, server.URL+"/api/admin/cards/export", csrf, map[string]any{"quantity": 2, "duration_days": 45, "format": "csv"})
 	csvBody := readBody(t, csvExport)
 	if csvExport.StatusCode != http.StatusOK || !strings.HasPrefix(csvExport.Header.Get("Content-Type"), "text/csv") {
 		t.Fatalf("csv export status=%d content-type=%q body=%s", csvExport.StatusCode, csvExport.Header.Get("Content-Type"), csvBody)
@@ -129,10 +139,10 @@ func TestAdminCardsGenerateListExportAndPermission(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(records) != 3 || records[0][0] != "code" || records[0][1] != "duration_days" || records[1][1] != "7" {
+	if len(records) != 3 || records[0][0] != "code" || records[0][1] != "duration_days" || records[1][1] != "45" {
 		t.Fatalf("bad csv records=%v", records)
 	}
-	txtExport := postJSON(t, client, server.URL+"/api/admin/cards/export", csrf, map[string]any{"quantity": 2, "duration_days": 14, "format": "txt"})
+	txtExport := postJSON(t, client, server.URL+"/api/admin/cards/export", csrf, map[string]any{"quantity": 2, "duration_days": 89, "format": "txt"})
 	txtBody := readBody(t, txtExport)
 	lines := strings.Fields(strings.TrimSpace(txtBody))
 	if txtExport.StatusCode != http.StatusOK || !strings.HasPrefix(txtExport.Header.Get("Content-Type"), "text/plain") || len(lines) != 2 {
@@ -145,6 +155,14 @@ func TestAdminCardsGenerateListExportAndPermission(t *testing.T) {
 	}
 	if countAuditEvents(t, server, "cards.export") != 2 {
 		t.Fatalf("cards.export audit count=%d want 2", countAuditEvents(t, server, "cards.export"))
+	}
+	invalidExport := postJSON(t, client, server.URL+"/api/admin/cards/export", csrf, map[string]any{"quantity": 1, "duration_days": 91, "format": "csv"})
+	if invalidExport.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("invalid export duration status=%d body=%s", invalidExport.StatusCode, readBody(t, invalidExport))
+	}
+	nonIntegerExport := postJSON(t, client, server.URL+"/api/admin/cards/export", csrf, map[string]any{"quantity": 1, "duration_days": 45.5, "format": "csv"})
+	if nonIntegerExport.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("non-integer export duration status=%d body=%s", nonIntegerExport.StatusCode, readBody(t, nonIntegerExport))
 	}
 }
 
@@ -189,7 +207,7 @@ func TestCardRevokeBlocksUserQueryAndExtendUpdatesView(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	extended := postJSON(t, client, server.URL+"/api/admin/cards/"+strconv.FormatInt(parsed.Cards[0].ID, 10)+"/extend", csrf, map[string]any{"days": 14})
+	extended := postJSON(t, client, server.URL+"/api/admin/cards/"+strconv.FormatInt(parsed.Cards[0].ID, 10)+"/extend", csrf, map[string]any{"days": 45})
 	if extended.StatusCode != http.StatusOK {
 		t.Fatalf("extend status=%d body=%s", extended.StatusCode, readBody(t, extended))
 	}
@@ -207,10 +225,10 @@ func TestCardRevokeBlocksUserQueryAndExtendUpdatesView(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !afterTime.Equal(beforeTime.Add(14 * 24 * time.Hour)) {
+	if !afterTime.Equal(beforeTime.Add(45 * 24 * time.Hour)) {
 		t.Fatalf("extend did not update user view before=%s after=%s", beforeTime, afterTime)
 	}
-	toLimit := postJSON(t, client, server.URL+"/api/admin/cards/"+strconv.FormatInt(parsed.Cards[0].ID, 10)+"/extend", csrf, map[string]any{"days": 9})
+	toLimit := postJSON(t, client, server.URL+"/api/admin/cards/"+strconv.FormatInt(parsed.Cards[0].ID, 10)+"/extend", csrf, map[string]any{"days": 38})
 	if toLimit.StatusCode != http.StatusOK {
 		t.Fatalf("extend to limit status=%d body=%s", toLimit.StatusCode, readBody(t, toLimit))
 	}

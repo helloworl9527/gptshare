@@ -97,7 +97,7 @@ openssl rand -base64 32 | tr '+/' '-_' | tr -d '='   # raw-url base64（allocati
 ./vitals-migrate      # 校验密钥 → 迁移 monitor → 迁移 allocation
 ./vitals              # 启动服务
 ```
-本次账号事件功能要求 monitor schema 7 和 allocation schema 9。升级时必须先完成
+当前版本要求 monitor schema 7 和 allocation schema 10。升级时必须先完成
 两库备份，再运行迁移 runner；任一迁移失败都不要启动服务。
 迁移失败即停机，从对应库的迁移前备份恢复。
 

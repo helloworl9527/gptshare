@@ -306,7 +306,7 @@ describe('P2 admin views', () => {
     wrapper.unmount()
   })
 
-  it('validates custom duration and caps extension at thirty days from redemption', async () => {
+  it('accepts custom duration and caps extension at ninety days from redemption', async () => {
     const extendable = [{
       id: 8,
       code_suffix: 'EXT5',
@@ -318,7 +318,9 @@ describe('P2 admin views', () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(response({ cards: extendable }))
       .mockResolvedValueOnce(response({ csrf_token: 'c'.repeat(43) }))
-      .mockResolvedValueOnce(response({ card: { ...extendable[0], expires_at: '2026-08-23T00:00:00Z' } }))
+      .mockResolvedValueOnce(response({ cards: [{ id: 9, code: '2345-6789-ABCD', code_suffix: 'ABCD', duration_days: 31, status: 'unused' }] }, 201))
+      .mockResolvedValueOnce(response({ cards: extendable }))
+      .mockResolvedValueOnce(response({ card: { ...extendable[0], expires_at: '2026-10-22T00:00:00Z' } }))
       .mockResolvedValueOnce(response({ cards: extendable }))
     const wrapper = await render(Cards, fetchMock)
 
@@ -326,17 +328,16 @@ describe('P2 admin views', () => {
     await wrapper.find('#duration').setValue(31)
     await wrapper.find('.modal-form').trigger('submit')
     await flushPromises()
-    expect(wrapper.text()).toContain('卡密有效期必须是 1～30 天的整数或 90 天')
-    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const generateCall = fetchMock.mock.calls.find(([url]) => String(url) === '/api/admin/cards/generate')
+    expect(JSON.parse(generateCall[1].body)).toMatchObject({ duration_days: 31 })
 
-    await wrapper.find('[role="dialog"] .icon-button').trigger('click')
     await wrapper.findAll('button').find((button) => button.text() === '延期').trigger('click')
-    expect(wrapper.find('#extend-days').attributes('max')).toBe('25')
-    await wrapper.find('#extend-days').setValue(25)
+    expect(wrapper.find('#extend-days').attributes('max')).toBe('85')
+    await wrapper.find('#extend-days').setValue(85)
     await wrapper.find('.modal-form').trigger('submit')
     await flushPromises()
     const extendCall = fetchMock.mock.calls.find(([url]) => String(url) === '/api/admin/cards/8/extend')
-    expect(JSON.parse(extendCall[1].body)).toEqual({ days: 25 })
+    expect(JSON.parse(extendCall[1].body)).toEqual({ days: 85 })
     wrapper.unmount()
   })
 

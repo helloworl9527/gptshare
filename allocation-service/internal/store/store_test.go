@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -115,7 +116,7 @@ func TestFixtureDatabaseUpgradeCreatesBackupAndPreservesData(t *testing.T) {
 	}
 }
 
-func TestCardDurationMigrationPreservesLegacyCardsAndForeignKeys(t *testing.T) {
+func TestCardDuration90DayMigrationPreservesCardsAndForeignKeys(t *testing.T) {
 	dir := secureTempDir(t)
 	path := filepath.Join(dir, "allocation.db")
 	legacy, err := sql.Open("sqlite", "file:"+filepath.ToSlash(path)+"?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)")
@@ -134,7 +135,7 @@ func TestCardDurationMigrationPreservesLegacyCardsAndForeignKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, item := range migrations {
-		if item.version >= 7 {
+		if item.version >= 10 {
 			break
 		}
 		if err := applyMigration(context.Background(), legacy, item); err != nil {
@@ -172,12 +173,18 @@ func TestCardDurationMigrationPreservesLegacyCardsAndForeignKeys(t *testing.T) {
 	}
 	defer upgraded.Close()
 	var duration, allocationCardID int
-	var encrypted []byte
-	if err := upgraded.DB().QueryRow("SELECT duration_days,encrypted_code FROM cards WHERE id=?", cardID).Scan(&duration, &encrypted); err != nil {
+	var codeHash, encrypted []byte
+	var suffix, status, redeemedAt, expiresAt, keyID string
+	if err := upgraded.DB().QueryRow(`SELECT code_hash,code_suffix,duration_days,status,redeemed_at,expires_at,
+		encrypted_code_key_id,encrypted_code FROM cards WHERE id=?`, cardID).Scan(
+		&codeHash, &suffix, &duration, &status, &redeemedAt, &expiresAt, &keyID, &encrypted,
+	); err != nil {
 		t.Fatal(err)
 	}
-	if duration != 90 || len(encrypted) != 2 {
-		t.Fatalf("legacy card duration=%d encrypted=%x", duration, encrypted)
+	if string(codeHash) != string([]byte{1, 2}) || suffix != "OLD9" || duration != 90 || status != "redeemed" ||
+		redeemedAt != now || expiresAt != "2026-10-28T00:00:00Z" || keyID != "key" || string(encrypted) != string([]byte{3, 4}) {
+		t.Fatalf("migrated card hash=%x suffix=%q duration=%d status=%q redeemed=%q expires=%q key=%q encrypted=%x",
+			codeHash, suffix, duration, status, redeemedAt, expiresAt, keyID, encrypted)
 	}
 	if err := upgraded.DB().QueryRow("SELECT card_id FROM allocations WHERE card_id=?", cardID).Scan(&allocationCardID); err != nil || int64(allocationCardID) != cardID {
 		t.Fatalf("allocation card=%d err=%v", allocationCardID, err)
@@ -198,13 +205,17 @@ func TestCardDurationMigrationPreservesLegacyCardsAndForeignKeys(t *testing.T) {
 	if err := upgraded.DB().QueryRow("PRAGMA foreign_keys").Scan(&foreignKeysEnabled); err != nil || foreignKeysEnabled != 1 {
 		t.Fatalf("foreign keys enabled=%d err=%v", foreignKeysEnabled, err)
 	}
-	if _, err := upgraded.DB().Exec(`INSERT INTO cards(code_hash,code_suffix,duration_days,status,created_at,updated_at)
-		VALUES (x'0506','DAY5',5,'unused',?,?)`, now, now); err != nil {
-		t.Fatalf("custom duration rejected: %v", err)
+	for _, days := range []int{1, 31, 45, 89, 90} {
+		if _, err := upgraded.DB().Exec(`INSERT INTO cards(code_hash,code_suffix,duration_days,status,created_at,updated_at)
+			VALUES (randomblob(32),? ,?,'unused',?,?)`, fmt.Sprintf("%04d", days), days, now, now); err != nil {
+			t.Fatalf("duration %d rejected: %v", days, err)
+		}
 	}
-	if _, err := upgraded.DB().Exec(`INSERT INTO cards(code_hash,code_suffix,duration_days,status,created_at,updated_at)
-		VALUES (x'0708','BAD3',31,'unused',?,?)`, now, now); err == nil {
-		t.Fatal("duration above 30 unexpectedly accepted")
+	for _, days := range []int{-1, 0, 91} {
+		if _, err := upgraded.DB().Exec(`INSERT INTO cards(code_hash,code_suffix,duration_days,status,created_at,updated_at)
+			VALUES (randomblob(32),? ,?,'unused',?,?)`, fmt.Sprintf("%04d", days), days, now, now); err == nil {
+			t.Fatalf("out-of-range duration %d unexpectedly accepted", days)
+		}
 	}
 }
 
