@@ -5,6 +5,7 @@ const props = defineProps({ state: { type: String, required: true } })
 const labels = {
   alive: '绿色搏动线：账号存活',
   near: '琥珀色搏动线：账号临期',
+  suspect: '橙色搏动线：账号疑似被封禁，待人工确认',
   banned: '红色平直线：账号非正常失效',
   retired: '灰色虚线：账号正常到期',
 }

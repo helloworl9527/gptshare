@@ -98,7 +98,7 @@ func (s *Service) finalizeLegacyPendingBans(ctx context.Context) error {
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE accounts SET
 				status='dead_banned',dead_at=?,death_type='abnormal_ban',banned_survival_days=?,
-				last_check_state='ok',last_check_error_code=NULL,polling_paused=0,pause_reason=NULL,
+				last_check_state='ok',last_check_error_code=NULL,polling_paused=1,pause_reason='abnormal_ban',
 				pending_evidence_signature=NULL,pending_detected_at=NULL,next_retry_at=NULL,updated_at=?
 			WHERE id=?`, formatTime(detected), days, formatTime(now), item.accountID); err != nil {
 			return err
@@ -188,7 +188,7 @@ func (s *Service) ReviewEvidence(ctx context.Context, request ReviewRequest) (Re
 				days = 0
 			}
 			if _, err := tx.ExecContext(ctx, `UPDATE accounts SET status='dead_banned',dead_at=?,death_type='abnormal_ban',banned_survival_days=?,last_check_state='ok',last_check_error_code=NULL,
-				polling_paused=0,pause_reason=NULL,pending_evidence_signature=NULL,pending_detected_at=NULL,next_retry_at=NULL,updated_at=? WHERE id=?`, formatTime(detected), days, formatTime(now), item.accountID); err != nil {
+				polling_paused=1,pause_reason='abnormal_ban',pending_evidence_signature=NULL,pending_detected_at=NULL,next_retry_at=NULL,updated_at=? WHERE id=?`, formatTime(detected), days, formatTime(now), item.accountID); err != nil {
 				return ReviewResult{}, err
 			}
 			if err := closeEpoch(tx, item.epochID, StateDeadBanned, detected, &days); err != nil {

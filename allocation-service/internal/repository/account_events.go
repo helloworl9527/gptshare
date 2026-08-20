@@ -45,7 +45,16 @@ func (r *Repository) ApplyMonitorAccountEvent(ctx context.Context, event account
 		return accountsync.Result{Disposition: "stale"}, nil
 	}
 	if archived.Valid {
-		return accountsync.Result{}, ErrAccountArchived
+		// 账号已下线（人工或封禁自动下线）。这里必须成功返回而不是报错，
+		// 否则 outbox 会把后续事件当成投递失败并无限重试。
+		if _, err := tx.ExecContext(ctx, `INSERT INTO monitor_account_events(event_id,monitor_account_id,account_version,event_type,disposition,processed_at)
+			VALUES (?,?,?,?,'ignored_archived',?)`, event.EventID, event.ProviderAccountID, event.Version, event.Type, formatTime(now)); err != nil {
+			return accountsync.Result{}, err
+		}
+		if err := tx.Commit(); err != nil {
+			return accountsync.Result{}, err
+		}
+		return accountsync.Result{Disposition: "ignored_archived"}, nil
 	}
 	created := accountID == 0
 	username := strings.TrimSpace(event.Email)
@@ -60,7 +69,7 @@ func (r *Repository) ApplyMonitorAccountEvent(ctx context.Context, event account
 		if err != nil {
 			return accountsync.Result{}, err
 		}
-		status := eventAllocationStatus(event.Status, false, 0, capacity, event.SubscriptionExpiry, now)
+		status := eventAllocationStatus(event.Status, event.Suspected, false, 0, capacity, event.SubscriptionExpiry, now)
 		insert, err := tx.ExecContext(ctx, `INSERT INTO chatgpt_accounts
 			(display_username,display_password_secret,display_password_key_id,display_2fa_secret,display_2fa_key_id,
 			 account_expiry,max_concurrent_users,monitor_account_id,monitor_status,status,created_at,updated_at,monitor_sync_version,monitor_plan)
@@ -81,7 +90,7 @@ func (r *Repository) ApplyMonitorAccountEvent(ctx context.Context, event account
 			FROM chatgpt_accounts WHERE id=?`, accountID).Scan(&credentialsComplete, &allocations, &capacity); err != nil {
 			return accountsync.Result{}, err
 		}
-		status := eventAllocationStatus(event.Status, credentialsComplete, allocations, capacity, event.SubscriptionExpiry, now)
+		status := eventAllocationStatus(event.Status, event.Suspected, credentialsComplete, allocations, capacity, event.SubscriptionExpiry, now)
 		if _, err := tx.ExecContext(ctx, `UPDATE chatgpt_accounts SET display_username=?,account_expiry=?,monitor_status=?,status=?,
 			monitor_sync_version=?,monitor_plan=?,updated_at=? WHERE id=?`, username, formatTime(event.SubscriptionExpiry.UTC()), event.Status,
 			status, event.Version, event.Plan, formatTime(now), accountID); err != nil {
@@ -90,33 +99,51 @@ func (r *Repository) ApplyMonitorAccountEvent(ctx context.Context, event account
 	}
 	result := accountsync.Result{Disposition: "applied", Created: created, Updated: !created}
 	if event.Status == "dead_banned" {
+		if err := closeBannedGraceAllocations(ctx, tx, now); err != nil {
+			return accountsync.Result{}, err
+		}
 		due, err := bannedAccountAllocations(ctx, tx, accountID, now)
 		if err != nil {
 			return accountsync.Result{}, err
 		}
 		for _, item := range due {
-			_, err := replaceOneAllocation(ctx, tx, now, item)
-			if errors.Is(err, ErrNoAccountCapacity) {
+			_, err := replaceOneAllocationIsolated(ctx, tx, now, item)
+			if errors.Is(err, errReplacementAborted) {
+				return accountsync.Result{}, err
+			}
+			if err != nil {
 				result.Pending++
 				if err := auditWithTx(ctx, tx, r.now, "replacement.failed", "card", item.cardID, map[string]any{
-					"reason": "banned", "old_account_id": accountID,
+					"reason": "banned", "old_account_id": accountID, "error_code": replacementErrorCode(err),
 				}); err != nil {
 					return accountsync.Result{}, err
 				}
 				continue
 			}
-			if err != nil {
-				return accountsync.Result{}, err
-			}
 			result.Migrated++
 		}
+		// 顾客全部迁走后自动下线；还有人没迁走就先留着，等每小时换号扫描补齐再下线。
+		retired, err := archiveRetiredAccount(ctx, tx, r.now, accountID, RetireReasonBanned, now)
+		if err != nil {
+			return accountsync.Result{}, err
+		}
+		result.Retired = retired
+	}
+	if event.Status == "dead_normal" {
+		// 订阅正常到期：没有顾客在用就直接下线，还有顾客的等换号扫描迁走后再下线。
+		retired, err := archiveRetiredAccount(ctx, tx, r.now, accountID, RetireReasonExpired, now)
+		if err != nil {
+			return accountsync.Result{}, err
+		}
+		result.Retired = retired
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO monitor_account_events(event_id,monitor_account_id,account_version,event_type,disposition,processed_at)
 		VALUES (?,?,?,?,'applied',?)`, event.EventID, event.ProviderAccountID, event.Version, event.Type, formatTime(now)); err != nil {
 		return accountsync.Result{}, err
 	}
 	if err := auditWithTx(ctx, tx, r.now, "monitor_account_event.applied", "account", accountID, map[string]any{
-		"event_id": event.EventID, "event_type": event.Type, "version": event.Version, "migrated": result.Migrated, "pending": result.Pending,
+		"event_id": event.EventID, "event_type": event.Type, "version": event.Version,
+		"migrated": result.Migrated, "pending": result.Pending, "retired": result.Retired,
 	}); err != nil {
 		return accountsync.Result{}, err
 	}
@@ -126,7 +153,7 @@ func (r *Repository) ApplyMonitorAccountEvent(ctx context.Context, event account
 	return result, nil
 }
 
-func eventAllocationStatus(monitorStatus string, credentialsComplete bool, allocations, capacity int, expiry, now time.Time) string {
+func eventAllocationStatus(monitorStatus string, suspected, credentialsComplete bool, allocations, capacity int, expiry, now time.Time) string {
 	switch monitorStatus {
 	case "dead_banned":
 		return "banned"
@@ -135,6 +162,10 @@ func eventAllocationStatus(monitorStatus string, credentialsComplete bool, alloc
 	}
 	if !expiry.After(now) {
 		return "expired"
+	}
+	// 疑似封禁：退出分配池但不动存量顾客，等人工确认。
+	if suspected {
+		return "suspected"
 	}
 	if !credentialsComplete {
 		return "pending_credentials"

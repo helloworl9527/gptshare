@@ -222,7 +222,8 @@ func TestFetchStatusErrorClassification(t *testing.T) {
 		banned bool
 		code   string
 	}{
-		{"revoked", 401, `{"error":{"code":"token_revoked"}}`, ErrorCredentialRevoked, StateCredentialRevoked, false, true, "token_revoked"},
+		// 凭据被吊销/过期只代表要重新授权，不是封禁候选。
+		{"revoked", 401, `{"error":{"code":"token_revoked"}}`, ErrorCredentialRevoked, StateCredentialRevoked, false, false, "token_revoked"},
 		{"disabled", 403, `{"error":{"code":"account_disabled"}}`, ErrorAccountDisabled, StateAccountDisabled, false, true, "account_disabled"},
 		{"unauthorized JSON", 401, `{"error":{"code":"invalid_token"}}`, ErrorPermissionDenied, StatePermissionDenied, false, false, "http_401"},
 		{"forbidden JSON", 403, `{"error":{"code":"insufficient_scope"}}`, ErrorPermissionDenied, StatePermissionDenied, false, false, "http_403"},

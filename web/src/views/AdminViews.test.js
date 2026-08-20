@@ -51,42 +51,19 @@ describe('P2 admin views', () => {
     clearClientState()
   })
 
-  it('renders account table and pulls pending accounts from phase one', async () => {
+  it('renders account table without the retired phase-one pull action', async () => {
     const fetchMock = vi.fn().mockResolvedValue(response({ accounts, warnings: ['phase_one_monitor_unavailable'] }))
     const wrapper = await render(Accounts, fetchMock)
     expect(wrapper.text()).toContain('north@example.test')
     expect(wrapper.get('a.source-link').attributes('href')).toBe('https://accounts.example.test/orders/42')
     expect(wrapper.text()).toContain('一期监控暂时不可用')
-    await wrapper.get('button.compact-action').trigger('click')
-    await flushPromises()
-    expect(fetchMock.mock.calls.map(([url]) => String(url))).toContain('/api/admin/accounts/pull-monitor')
+    // 一期账号现在通过事件自动同步过来，手动拉取入口已下线。
+    expect(wrapper.text()).not.toContain('从一期同步账号')
+    expect(wrapper.find('button.compact-action').exists()).toBe(false)
+    expect(fetchMock.mock.calls.map(([url]) => String(url))).not.toContain('/api/admin/accounts/pull-monitor')
     expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
     wrapper.unmount()
   })
-
-  it('shows per-account pull statistics and a concrete failure reason', async () => {
-		const fetchMock = vi.fn()
-			.mockResolvedValueOnce(response({ accounts }))
-			.mockResolvedValueOnce(response(accountSettings))
-			.mockResolvedValueOnce(response({ csrf_token: 'c'.repeat(43) }))
-			.mockResolvedValueOnce(response({
-				accounts,
-				created: 2,
-				updated: 1,
-				skipped: 0,
-				failed: 1,
-				errors: [{ monitor_account_id: 'conflict', code: 'alive_expiry_conflict' }],
-			}))
-			.mockResolvedValueOnce(response({ accounts }))
-			.mockResolvedValueOnce(response(accountSettings))
-		const wrapper = await render(Accounts, fetchMock)
-		await wrapper.get('button.compact-action').trigger('click')
-		await flushPromises()
-		expect(wrapper.text()).toContain('新建 2，更新 1，跳过 0，失败 1')
-		expect(wrapper.text()).toContain('conflict：状态为 alive，但到期时间已过')
-		expect(wrapper.text()).not.toContain('请求参数未通过校验')
-		wrapper.unmount()
-	})
 
   it('runs batch monitor sync from the accounts view', async () => {
     const fetchMock = vi.fn()
@@ -251,14 +228,11 @@ describe('P2 admin views', () => {
     wrapper.unmount()
   })
 
-  it('saves default capacity, pulls with implicit default, and applies it to all accounts', async () => {
+  it('saves default capacity and applies it to all accounts', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(response({ accounts }))
       .mockResolvedValueOnce(response(accountSettings))
       .mockResolvedValueOnce(response({ csrf_token: 'c'.repeat(43) }))
-      .mockResolvedValueOnce(response({ settings: { default_account_capacity: 6 } }))
-      .mockResolvedValueOnce(response({ accounts: [{ ...accounts[0], id: 9, display_username: 'implicit-default@example.test', max_concurrent_users: 6, monitor_account_id: 'mon-implicit', status: 'pending_credentials' }], created: 1, updated: 0 }))
-      .mockResolvedValueOnce(response({ accounts: [{ ...accounts[0], id: 9, display_username: 'implicit-default@example.test', max_concurrent_users: 6, monitor_account_id: 'mon-implicit' }] }))
       .mockResolvedValueOnce(response({ settings: { default_account_capacity: 6 } }))
       .mockResolvedValueOnce(response({ default_account_capacity: 6, updated_accounts: 2 }))
       .mockResolvedValueOnce(response({ accounts: accounts.map((account) => ({ ...account, max_concurrent_users: 6 })) }))
@@ -269,9 +243,6 @@ describe('P2 admin views', () => {
     await wrapper.find('.capacity-form').trigger('submit')
     await flushPromises()
     expect(fetchMock.mock.calls.map(([url]) => String(url))).toContain('/api/admin/account-settings')
-    await wrapper.get('button.compact-action').trigger('click')
-    await flushPromises()
-    expect(fetchMock.mock.calls.map(([url]) => String(url))).toContain('/api/admin/accounts/pull-monitor')
     await wrapper.findAll('button').find((button) => button.text() === '应用到全部账号').trigger('click')
     await flushPromises()
     expect(fetchMock.mock.calls.map(([url]) => String(url))).toContain('/api/admin/accounts/apply-default-capacity')
@@ -379,7 +350,29 @@ describe('P2 admin views', () => {
     expect(wrapper.text()).toContain('**** JUL30')
     expect(wrapper.text()).toContain('flagon_snap@example.test')
     expect(wrapper.text()).toContain('替换历史')
+    expect(wrapper.text()).toContain('暂无替换记录')
     expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual(['/api/admin/allocations'])
+    wrapper.unmount()
+  })
+
+  it('renders replacement history with reasons, grace windows and retired accounts', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(response({
+      allocations: [],
+      replacements: [
+        { id: 2, card_id: 58, code_suffix: 'CE58', old_account_id: 15, old_account_name: 'banned@example.test', old_account_gone: true, new_account_id: 20, new_account_name: 'fresh@example.test', new_account_gone: false, reason: 'banned', operator: 'system', detected_at: '2026-08-20T03:06:13Z', replaced_at: '2026-08-20T03:06:13Z' },
+        { id: 1, card_id: 45, code_suffix: 'CE45', old_account_id: 5, old_account_name: 'aging@example.test', old_account_gone: false, new_account_id: 18, new_account_name: 'spare@example.test', new_account_gone: false, reason: 'account_expiring', operator: 'system', detected_at: '2026-08-18T19:36:13Z', replaced_at: '2026-08-18T19:36:13Z', grace_until: '2026-08-19T19:36:13Z' },
+      ],
+    }))
+    const wrapper = await render(Allocations, fetchMock)
+    expect(wrapper.text()).toContain('**** CE58')
+    expect(wrapper.text()).toContain('账号封禁')
+    expect(wrapper.text()).toContain('banned@example.test（已下线）')
+    expect(wrapper.text()).toContain('fresh@example.test')
+    expect(wrapper.text()).toContain('即时切换')
+    expect(wrapper.text()).toContain('**** CE45')
+    expect(wrapper.text()).toContain('账号临期')
+    expect(wrapper.text()).toContain('系统自动')
+    expect(wrapper.text()).not.toContain('暂无替换记录')
     wrapper.unmount()
   })
 })

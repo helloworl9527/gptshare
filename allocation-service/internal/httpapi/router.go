@@ -674,11 +674,20 @@ func listAllocationsHandler(service *allocatorsvc.Service) gin.HandlerFunc {
 			writeError(c, http.StatusInternalServerError, "internal_error", "request could not be processed")
 			return
 		}
+		history, err := service.ListReplacementHistory(c.Request.Context(), replacementHistoryLimit)
+		if err != nil {
+			writeError(c, http.StatusInternalServerError, "internal_error", "request could not be processed")
+			return
+		}
 		out := make([]gin.H, 0, len(allocations))
 		for _, allocation := range allocations {
 			out = append(out, serializeAdminAllocation(allocation))
 		}
-		c.JSON(http.StatusOK, gin.H{"allocations": out, "request_id": c.GetString("request_id")})
+		replacements := make([]gin.H, 0, len(history))
+		for _, entry := range history {
+			replacements = append(replacements, serializeReplacementHistory(entry))
+		}
+		c.JSON(http.StatusOK, gin.H{"allocations": out, "replacements": replacements, "request_id": c.GetString("request_id")})
 	}
 }
 
@@ -1227,6 +1236,31 @@ func serializeAllocation(allocation models.Allocation) gin.H {
 	}
 	if allocation.GraceUntil != nil {
 		body["grace_until"] = allocation.GraceUntil.UTC().Format(time.RFC3339Nano)
+	}
+	return body
+}
+
+// replacementHistoryLimit 限制后台替换历史一次返回的条数，避免长期运行后响应无限膨胀。
+const replacementHistoryLimit = 200
+
+func serializeReplacementHistory(entry repository.ReplacementHistoryEntry) gin.H {
+	body := gin.H{
+		"id":               entry.ID,
+		"card_id":          entry.CardID,
+		"code_suffix":      entry.CodeSuffix,
+		"old_account_id":   entry.OldAccountID,
+		"old_account_name": entry.OldAccountName,
+		"old_account_gone": entry.OldAccountGone,
+		"new_account_id":   entry.NewAccountID,
+		"new_account_name": entry.NewAccountName,
+		"new_account_gone": entry.NewAccountGone,
+		"reason":           entry.Reason,
+		"operator":         entry.Operator,
+		"detected_at":      entry.DetectedAt.UTC().Format(time.RFC3339Nano),
+		"replaced_at":      entry.ReplacedAt.UTC().Format(time.RFC3339Nano),
+	}
+	if entry.GraceUntil != nil {
+		body["grace_until"] = entry.GraceUntil.UTC().Format(time.RFC3339Nano)
 	}
 	return body
 }

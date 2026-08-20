@@ -607,7 +607,8 @@ func classifyHTTP(status int, body []byte) error {
 		case "account_disabled", "account_deactivated":
 			return newTypedError(ErrorAccountDisabled, status, code, EvidenceContractVerifiedLivePending, false, true, true, nil)
 		case "token_revoked", "credential_revoked", "refresh_token_reused":
-			return newTypedError(ErrorCredentialRevoked, status, code, EvidenceContractVerifiedLivePending, false, true, true, nil)
+			// 凭据被吊销/过期只说明需要重新授权，不能作为账号被封禁的判据。
+			return newTypedError(ErrorCredentialRevoked, status, code, EvidenceContractVerifiedLivePending, false, false, true, nil)
 		}
 	}
 	if status == http.StatusUnauthorized || status == http.StatusForbidden {

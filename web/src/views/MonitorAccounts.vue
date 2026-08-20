@@ -18,9 +18,13 @@ const sortMode = ref('status')
 const query = ref('')
 
 const summary = computed(() => summarizeMonitor(accounts.value))
+const suspectCount = computed(() => accounts.value.filter(
+  (account) => account.suspected_banned_at && account.status !== 'dead_banned' && account.status !== 'dead_normal',
+).length)
 const kpis = computed(() => [
   { key: 'alive', label: '存活账号', value: summary.value.alive, hint: `${summary.value.total} 个账号纳入监控`, tone: 'green' },
   { key: 'near', label: '临期账号', value: summary.value.near, hint: '接近订阅或授权边界', tone: summary.value.near ? 'amber' : 'retired' },
+  { key: 'suspect', label: '疑似封号', value: suspectCount.value, hint: '已退出分配池，待人工确认', tone: suspectCount.value ? 'amber' : 'green' },
   { key: 'banned', label: '异常封号', value: summary.value.banned, hint: `平均封前存活 ${summary.value.averageSurvival} 天`, tone: summary.value.banned ? 'red' : 'green' },
   { key: 'checks', label: '检查异常', value: summary.value.abnormalChecks, hint: '业务状态保留最近可信值', tone: summary.value.abnormalChecks ? 'amber' : 'cyan' },
 ])
@@ -28,7 +32,13 @@ const kpis = computed(() => [
 const filteredAccounts = computed(() => {
   const term = query.value.trim().toLowerCase()
   return sortAccounts(accounts.value, sortMode.value).filter((account) => {
-    const state = account.status === 'dead_banned' ? 'banned' : account.status === 'dead_normal' ? 'retired' : account.near_expiry ? 'near' : 'alive'
+    const state = account.status === 'dead_banned'
+      ? 'banned'
+      : account.status === 'dead_normal'
+        ? 'retired'
+        : account.suspected_banned_at
+          ? 'suspect'
+          : account.near_expiry ? 'near' : 'alive'
     const matchesFilter = filter.value === 'all' || filter.value === state
     const haystack = `${account.label || ''} ${account.provider_account_id || ''} ${account.email || ''}`.toLowerCase()
     return matchesFilter && (!term || haystack.includes(term))
@@ -110,6 +120,9 @@ onMounted(load)
               </option>
               <option value="near">
                 临期
+              </option>
+              <option value="suspect">
+                疑似封号
               </option>
               <option value="banned">
                 封号

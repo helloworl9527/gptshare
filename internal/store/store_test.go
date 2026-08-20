@@ -32,12 +32,13 @@ func TestOpenAppliesAndRepeatsMigrations(t *testing.T) {
 	}
 	defer second.Close()
 
+	expected := migrationCount(t)
 	var count int
 	if err := second.db.QueryRow("SELECT count(*) FROM schema_migrations").Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != 7 {
-		t.Fatalf("migration count = %d, want 7", count)
+	if count != expected {
+		t.Fatalf("migration count = %d, want %d", count, expected)
 	}
 	assertRequiredSchema(t, second.db)
 	assertPragmas(t, second.db)
@@ -90,16 +91,27 @@ func TestAccountsEmailMigrationFromSchemaThree(t *testing.T) {
 	if generation != 1 {
 		t.Fatalf("credential_generation=%d want=1", generation)
 	}
-	var migrationCount, userVersion int
-	if err := upgraded.db.QueryRow("SELECT count(*) FROM schema_migrations").Scan(&migrationCount); err != nil {
+	var count, userVersion int
+	if err := upgraded.db.QueryRow("SELECT count(*) FROM schema_migrations").Scan(&count); err != nil {
 		t.Fatal(err)
 	}
 	if err := upgraded.db.QueryRow("PRAGMA user_version").Scan(&userVersion); err != nil {
 		t.Fatal(err)
 	}
-	if migrationCount != 7 || userVersion != 7 {
-		t.Fatalf("migration_count=%d user_version=%d", migrationCount, userVersion)
+	expected := migrationCount(t)
+	if count != expected || userVersion != expected {
+		t.Fatalf("migration_count=%d user_version=%d want %d", count, userVersion, expected)
 	}
+}
+
+// migrationCount 从嵌入的迁移目录推导期望值，新增迁移时不必再改断言常量。
+func migrationCount(t *testing.T) int {
+	t.Helper()
+	migrations, err := loadMigrations(repositoryMigrations(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(migrations)
 }
 
 func TestSchemaConstraints(t *testing.T) {
@@ -433,7 +445,8 @@ func assertRequiredSchema(t *testing.T, db *sql.DB) {
 
 func assertPragmas(t *testing.T, db *sql.DB) {
 	t.Helper()
-	checks := map[string]any{"foreign_keys": 1, "journal_mode": "wal", "busy_timeout": busyTimeoutMS, "user_version": 6}
+	// user_version 跟随最新迁移编号，从迁移目录推导而非写死。
+	checks := map[string]any{"foreign_keys": 1, "journal_mode": "wal", "busy_timeout": busyTimeoutMS, "user_version": migrationCount(t)}
 	for pragma, want := range checks {
 		var got any
 		if err := db.QueryRow("PRAGMA " + pragma).Scan(&got); err != nil {

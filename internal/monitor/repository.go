@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"allocation-service/accountsync"
@@ -148,10 +149,12 @@ func (s *Service) applyResult(ctx context.Context, runID string, record accountR
 	var currentSurvival sql.NullFloat64
 	var paused bool
 	var currentGeneration int64
+	var currentStreak int
+	var currentStreakStarted, currentSuspectedAt sql.NullString
 	if err := tx.QueryRowContext(ctx, `SELECT status,plan,raw_plan,current_expiry,last_check_state,polling_paused,email,label,credential_generation,
-		dead_at,death_type,banned_survival_days FROM accounts WHERE id=? AND deleted_at IS NULL`, record.ID).
+		dead_at,death_type,banned_survival_days,denial_streak,denial_streak_started_at,suspected_banned_at FROM accounts WHERE id=? AND deleted_at IS NULL`, record.ID).
 		Scan(&currentStatus, &currentPlan, &currentRawPlan, &currentExpiryNull, &lastCheck, &paused, &currentEmail, &currentLabel, &currentGeneration,
-			&currentDeadAt, &currentDeathType, &currentSurvival); err != nil {
+			&currentDeadAt, &currentDeathType, &currentSurvival, &currentStreak, &currentStreakStarted, &currentSuspectedAt); err != nil {
 		return false, err
 	}
 	if outcome.generation != 0 && currentGeneration != outcome.generation {
@@ -184,6 +187,9 @@ func (s *Service) applyResult(ctx context.Context, runID string, record accountR
 	if outcome.status != nil && code == "normal_expiry" {
 		newStatus, newCheck = StateDeadNormal, CheckOK
 		deadAt, deathType = formatTime(record.AuthExpiry), "normal_expiry"
+		// 终态账号不再轮询。关闭 epoch 已经让 loadDueAccounts 选不到它，
+		// 这里再显式停一次，保证状态自洽且不依赖单一条件。
+		pollingPaused, pauseReason = 1, "normal_expiry"
 		if err := closeEpoch(tx, record.EpochID, StateDeadNormal, record.AuthExpiry, nil); err != nil {
 			return false, err
 		}
@@ -217,6 +223,7 @@ func (s *Service) applyResult(ctx context.Context, runID string, record accountR
 		if candidate && registryLevel != chatgpt.EvidenceUnverified {
 			newStatus, newCheck = StateDeadBanned, CheckOK
 			deadAt, deathType = formatTime(now), "abnormal_ban"
+			pollingPaused, pauseReason = 1, "abnormal_ban"
 			days := now.Sub(record.ImportTime).Hours() / 24
 			if days < 0 {
 				days = 0
@@ -243,14 +250,29 @@ func (s *Service) applyResult(ctx context.Context, runID string, record accountR
 		}
 	}
 
+	streak, streakStarted, suspectedAt := s.evaluateDenialStreak(ctx, tx, denialStreakInput{
+		outcome:       outcome,
+		code:          code,
+		newCheck:      newCheck,
+		newStatus:     newStatus,
+		currentStreak: currentStreak,
+		streakStarted: currentStreakStarted,
+		suspectedAt:   currentSuspectedAt,
+		now:           now,
+	})
+	wasSuspected := currentSuspectedAt.Valid
+	nowSuspected := suspectedAt != nil
+
 	nextDue := nextRetry
 	if nextDue == nil && newCheck == CheckOK && newStatus == StateAlive {
 		nextDue = formatTime(now.Add(interval + s.jitter(record.ID, interval)))
 	}
 	fillEmail, fillLabel := fillOnlyEmailProjection(currentEmail, currentLabel, record.ProviderID, outcome)
 	if _, err := tx.ExecContext(ctx, `UPDATE accounts SET plan=?,raw_plan=?,current_expiry=?,status=?,last_alive_at=CASE WHEN ?='alive' AND ?='ok' THEN ? ELSE last_alive_at END,
-		dead_at=?,death_type=?,banned_survival_days=?,last_check_state=?,last_check_error_code=?,next_retry_at=?,polling_paused=?,pause_reason=?,pending_evidence_signature=?,pending_detected_at=?,updated_at=? WHERE id=?`,
-		newPlan, newRawPlan, nullable(newExpiry), newStatus, newStatus, newCheck, formatTime(now), deadAt, deathType, survival, newCheck, nullableError(newCheck, code), nextDue, pollingPaused, pauseReason, pendingSignature, pendingDetected, formatTime(now), record.ID); err != nil {
+		dead_at=?,death_type=?,banned_survival_days=?,last_check_state=?,last_check_error_code=?,next_retry_at=?,polling_paused=?,pause_reason=?,pending_evidence_signature=?,pending_detected_at=?,
+		denial_streak=?,denial_streak_started_at=?,suspected_banned_at=?,updated_at=? WHERE id=?`,
+		newPlan, newRawPlan, nullable(newExpiry), newStatus, newStatus, newCheck, formatTime(now), deadAt, deathType, survival, newCheck, nullableError(newCheck, code), nextDue, pollingPaused, pauseReason, pendingSignature, pendingDetected,
+		streak, streakStarted, suspectedAt, formatTime(now), record.ID); err != nil {
 		return false, err
 	}
 	if fillEmail != nil || fillLabel != nil {
@@ -272,6 +294,12 @@ func (s *Service) applyResult(ctx context.Context, runID string, record accountR
 			return false, err
 		}
 	}
+	if wasSuspected != nowSuspected && newStatus != StateDeadBanned {
+		// 疑似状态翻转要立刻同步给分配域：置位后不再分配新顾客，解除后恢复分配。
+		if _, err := allocationsync.EnqueueAccountTx(ctx, tx, record.ID, accountsync.EventAccountUpdated, now); err != nil {
+			return false, err
+		}
+	}
 	if currentStatus != StateDeadBanned && newStatus == StateDeadBanned {
 		if _, err := insertAlert(ctx, tx, record.ID, record.EpochID, now); err != nil {
 			return false, err
@@ -284,6 +312,80 @@ func (s *Service) applyResult(ctx context.Context, runID string, record accountR
 		return false, err
 	}
 	return true, nil
+}
+
+// denialSuspectThresholdKey 控制连续多少次账号级拒绝后标记为疑似封禁。
+const denialSuspectThresholdKey = "denial_suspect_threshold"
+
+const defaultDenialSuspectThreshold = 3
+
+type denialStreakInput struct {
+	outcome       pollResult
+	code          string
+	newCheck      string
+	newStatus     string
+	currentStreak int
+	streakStarted sql.NullString
+	suspectedAt   sql.NullString
+	now           time.Time
+}
+
+// evaluateDenialStreak 维护"连续账号级拒绝"计数并决定是否标记疑似封禁。
+//
+// 判定原则（依据线上已确认封禁样本得出）：
+//   - 只有一次成功轮询才能证明账号正常，因此只有成功才清零；
+//   - 需要重新授权（凭据过期/失效）既不计数也不清零 —— 凭据问题不能当作封禁判据；
+//   - 限流、上游 5xx、契约变更同理不计数，避免基础设施抖动污染证据。
+//
+// 这里只做"疑似"标记，不改 status、不迁移顾客，供人工观察确认。
+func (s *Service) evaluateDenialStreak(ctx context.Context, tx *sql.Tx, in denialStreakInput) (int, any, any) {
+	// 终态账号（正常到期 / 已封禁）不再需要计数。
+	if in.newStatus == StateDeadNormal || in.newStatus == StateDeadBanned {
+		return 0, nil, nil
+	}
+	if in.newCheck == CheckOK && in.outcome.typed == nil {
+		return 0, nil, nil
+	}
+	if !isAccountDenial(in.outcome.typed) {
+		// 不计数也不清零：保留此前累积的证据。
+		return in.currentStreak, nullableSQLString(in.streakStarted), nullableSQLString(in.suspectedAt)
+	}
+	streak := in.currentStreak + 1
+	started := nullableSQLString(in.streakStarted)
+	if !in.streakStarted.Valid {
+		started = formatTime(in.now)
+	}
+	suspected := nullableSQLString(in.suspectedAt)
+	if !in.suspectedAt.Valid && streak >= s.denialSuspectThreshold(ctx, tx) {
+		suspected = formatTime(in.now)
+	}
+	return streak, started, suspected
+}
+
+// isAccountDenial 判断这次失败是否属于"账号被拒"。
+// 明确排除 ErrorAuthorizationRequired：那代表凭据要重新授权，不是账号被封。
+func isAccountDenial(typed *chatgpt.TypedError) bool {
+	if typed == nil {
+		return false
+	}
+	switch typed.Kind {
+	case chatgpt.ErrorAccountDisabled, chatgpt.ErrorCredentialRevoked, chatgpt.ErrorPermissionDenied:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Service) denialSuspectThreshold(ctx context.Context, tx *sql.Tx) int {
+	var value []byte
+	if tx.QueryRowContext(ctx, "SELECT value FROM settings WHERE key=?", denialSuspectThresholdKey).Scan(&value) != nil {
+		return defaultDenialSuspectThreshold
+	}
+	threshold, err := strconv.Atoi(strings.TrimSpace(string(value)))
+	if err != nil || threshold < 2 || threshold > 1000 {
+		return defaultDenialSuspectThreshold
+	}
+	return threshold
 }
 
 func isStableBanCandidate(typed *chatgpt.TypedError) bool {

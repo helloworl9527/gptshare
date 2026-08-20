@@ -36,9 +36,9 @@ func EnqueueAccountTx(ctx context.Context, tx *sql.Tx, accountID int64, eventTyp
 	var event accountsync.Event
 	var email sql.NullString
 	var expiry string
-	if err := tx.QueryRowContext(ctx, `SELECT sync_version,provider_account_id,email,plan,COALESCE(current_expiry,auth_expiry),status
+	if err := tx.QueryRowContext(ctx, `SELECT sync_version,provider_account_id,email,plan,COALESCE(current_expiry,auth_expiry),status,suspected_banned_at IS NOT NULL
 		FROM accounts WHERE id=? AND deleted_at IS NULL`, accountID).Scan(
-		&event.Version, &event.ProviderAccountID, &email, &event.Plan, &expiry, &event.Status,
+		&event.Version, &event.ProviderAccountID, &email, &event.Plan, &expiry, &event.Status, &event.Suspected,
 	); err != nil {
 		return accountsync.Event{}, err
 	}

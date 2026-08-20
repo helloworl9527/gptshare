@@ -61,8 +61,17 @@ func (s *Service) Start(ctx context.Context, interval time.Duration) {
 				s.logger.Error("replacement scan failed", "error_code", "replacement_run_failed")
 				continue
 			}
-			if len(run.Replaced) > 0 || run.GraceExpired > 0 || run.Failed > 0 {
-				s.logger.Info("replacement scan completed", "replaced", len(run.Replaced), "grace_expired", run.GraceExpired, "failed", run.Failed)
+			if len(run.Replaced) > 0 || run.GraceExpired > 0 || run.Failed > 0 || len(run.Retired) > 0 {
+				retiredBanned, retiredExpired := 0, 0
+				for _, item := range run.Retired {
+					if item.Reason == repository.RetireReasonBanned {
+						retiredBanned++
+						continue
+					}
+					retiredExpired++
+				}
+				s.logger.Info("replacement scan completed", "replaced", len(run.Replaced), "grace_expired", run.GraceExpired,
+					"failed", run.Failed, "retired_banned", retiredBanned, "retired_expired", retiredExpired)
 			}
 		}
 	}

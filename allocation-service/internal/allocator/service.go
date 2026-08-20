@@ -21,6 +21,7 @@ var (
 type Repository interface {
 	RedeemCode(context.Context, []byte, bool) (repository.RedeemResult, error)
 	ListActiveAllocations(context.Context) ([]repository.AdminAllocationView, error)
+	ListReplacementHistory(context.Context, int) ([]repository.ReplacementHistoryEntry, error)
 	Audit(context.Context, string, string, int64, map[string]any) error
 }
 
@@ -97,4 +98,9 @@ func (s *Service) ListActive(ctx context.Context) ([]AdminAllocation, error) {
 		})
 	}
 	return allocations, nil
+}
+
+// ListReplacementHistory 返回后台"替换历史"表格所需的换号流水。
+func (s *Service) ListReplacementHistory(ctx context.Context, limit int) ([]repository.ReplacementHistoryEntry, error) {
+	return s.repo.ListReplacementHistory(ctx, limit)
 }

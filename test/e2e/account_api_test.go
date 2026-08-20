@@ -85,7 +85,8 @@ func (client *accountClient) FetchStatus(context.Context, string) (chatgpt.Statu
 
 func TestAccountHTTPSImportReauthorizeDeleteContract(t *testing.T) {
 	secret := "e2e-access-secret-never-return-90c3d7"
-	expiry := time.Date(2026, 8, 19, 18, 28, 13, 0, time.UTC)
+	// 相对当前时间取值，避免固定日期过期后整组用例失败。
+	expiry := time.Now().UTC().Add(30 * 24 * time.Hour).Truncate(time.Second)
 	upstream := &accountClient{
 		tokens: chatgpt.TokenSet{AccessToken: "resolved-" + secret},
 		status: chatgpt.StatusResult{
@@ -199,7 +200,8 @@ func TestAccountHTTPSMapsRetryableProviderFailureTo503(t *testing.T) {
 }
 
 func TestAccountHTTPSOAuthManualCallbackSecurityContract(t *testing.T) {
-	expiry := time.Date(2026, 8, 19, 18, 28, 13, 0, time.UTC)
+	// 相对当前时间取值，避免固定日期过期后整组用例失败。
+	expiry := time.Now().UTC().Add(30 * 24 * time.Hour).Truncate(time.Second)
 	upstream := &accountClient{
 		tokens: chatgpt.TokenSet{
 			AccessToken:  "oauth-e2e-access-must-not-leak",
@@ -258,7 +260,8 @@ func TestAccountHTTPSOAuthManualCallbackSecurityContract(t *testing.T) {
 }
 
 func TestAccountHTTPSDeviceStartPollReplayAndResponseAllowlist(t *testing.T) {
-	expiry := time.Date(2026, 8, 19, 18, 28, 13, 0, time.UTC)
+	// 相对当前时间取值，避免固定日期过期后整组用例失败。
+	expiry := time.Now().UTC().Add(30 * 24 * time.Hour).Truncate(time.Second)
 	upstream := &accountClient{
 		status: chatgpt.StatusResult{
 			ProviderAccountID: "acct-device-e2e", RawPlan: "chatgptplusplan", Plan: chatgpt.PlanPlus,

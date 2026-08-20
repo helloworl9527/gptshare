@@ -26,13 +26,17 @@ func TestAdminAllocationsRequiresSessionAndReturnsEmptyList(t *testing.T) {
 		t.Fatalf("empty list status=%d body=%s", response.StatusCode, readBody(t, response))
 	}
 	var payload struct {
-		Allocations []json.RawMessage `json:"allocations"`
+		Allocations  []json.RawMessage `json:"allocations"`
+		Replacements []json.RawMessage `json:"replacements"`
 	}
 	if err := json.Unmarshal([]byte(readBody(t, response)), &payload); err != nil {
 		t.Fatal(err)
 	}
 	if payload.Allocations == nil || len(payload.Allocations) != 0 {
 		t.Fatalf("empty allocations=%s", payload.Allocations)
+	}
+	if payload.Replacements == nil || len(payload.Replacements) != 0 {
+		t.Fatalf("empty replacements=%s", payload.Replacements)
 	}
 }
 
@@ -117,6 +121,89 @@ func TestAdminAllocationsReturnsRealAccountsSortedWithoutSecrets(t *testing.T) {
 	for _, forbidden := range []string{
 		"password", "totp", "2fa", "code_hash", "encrypted_code", "ciphertext",
 		"password-sentinel", "totp-sentinel", codes[0], codes[1],
+	} {
+		if strings.Contains(strings.ToLower(body), strings.ToLower(forbidden)) {
+			t.Fatalf("response leaked forbidden value %q: %s", forbidden, body)
+		}
+	}
+}
+
+func TestAdminAllocationsExposeReplacementHistoryWithoutSecrets(t *testing.T) {
+	server := testAccountsTLSServer(t, "http://127.0.0.1:1")
+	client := authedAccountClient(t, server)
+	value, ok := testRepositories.Load(server.URL)
+	if !ok {
+		t.Fatal("test repository not found")
+	}
+	repo := value.(*repository.Repository)
+	ctx := context.Background()
+	base := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
+	repo.SetNow(func() time.Time { return base })
+
+	if _, err := repo.CreateAccount(ctx, repository.AccountSeed{
+		DisplayUsername: "aging@example.test", DisplayPassword: "password-sentinel", DisplayTOTPSecret: "totp-sentinel",
+		AccountExpiry: base.Add(30 * time.Hour), MaxConcurrentUsers: 1, MonitorStatus: "alive", Status: "available",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	code := "2345-6789-WXYZ"
+	if _, err := repo.CreateCard(ctx, repository.CardSeed{
+		CodeHash: cardsvc.HashCode(code), CodeSuffix: code[len(code)-4:], CodePlaintext: code, DurationDays: 7,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.RedeemCode(ctx, cardsvc.HashCode(code), true); err != nil {
+		t.Fatal(err)
+	}
+	spare, err := repo.CreateAccount(ctx, repository.AccountSeed{
+		DisplayUsername: "spare@example.test", DisplayPassword: "password-sentinel", DisplayTOTPSecret: "totp-sentinel",
+		AccountExpiry: base.Add(40 * 24 * time.Hour), MaxConcurrentUsers: 1, MonitorStatus: "alive", Status: "available",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := repo.ProcessReplacements(ctx, base.Add(7*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(run.Replaced) != 1 {
+		t.Fatalf("expected one replacement, got %+v", run)
+	}
+
+	response := getRaw(t, client, server.URL+"/api/admin/allocations")
+	body := readBody(t, response)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.StatusCode, body)
+	}
+	var payload struct {
+		Replacements []struct {
+			CardID         int64  `json:"card_id"`
+			CodeSuffix     string `json:"code_suffix"`
+			OldAccountName string `json:"old_account_name"`
+			NewAccountID   int64  `json:"new_account_id"`
+			NewAccountName string `json:"new_account_name"`
+			Reason         string `json:"reason"`
+			Operator       string `json:"operator"`
+			ReplacedAt     string `json:"replaced_at"`
+			GraceUntil     string `json:"grace_until"`
+		} `json:"replacements"`
+	}
+	if err := json.Unmarshal([]byte(body), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Replacements) != 1 {
+		t.Fatalf("replacements=%+v", payload.Replacements)
+	}
+	entry := payload.Replacements[0]
+	if entry.CodeSuffix != "WXYZ" || entry.OldAccountName != "aging@example.test" ||
+		entry.NewAccountID != spare || entry.NewAccountName != "spare@example.test" ||
+		entry.Reason != "account_expiring" || entry.Operator != "system" ||
+		entry.ReplacedAt == "" || entry.GraceUntil == "" {
+		t.Fatalf("replacement entry mismatch: %+v", entry)
+	}
+	for _, forbidden := range []string{
+		"password", "totp", "2fa", "code_hash", "encrypted_code", "ciphertext",
+		"password-sentinel", "totp-sentinel", code,
 	} {
 		if strings.Contains(strings.ToLower(body), strings.ToLower(forbidden)) {
 			t.Fatalf("response leaked forbidden value %q: %s", forbidden, body)

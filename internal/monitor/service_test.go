@@ -247,7 +247,7 @@ func TestExplicitAccountDisabledSignalsAutomaticallyFinalizeAndDeduplicate(t *te
 	if err != nil || !done || run.State != "completed" {
 		t.Fatalf("refresh run=%+v done=%v err=%v", run, done, err)
 	}
-	assertAccountState(t, db, id, StateDeadBanned, CheckOK, false)
+	assertAccountState(t, db, id, StateDeadBanned, CheckOK, true)
 	assertCount(t, db, "SELECT count(*) FROM alert_events", 1)
 	var days float64
 	if err := db.QueryRow("SELECT banned_survival_days FROM accounts WHERE id=?", id).Scan(&days); err != nil || days != 2 {
@@ -259,14 +259,14 @@ func TestExplicitAccountDisabledSignalsAutomaticallyFinalizeAndDeduplicate(t *te
 	if _, done, err := s.RefreshNow(context.Background(), second); err != nil || !done {
 		t.Fatalf("second refresh done=%v err=%v", done, err)
 	}
-	assertAccountState(t, db, second, StateDeadBanned, CheckOK, false)
+	assertAccountState(t, db, second, StateDeadBanned, CheckOK, true)
 	assertCount(t, db, "SELECT count(*) FROM alert_events", 2)
 	third := seedAccount(t, db, keyring, "acct-c", now.Add(10*24*time.Hour), now.Add(-time.Hour))
 	client.errors["acct-c"] = candidate("account_disabled")
 	if _, done, err := s.RefreshNow(context.Background(), third); err != nil || !done {
 		t.Fatalf("third refresh done=%v err=%v", done, err)
 	}
-	assertAccountState(t, db, third, StateDeadBanned, CheckOK, false)
+	assertAccountState(t, db, third, StateDeadBanned, CheckOK, true)
 	assertCount(t, db, "SELECT count(*) FROM alert_events", 3)
 }
 
@@ -345,7 +345,7 @@ func TestRecoverInterruptedFinalizesLegacyPendingBan(t *testing.T) {
 	if err := s.RecoverInterrupted(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	assertAccountState(t, db, id, StateDeadBanned, CheckOK, false)
+	assertAccountState(t, db, id, StateDeadBanned, CheckOK, true)
 	assertCount(t, db, "SELECT count(*) FROM alert_events WHERE account_id="+strconv.FormatInt(id, 10), 1)
 	var deadAt, deathType string
 	if err := db.QueryRow("SELECT dead_at,death_type FROM accounts WHERE id=?", id).Scan(&deadAt, &deathType); err != nil {
@@ -554,7 +554,7 @@ func TestNormalExpiryWinsWithoutUpstreamAndKeepsAccountVisible(t *testing.T) {
 	if _, done, err := s.RefreshNow(context.Background(), id); err != nil || !done {
 		t.Fatalf("done=%v err=%v", done, err)
 	}
-	assertAccountState(t, db, id, StateDeadNormal, CheckOK, false)
+	assertAccountState(t, db, id, StateDeadNormal, CheckOK, true)
 	accountService, err := account.NewService(db, client, keyring)
 	if err != nil {
 		t.Fatal(err)
@@ -872,7 +872,7 @@ func TestOnlyExplicitAccountDisabledAfterRefreshUsesBanEvidence(t *testing.T) {
 				t.Fatalf("run=%+v", run)
 			}
 			if code == "account_disabled" {
-				assertAccountState(t, db, id, StateDeadBanned, CheckOK, false)
+				assertAccountState(t, db, id, StateDeadBanned, CheckOK, true)
 			} else {
 				assertAccountState(t, db, id, StateAlive, CheckError, false)
 			}
@@ -1185,5 +1185,161 @@ func assertCount(t *testing.T, db *sql.DB, query string, want int) {
 	}
 	if got != want {
 		t.Fatalf("count=%d want=%d", got, want)
+	}
+}
+
+// 已封禁和订阅正常到期的账号必须彻底退出轮询队列。
+func TestTerminalAccountsAreNotPolledAgain(t *testing.T) {
+	s, db, keyring, client, now := newTestService(t)
+	expired := seedAccount(t, db, keyring, "acct-expired", now, now.Add(-30*24*time.Hour))
+	banned := seedAccount(t, db, keyring, "acct-banned", now.Add(10*24*time.Hour), now.Add(-2*24*time.Hour))
+	client.errors["acct-banned"] = candidate("account_disabled")
+
+	if _, done, err := s.RefreshNow(context.Background(), expired); err != nil || !done {
+		t.Fatalf("expired refresh done=%v err=%v", done, err)
+	}
+	if _, done, err := s.RefreshNow(context.Background(), banned); err != nil || !done {
+		t.Fatalf("banned refresh done=%v err=%v", done, err)
+	}
+	assertAccountState(t, db, expired, StateDeadNormal, CheckOK, true)
+	assertAccountState(t, db, banned, StateDeadBanned, CheckOK, true)
+
+	// 两道防线：授权 epoch 已关闭，且 polling_paused 已置位。
+	for _, id := range []int64{expired, banned} {
+		var openEpochs int
+		if err := db.QueryRow("SELECT count(*) FROM authorization_epochs WHERE account_id=? AND ended_at IS NULL", id).Scan(&openEpochs); err != nil {
+			t.Fatal(err)
+		}
+		if openEpochs != 0 {
+			t.Fatalf("account %d still has an open authorization epoch", id)
+		}
+	}
+
+	run, err := s.RunScheduled(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.ID != "" || run.AccountsTotal != 0 {
+		t.Fatalf("terminal accounts must not be scheduled again: %+v", run)
+	}
+	before := pollRunCount(t, db)
+	if _, err := s.RunScheduled(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if after := pollRunCount(t, db); after != before {
+		t.Fatalf("scheduled run count moved from %d to %d with only terminal accounts", before, after)
+	}
+}
+
+func pollRunCount(t *testing.T, db *sql.DB) int {
+	t.Helper()
+	var count int
+	if err := db.QueryRow("SELECT count(*) FROM poll_runs WHERE trigger_type='scheduled'").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	return count
+}
+
+func denied(code string, status int) *chatgpt.TypedError {
+	return &chatgpt.TypedError{Kind: chatgpt.ErrorPermissionDenied, StatusCode: status, EvidenceCode: code,
+		EvidenceLevel: chatgpt.EvidenceContractVerifiedLivePending, PreserveBusinessState: true}
+}
+
+func denialState(t *testing.T, db *sql.DB, id int64) (int, bool) {
+	t.Helper()
+	var streak int
+	var suspectedAt sql.NullString
+	if err := db.QueryRow("SELECT denial_streak,suspected_banned_at FROM accounts WHERE id=?", id).Scan(&streak, &suspectedAt); err != nil {
+		t.Fatal(err)
+	}
+	return streak, suspectedAt.Valid
+}
+
+// 连续三次账号级拒绝后标记疑似封禁；账号状态保持 alive，不做任何终态处理。
+func TestConsecutiveAccountDenialsMarkSuspectedWithoutBanning(t *testing.T) {
+	s, db, keyring, client, now := newTestService(t)
+	client.errors["acct-denied"] = denied("http_401", 401)
+	id := seedAccount(t, db, keyring, "acct-denied", now.Add(24*time.Hour), now)
+
+	for attempt := 1; attempt <= 3; attempt++ {
+		if _, _, err := s.RefreshNow(context.Background(), id); err != nil {
+			t.Fatalf("attempt %d: %v", attempt, err)
+		}
+		streak, suspected := denialState(t, db, id)
+		if streak != attempt {
+			t.Fatalf("attempt %d streak=%d", attempt, streak)
+		}
+		if suspected != (attempt >= 3) {
+			t.Fatalf("attempt %d suspected=%v", attempt, suspected)
+		}
+	}
+	// 疑似阶段绝不动账号状态：既不封禁也不停轮询。
+	assertAccountState(t, db, id, StateAlive, CheckError, false)
+	assertCount(t, db, "SELECT count(*) FROM alert_events", 0)
+
+	// 疑似标记要推给分配域，且事件载荷里 suspected 为真。
+	var payload string
+	if err := db.QueryRow("SELECT payload_json FROM allocation_account_outbox WHERE account_id=? ORDER BY account_version DESC LIMIT 1", id).Scan(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(payload, `"suspected":true`) {
+		t.Fatalf("outbox payload missing suspected flag: %s", payload)
+	}
+}
+
+// 一次成功轮询即清零计数并解除疑似标记。
+func TestSuccessfulPollClearsDenialStreakAndSuspicion(t *testing.T) {
+	s, db, keyring, client, now := newTestService(t)
+	client.errors["acct-recovers"] = denied("http_403", 403)
+	id := seedAccount(t, db, keyring, "acct-recovers", now.Add(24*time.Hour), now)
+	for i := 0; i < 3; i++ {
+		if _, _, err := s.RefreshNow(context.Background(), id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if streak, suspected := denialState(t, db, id); streak != 3 || !suspected {
+		t.Fatalf("streak=%d suspected=%v", streak, suspected)
+	}
+	delete(client.errors, "acct-recovers")
+	if _, _, err := s.RefreshNow(context.Background(), id); err != nil {
+		t.Fatal(err)
+	}
+	if streak, suspected := denialState(t, db, id); streak != 0 || suspected {
+		t.Fatalf("after recovery streak=%d suspected=%v", streak, suspected)
+	}
+	assertAccountState(t, db, id, StateAlive, CheckOK, false)
+}
+
+// 需要重新授权（凭据过期/失效）既不计入疑似计数，也不清零已有证据。
+func TestReauthorizationRequiredNeitherCountsNorClearsDenialStreak(t *testing.T) {
+	s, db, keyring, client, now := newTestService(t)
+	client.errors["acct-reauth"] = denied("http_401", 401)
+	// 用纯访问令牌账号：401 来自 accounts/check，与线上被封账号的形态一致
+	// （带 refresh 凭据时 401 会先在换取令牌阶段转成 reauthorization_required 并暂停轮询）。
+	id := seedAccount(t, db, keyring, "acct-reauth", now.Add(24*time.Hour), now)
+	for i := 0; i < 2; i++ {
+		if _, _, err := s.RefreshNow(context.Background(), id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if streak, suspected := denialState(t, db, id); streak != 2 || suspected {
+		t.Fatalf("streak=%d suspected=%v", streak, suspected)
+	}
+
+	client.errors["acct-reauth"] = &chatgpt.TypedError{Kind: chatgpt.ErrorAuthorizationRequired, StatusCode: 400,
+		EvidenceCode: "oauth_refresh_token_invalid", EvidenceLevel: chatgpt.EvidenceContractVerifiedLivePending, PreserveBusinessState: true}
+	if _, _, err := s.RefreshNow(context.Background(), id); err != nil {
+		t.Fatal(err)
+	}
+	// 计数停在 2：不因重新授权而 +1，也不被它清零。
+	if streak, suspected := denialState(t, db, id); streak != 2 || suspected {
+		t.Fatalf("after reauthorization streak=%d suspected=%v", streak, suspected)
+	}
+	var status string
+	if err := db.QueryRow("SELECT status FROM accounts WHERE id=?", id).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != StateAlive {
+		t.Fatalf("reauthorization must never imply a ban, status=%s", status)
 	}
 }

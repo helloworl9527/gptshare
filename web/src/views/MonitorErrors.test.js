@@ -37,6 +37,24 @@ describe('monitor error presentation', () => {
     expect(wrapper.text()).toContain('OAuth 刷新被拒绝，需重新授权')
   })
 
+  it('marks an account as suspected while keeping it out of terminal states', () => {
+    const suspected = { ...abnormalAccount, denial_streak: 3, suspected_banned_at: '2026-08-20T05:00:00Z' }
+    const wrapper = mount(VitalCard, { props: { account: suspected } })
+
+    expect(wrapper.text()).toContain('疑似封号')
+    expect(wrapper.text()).toContain('连续 3 次账号级拒绝')
+    expect(wrapper.text()).toContain('存量顾客未变动')
+    expect(wrapper.text()).not.toContain('封号存活')
+    expect(wrapper.find('.state-banned').exists()).toBe(false)
+  })
+
+  it('leaves a healthy account untouched by the suspicion badge', () => {
+    const wrapper = mount(VitalCard, { props: { account: { ...abnormalAccount, denial_streak: 1 } } })
+
+    expect(wrapper.text()).not.toContain('疑似封号')
+    expect(wrapper.text()).not.toContain('连续 1 次账号级拒绝')
+  })
+
   it('shows failure stage, likely cause, action, and raw code in account details', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response(abnormalAccount)))
     const placeholder = { template: '<div />' }

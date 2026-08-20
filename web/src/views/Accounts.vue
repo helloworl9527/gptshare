@@ -170,42 +170,6 @@ async function syncAll() {
   }
 }
 
-async function pullMonitorAccounts() {
-  busy.value = true
-  notice.value = ''
-  try {
-    const result = await api.pullMonitorAccounts()
-    accounts.value = result.accounts || accounts.value
-    notice.value = pullSyncNotice(result)
-    await load()
-  } catch (reason) {
-    notice.value = reason.message
-  } finally {
-    busy.value = false
-  }
-}
-
-function pullSyncNotice(result) {
-  const summary = `一期同步完成：新建 ${result.created || 0}，更新 ${result.updated || 0}，跳过 ${result.skipped || 0}，失败 ${result.failed || 0}。`
-  const details = (result.errors || []).map((item, index) => {
-    const account = item.monitor_account_id || `第 ${index + 1} 项`
-    return `${account}：${pullSyncErrorLabel(item.code)}`
-  })
-  return details.length ? `${summary} ${details.join('；')}` : summary
-}
-
-function pullSyncErrorLabel(code) {
-  return ({
-    alive_expiry_conflict: '状态为 alive，但到期时间已过',
-    past_expiry_for_non_terminal_account: '非终态账号的到期时间已过',
-    missing_monitor_account_id: '缺少一期账号 ID',
-    missing_account_expiry: '缺少或无法识别到期时间',
-    unsupported_monitor_status: '一期账号状态无法识别',
-    duplicate_monitor_account: '一期列表包含重复账号',
-    account_sync_failed: '账号写入失败',
-  })[code] || `同步失败（${code || 'unknown_error'}）`
-}
-
 function openEdit(account) {
   clearRevealedCredentials()
   editingAccount.value = account
@@ -336,9 +300,6 @@ onBeforeUnmount(() => {
         <h1>账号池</h1>
         <p>管理二期独立账号库存、容量与一期同步状态。</p>
       </div>
-      <button class="primary-action compact-action" type="button" :disabled="busy" @click="pullMonitorAccounts">
-        从一期同步账号
-      </button>
     </section>
     <p v-if="warnings.includes('phase_one_monitor_unavailable')" class="recovery-banner warning-banner" role="alert">
       一期监控暂时不可用，后台已保留本地业务状态并标记 monitor_unknown。
@@ -393,7 +354,7 @@ onBeforeUnmount(() => {
         正在读取账号池…
       </div>
       <StatePanel v-else-if="error" type="error" title="账号池读取失败" :message="error" action="重新连接" @action="load" />
-      <StatePanel v-else-if="visible.length === 0" title="暂无账号" message="从一期同步账号后，补齐密码和 2FA 即可分配卡密。" action="从一期同步账号" @action="pullMonitorAccounts" />
+      <StatePanel v-else-if="visible.length === 0" title="暂无账号" message="一期新增账号后会自动同步到这里，补齐密码和 2FA 即可分配卡密。" />
       <div v-else class="table-wrap">
         <table>
           <thead><tr><th>账号</th><th>来源</th><th>状态</th><th>容量</th><th>到期</th><th>一期状态</th><th>操作</th></tr></thead>

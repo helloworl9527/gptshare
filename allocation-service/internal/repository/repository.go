@@ -110,7 +110,20 @@ type ReplacementRun struct {
 	Replaced     []ReplacementResult
 	GraceExpired int
 	Failed       int
+	Retired      []RetiredAccount
 }
+
+// RetiredAccount 记录一次自动下线及其原因。
+type RetiredAccount struct {
+	AccountID int64
+	Reason    string
+}
+
+const (
+	// RetireReasonBanned 封禁下线；RetireReasonExpired 订阅正常到期下线。
+	RetireReasonBanned  = "banned"
+	RetireReasonExpired = "expired"
+)
 
 type InventoryMetrics struct {
 	Capacity               int
@@ -642,6 +655,9 @@ func (r *Repository) ProcessReplacements(ctx context.Context, now time.Time) (Re
 		return ReplacementRun{}, err
 	}
 	run.GraceExpired = expiredGrace
+	if err := closeBannedGraceAllocations(ctx, tx, stamp); err != nil {
+		return ReplacementRun{}, err
+	}
 	rows, err := tx.QueryContext(ctx, `SELECT
 			a.id,a.card_id,a.account_id,a.valid_until,c.expires_at,acct.account_expiry,acct.monitor_status,acct.status
 		FROM allocations a
@@ -688,19 +704,26 @@ func (r *Repository) ProcessReplacements(ctx context.Context, now time.Time) (Re
 	}
 	rows.Close()
 	for _, item := range due {
-		replaced, err := replaceOneAllocation(ctx, tx, stamp, item)
-		if errors.Is(err, ErrNoAccountCapacity) {
+		replaced, err := replaceOneAllocationIsolated(ctx, tx, stamp, item)
+		if errors.Is(err, errReplacementAborted) {
+			return ReplacementRun{}, err
+		}
+		if err != nil {
 			run.Failed++
-			if auditErr := auditWithTx(ctx, tx, r.now, "replacement.failed", "card", item.cardID, map[string]any{"reason": item.reason, "old_account_id": item.oldAccountID}); auditErr != nil {
+			if auditErr := auditWithTx(ctx, tx, r.now, "replacement.failed", "card", item.cardID, map[string]any{
+				"reason": item.reason, "old_account_id": item.oldAccountID, "error_code": replacementErrorCode(err),
+			}); auditErr != nil {
 				return ReplacementRun{}, auditErr
 			}
 			continue
 		}
-		if err != nil {
-			return ReplacementRun{}, err
-		}
 		run.Replaced = append(run.Replaced, replaced)
 	}
+	retired, err := retireOfflineAccounts(ctx, tx, r.now, stamp)
+	if err != nil {
+		return ReplacementRun{}, err
+	}
+	run.Retired = retired
 	if err := tx.Commit(); err != nil {
 		return ReplacementRun{}, err
 	}
@@ -904,6 +927,82 @@ func (r *Repository) ListActiveAllocations(ctx context.Context) ([]AdminAllocati
 		views = append(views, view)
 	}
 	return views, rows.Err()
+}
+
+// ReplacementHistoryEntry 是后台"替换历史"表格用的只读视图，不含任何凭据。
+// 账号名走 LEFT JOIN，已下线归档的账号仍能显示出来。
+type ReplacementHistoryEntry struct {
+	ID             int64
+	CardID         int64
+	CodeSuffix     string
+	OldAccountID   int64
+	OldAccountName string
+	NewAccountID   int64
+	NewAccountName string
+	Reason         string
+	Operator       string
+	DetectedAt     time.Time
+	ReplacedAt     time.Time
+	GraceUntil     *time.Time
+	OldAccountGone bool
+	NewAccountGone bool
+}
+
+func (r *Repository) ListReplacementHistory(ctx context.Context, limit int) ([]ReplacementHistoryEntry, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+	rows, err := r.db.QueryContext(ctx, `SELECT
+			h.id,h.card_id,c.code_suffix,
+			h.old_account_id,old.display_username,old.archived_at,
+			h.new_account_id,new.display_username,new.archived_at,
+			h.reason,h.operator,h.detected_at,h.replaced_at,h.grace_until
+		FROM replacement_history h
+		LEFT JOIN cards c ON c.id=h.card_id
+		LEFT JOIN chatgpt_accounts old ON old.id=h.old_account_id
+		LEFT JOIN chatgpt_accounts new ON new.id=h.new_account_id
+		ORDER BY datetime(h.replaced_at) DESC, h.id DESC
+		LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	entries := make([]ReplacementHistoryEntry, 0)
+	for rows.Next() {
+		var entry ReplacementHistoryEntry
+		var codeSuffix, oldName, newName, oldArchived, newArchived, graceUntil sql.NullString
+		var detectedAt, replacedAt string
+		if err := rows.Scan(
+			&entry.ID, &entry.CardID, &codeSuffix,
+			&entry.OldAccountID, &oldName, &oldArchived,
+			&entry.NewAccountID, &newName, &newArchived,
+			&entry.Reason, &entry.Operator, &detectedAt, &replacedAt, &graceUntil,
+		); err != nil {
+			return nil, err
+		}
+		entry.CodeSuffix = codeSuffix.String
+		entry.OldAccountName = oldName.String
+		entry.NewAccountName = newName.String
+		entry.OldAccountGone = oldArchived.Valid
+		entry.NewAccountGone = newArchived.Valid
+		entry.DetectedAt, err = parseTime(detectedAt)
+		if err != nil {
+			return nil, err
+		}
+		entry.ReplacedAt, err = parseTime(replacedAt)
+		if err != nil {
+			return nil, err
+		}
+		if graceUntil.Valid {
+			value, err := parseTime(graceUntil.String)
+			if err != nil {
+				return nil, err
+			}
+			entry.GraceUntil = &value
+		}
+		entries = append(entries, entry)
+	}
+	return entries, rows.Err()
 }
 
 func (r *Repository) Account(ctx context.Context, accountID int64) (models.Account, error) {
@@ -1648,6 +1747,181 @@ func expireGraceAllocations(ctx context.Context, tx *sql.Tx, now time.Time) (int
 	return total, nil
 }
 
+// errReplacementAborted 表示保存点机制本身出错，事务已不可信，必须整轮回滚。
+var errReplacementAborted = errors.New("replacement savepoint is unusable")
+
+// replaceOneAllocationIsolated 用保存点隔离单张卡的换号。失败只回滚这一张卡，
+// 其余卡照常处理：一张卡出错（例如链式换号撞唯一索引、换号途中容量被抢走）
+// 不再拖垮整轮扫描，也不会留下"老分配已下线、新分配没建成"的半截状态。
+func replaceOneAllocationIsolated(ctx context.Context, tx *sql.Tx, now time.Time, item replacementDueAllocation) (ReplacementResult, error) {
+	if _, err := tx.ExecContext(ctx, `SAVEPOINT replace_one_allocation`); err != nil {
+		return ReplacementResult{}, fmt.Errorf("%w: %v", errReplacementAborted, err)
+	}
+	result, replaceErr := replaceOneAllocation(ctx, tx, now, item)
+	if replaceErr != nil {
+		if _, err := tx.ExecContext(ctx, `ROLLBACK TO SAVEPOINT replace_one_allocation`); err != nil {
+			return ReplacementResult{}, fmt.Errorf("%w: %v", errReplacementAborted, err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `RELEASE SAVEPOINT replace_one_allocation`); err != nil {
+		return ReplacementResult{}, fmt.Errorf("%w: %v", errReplacementAborted, err)
+	}
+	if replaceErr != nil {
+		return ReplacementResult{}, replaceErr
+	}
+	return result, nil
+}
+
+func replacementErrorCode(err error) string {
+	if errors.Is(err, ErrNoAccountCapacity) {
+		return "no_account_capacity"
+	}
+	return "replacement_failed"
+}
+
+// supersedeCardGraceAllocations 结算某张卡尚未到期的 grace 分配，
+// 为新一轮换号腾出 allocations_active_grace_card_uq 的位置。
+func supersedeCardGraceAllocations(ctx context.Context, tx *sql.Tx, cardID int64, now time.Time) error {
+	return closeGraceAllocations(ctx, tx, now, "grace_superseded",
+		`WHERE card_id=? AND active=1 AND allocation_state='grace'`, cardID)
+}
+
+// closeBannedGraceAllocations 关闭挂在已封禁账号上的 grace 分配：账号已不可用，
+// 继续留着既误导顾客也占着容量，还会挡住封禁账号自动下线。
+func closeBannedGraceAllocations(ctx context.Context, tx *sql.Tx, now time.Time) error {
+	return closeGraceAllocations(ctx, tx, now, "banned",
+		`WHERE active=1 AND allocation_state='grace' AND account_id IN (
+			SELECT id FROM chatgpt_accounts WHERE monitor_status='dead_banned' OR status='banned')`)
+}
+
+func closeGraceAllocations(ctx context.Context, tx *sql.Tx, now time.Time, reason, where string, args ...any) error {
+	rows, err := tx.QueryContext(ctx, `SELECT account_id,count(*) FROM allocations `+where+` GROUP BY account_id`, args...)
+	if err != nil {
+		return err
+	}
+	releases := map[int64]int{}
+	for rows.Next() {
+		var accountID int64
+		var count int
+		if err := rows.Scan(&accountID, &count); err != nil {
+			rows.Close()
+			return err
+		}
+		releases[accountID] = count
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	if len(releases) == 0 {
+		return nil
+	}
+	for accountID, count := range releases {
+		if err := releaseAccountCapacity(ctx, tx, accountID, count, now); err != nil {
+			return err
+		}
+	}
+	_, err = tx.ExecContext(ctx, `UPDATE allocations
+		SET allocation_state='replaced',active=0,replaced_at=?,replacement_reason=?,updated_at=? `+where,
+		append([]any{formatTime(now), reason, formatTime(now)}, args...)...)
+	return err
+}
+
+// bannedAccountClause / expiredAccountClause 是"该下线了"的两种判定。
+// 订阅正常到期以分配域自己记录的 account_expiry 为准，不依赖监控侧同步是否及时。
+const (
+	bannedAccountClause  = `(monitor_status='dead_banned' OR status='banned')`
+	expiredAccountClause = `(monitor_status='dead_normal' OR status='expired' OR datetime(account_expiry)<=datetime(?))`
+)
+
+// retireOfflineAccounts 把已封禁、或订阅已正常到期，且不再承载任何活跃分配的账号
+// 自动下线，语义与管理员手动下线一致。仍有顾客没迁走的账号保持在线，
+// 等下一轮换号补齐后再下线，避免把顾客甩在一个已归档的账号上。
+func retireOfflineAccounts(ctx context.Context, tx *sql.Tx, nowFunc func() time.Time, now time.Time) ([]RetiredAccount, error) {
+	retired := make([]RetiredAccount, 0)
+	// 封禁先于到期判定，保证同时满足两者的账号按封禁归档，审计原因稳定。
+	for _, sweep := range []struct {
+		reason string
+		clause string
+		args   []any
+	}{
+		{reason: RetireReasonBanned, clause: bannedAccountClause},
+		{reason: RetireReasonExpired, clause: expiredAccountClause + ` AND NOT ` + bannedAccountClause, args: []any{formatTime(now)}},
+	} {
+		candidates, err := offlineAccountCandidates(ctx, tx, sweep.clause, sweep.args)
+		if err != nil {
+			return nil, err
+		}
+		for _, accountID := range candidates {
+			archived, err := archiveRetiredAccount(ctx, tx, nowFunc, accountID, sweep.reason, now)
+			if err != nil {
+				return nil, err
+			}
+			if archived {
+				retired = append(retired, RetiredAccount{AccountID: accountID, Reason: sweep.reason})
+			}
+		}
+	}
+	return retired, nil
+}
+
+func offlineAccountCandidates(ctx context.Context, tx *sql.Tx, clause string, args []any) ([]int64, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT id FROM chatgpt_accounts
+		WHERE archived_at IS NULL AND `+clause+`
+		  AND NOT EXISTS (SELECT 1 FROM allocations a WHERE a.account_id=chatgpt_accounts.id AND a.active=1)
+		ORDER BY id ASC`, args...)
+	if err != nil {
+		return nil, err
+	}
+	var candidates []int64
+	for rows.Next() {
+		var accountID int64
+		if err := rows.Scan(&accountID); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		candidates = append(candidates, accountID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+	return candidates, nil
+}
+
+// archiveRetiredAccount 下线单个账号：归档、置为 disabled、容量清零并抹除凭据。
+// WHERE 里重新校验下线资格与"无活跃分配"，保证只要还有顾客就绝不归档。
+func archiveRetiredAccount(ctx context.Context, tx *sql.Tx, nowFunc func() time.Time, accountID int64, reason string, now time.Time) (bool, error) {
+	clause := bannedAccountClause
+	args := []any{formatTime(now), formatTime(now), accountID, accountID}
+	if reason == RetireReasonExpired {
+		clause = expiredAccountClause
+		args = []any{formatTime(now), formatTime(now), formatTime(now), accountID, accountID}
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE chatgpt_accounts
+		SET archived_at=?,status='disabled',current_allocations=0,
+			display_password_secret=x'',display_password_key_id='',
+			display_2fa_secret=x'',display_2fa_key_id='',
+			source_url_secret=NULL,source_url_key_id=NULL,updated_at=?
+		WHERE `+clause+`
+		  AND id=? AND archived_at IS NULL
+		  AND NOT EXISTS (SELECT 1 FROM allocations a WHERE a.account_id=? AND a.active=1)`, args...)
+	if err != nil {
+		return false, err
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return false, nil
+	}
+	if err := auditWithTx(ctx, tx, nowFunc, "account.retired", "account", accountID, map[string]any{
+		"reason": reason, "operator": "system",
+	}); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func replaceOneAllocation(ctx context.Context, tx *sql.Tx, now time.Time, item replacementDueAllocation) (ReplacementResult, error) {
 	newAccountID, err := selectCandidateAccountExcluding(ctx, tx, now, item.cardExpiresAt, true, item.oldAccountID)
 	if err != nil {
@@ -1686,6 +1960,11 @@ func replaceOneAllocation(ctx context.Context, tx *sql.Tx, now time.Time, item r
 			return ReplacementResult{}, err
 		}
 	} else {
+		// 同一张卡只允许一条活跃 grace 分配（allocations_active_grace_card_uq）。
+		// 链式换号时必须先结算上一轮遗留的 grace，否则唯一索引会让整轮扫描持续失败。
+		if err := supersedeCardGraceAllocations(ctx, tx, item.cardID, now); err != nil {
+			return ReplacementResult{}, err
+		}
 		graceUntil := now.Add(24 * time.Hour)
 		result.GraceUntil = &graceUntil
 		if _, err := tx.ExecContext(ctx, `UPDATE allocations

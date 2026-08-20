@@ -16,6 +16,8 @@ import (
 
 	"allocation-service/internal/credential"
 	"allocation-service/internal/store"
+
+	"allocation-service/accountsync"
 )
 
 func TestRedeemThirtyConcurrentNoLocksNoOversell(t *testing.T) {
@@ -1456,12 +1458,21 @@ func TestBannedReplacementImmediateNoGraceAndRetryFailureAudited(t *testing.T) {
 	if state != "replaced" || active != 0 || graceUntil.Valid {
 		t.Fatalf("old allocation state=%s active=%d grace=%+v", state, active, graceUntil)
 	}
-	old, err := repo.Account(ctx, oldAccount)
-	if err != nil {
+	if len(run.Retired) != 1 || run.Retired[0].AccountID != oldAccount || run.Retired[0].Reason != RetireReasonBanned {
+		t.Fatalf("banned account should be taken offline automatically: %+v", run.Retired)
+	}
+	var archivedAt sql.NullString
+	var oldStatus string
+	var oldAllocations int
+	if err := db.DB().QueryRow("SELECT archived_at,status,current_allocations FROM chatgpt_accounts WHERE id=?", oldAccount).
+		Scan(&archivedAt, &oldStatus, &oldAllocations); err != nil {
 		t.Fatal(err)
 	}
-	if old.CurrentAllocations != 0 {
-		t.Fatalf("old capacity not released: %+v", old)
+	if !archivedAt.Valid || oldStatus != "disabled" || oldAllocations != 0 {
+		t.Fatalf("banned account offline state archived=%v status=%s allocations=%d", archivedAt.Valid, oldStatus, oldAllocations)
+	}
+	if _, err := repo.Account(ctx, oldAccount); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("retired account should leave the active account list: %v", err)
 	}
 }
 
@@ -1514,4 +1525,344 @@ func maxInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// 复现 8/5–8/6 的线上故障：卡在宽限期内又碰上新账号临期，
+// 链式换号必须成功，而不是撞 allocations_active_grace_card_uq 让整轮扫描持续失败。
+func TestChainedReplacementSupersedesGraceInsteadOfBlockingRun(t *testing.T) {
+	db := openStore(t)
+	defer db.Close()
+	repo := New(db.DB(), testCredentialKeyring(t))
+	ctx := context.Background()
+	start := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	repo.SetNow(func() time.Time { return start })
+
+	first, err := repo.CreateAccount(ctx, AccountSeed{
+		DisplayUsername: "chain-1", DisplayPassword: "secret-password", DisplayTOTPSecret: "secret-totp",
+		AccountExpiry: start.Add(48 * time.Hour), MaxConcurrentUsers: 1, MonitorStatus: "alive",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cardID, err := repo.CreateCard(ctx, CardSeed{CodeHash: cardHashForCode("CHAI-NGRA-CE01"), CodeSuffix: "CE01", DurationDays: 30})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.RedeemCard(ctx, cardID); err != nil {
+		t.Fatal(err)
+	}
+	// 第二个账号只比第一个晚 1 小时到期：换过去之后马上又该换号，宽限期还没结束。
+	second, err := repo.CreateAccount(ctx, AccountSeed{
+		DisplayUsername: "chain-2", DisplayPassword: "secret-password", DisplayTOTPSecret: "secret-totp",
+		AccountExpiry: start.Add(49 * time.Hour), MaxConcurrentUsers: 1, MonitorStatus: "alive",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstRun, err := repo.ProcessReplacements(ctx, start.Add(25*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(firstRun.Replaced) != 1 || firstRun.Replaced[0].NewAccountID != second || firstRun.Replaced[0].GraceUntil == nil {
+		t.Fatalf("first replacement=%+v want grace move to %d", firstRun.Replaced, second)
+	}
+
+	third, err := repo.CreateAccount(ctx, AccountSeed{
+		DisplayUsername: "chain-3", DisplayPassword: "secret-password", DisplayTOTPSecret: "secret-totp",
+		AccountExpiry: start.Add(30 * 24 * time.Hour), MaxConcurrentUsers: 1, MonitorStatus: "alive",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 仍在第一段宽限期内（grace_until = start+49h）就触发第二次换号。
+	secondRun, err := repo.ProcessReplacements(ctx, start.Add(26*time.Hour))
+	if err != nil {
+		t.Fatalf("chained replacement must not fail the whole run: %v", err)
+	}
+	if secondRun.Failed != 0 || len(secondRun.Replaced) != 1 || secondRun.Replaced[0].NewAccountID != third {
+		t.Fatalf("second replacement=%+v failed=%d want move to %d", secondRun.Replaced, secondRun.Failed, third)
+	}
+
+	var activeGrace int
+	if err := db.DB().QueryRow("SELECT count(*) FROM allocations WHERE card_id=? AND active=1 AND allocation_state='grace'", cardID).Scan(&activeGrace); err != nil {
+		t.Fatal(err)
+	}
+	if activeGrace != 1 {
+		t.Fatalf("card should carry exactly one grace allocation, got %d", activeGrace)
+	}
+	var superseded string
+	if err := db.DB().QueryRow("SELECT replacement_reason FROM allocations WHERE card_id=? AND account_id=? AND active=0", cardID, first).Scan(&superseded); err != nil {
+		t.Fatal(err)
+	}
+	if superseded != "grace_superseded" {
+		t.Fatalf("first grace allocation reason=%s want grace_superseded", superseded)
+	}
+	// 老账号的容量必须随宽限期结算一并释放。
+	var firstAllocations int
+	if err := db.DB().QueryRow("SELECT current_allocations FROM chatgpt_accounts WHERE id=?", first).Scan(&firstAllocations); err != nil {
+		t.Fatal(err)
+	}
+	if firstAllocations != 0 {
+		t.Fatalf("superseded grace did not release capacity: %d", firstAllocations)
+	}
+}
+
+// 一张卡换号失败不得影响同一轮里其它卡，也不得留下"老分配已下线、新分配没建成"的半截状态。
+func TestReplacementRunIsolatesSingleCardFailure(t *testing.T) {
+	db := openStore(t)
+	defer db.Close()
+	repo := New(db.DB(), testCredentialKeyring(t))
+	ctx := context.Background()
+	start := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	repo.SetNow(func() time.Time { return start })
+
+	expiring, err := repo.CreateAccount(ctx, AccountSeed{
+		DisplayUsername: "expiring", DisplayPassword: "secret-password", DisplayTOTPSecret: "secret-totp",
+		AccountExpiry: start.Add(30 * time.Hour), MaxConcurrentUsers: 2, MonitorStatus: "alive",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cardIDs []int64
+	for _, code := range []string{"ISOL-ATE0-0001", "ISOL-ATE0-0002"} {
+		cardID, err := repo.CreateCard(ctx, CardSeed{CodeHash: cardHashForCode(code), CodeSuffix: code[len(code)-4:], DurationDays: 30})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := repo.RedeemCard(ctx, cardID); err != nil {
+			t.Fatal(err)
+		}
+		cardIDs = append(cardIDs, cardID)
+	}
+	// 只留一个空位：两张卡里只有一张能换成功，另一张必须被单独记为失败。
+	spare, err := repo.CreateAccount(ctx, AccountSeed{
+		DisplayUsername: "spare", DisplayPassword: "secret-password", DisplayTOTPSecret: "secret-totp",
+		AccountExpiry: start.Add(30 * 24 * time.Hour), MaxConcurrentUsers: 1, MonitorStatus: "alive",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := repo.ProcessReplacements(ctx, start.Add(7*time.Hour))
+	if err != nil {
+		t.Fatalf("a single card failure must not abort the run: %v", err)
+	}
+	if len(run.Replaced) != 1 || run.Failed != 1 || run.Replaced[0].NewAccountID != spare {
+		t.Fatalf("run=%+v want 1 replaced onto %d and 1 failed", run, spare)
+	}
+	// 失败那张卡必须原封不动地留在老账号上，顾客不能掉线。
+	failedCard := cardIDs[0]
+	if run.Replaced[0].CardID == failedCard {
+		failedCard = cardIDs[1]
+	}
+	var state string
+	var accountID int64
+	if err := db.DB().QueryRow("SELECT allocation_state,account_id FROM allocations WHERE card_id=? AND active=1", failedCard).Scan(&state, &accountID); err != nil {
+		t.Fatalf("failed card lost its allocation: %v", err)
+	}
+	if state != "primary" || accountID != expiring {
+		t.Fatalf("failed card allocation state=%s account=%d want primary on %d", state, accountID, expiring)
+	}
+	var failedAudit int
+	if err := db.DB().QueryRow("SELECT count(*) FROM audit_events WHERE action='replacement.failed' AND target_id=?", failedCard).Scan(&failedAudit); err != nil {
+		t.Fatal(err)
+	}
+	if failedAudit != 1 {
+		t.Fatalf("failed audit count=%d want 1", failedAudit)
+	}
+}
+
+// 还有顾客没迁走的封禁账号必须留在线上，等下一轮补齐后才自动下线。
+func TestBannedAccountStaysOnlineUntilEveryCustomerMigrated(t *testing.T) {
+	db := openStore(t)
+	defer db.Close()
+	repo := New(db.DB(), testCredentialKeyring(t))
+	ctx := context.Background()
+	now := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	repo.SetNow(func() time.Time { return now })
+
+	banned, err := repo.CreateAccount(ctx, AccountSeed{
+		DisplayUsername: "to-ban", DisplayPassword: "secret-password", DisplayTOTPSecret: "secret-totp",
+		AccountExpiry: now.Add(30 * 24 * time.Hour), MaxConcurrentUsers: 2, MonitorStatus: "alive",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, code := range []string{"BANN-EDA0-0001", "BANN-EDA0-0002"} {
+		cardID, err := repo.CreateCard(ctx, CardSeed{CodeHash: cardHashForCode(code), CodeSuffix: code[len(code)-4:], DurationDays: 30})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := repo.RedeemCard(ctx, cardID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.DB().Exec("UPDATE chatgpt_accounts SET monitor_status='dead_banned',status='banned' WHERE id=?", banned); err != nil {
+		t.Fatal(err)
+	}
+	first, err := repo.CreateAccount(ctx, AccountSeed{
+		DisplayUsername: "rescue-1", DisplayPassword: "secret-password", DisplayTOTPSecret: "secret-totp",
+		AccountExpiry: now.Add(30 * 24 * time.Hour), MaxConcurrentUsers: 1, MonitorStatus: "alive",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = first
+	run, err := repo.ProcessReplacements(ctx, now.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(run.Replaced) != 1 || run.Failed != 1 || len(run.Retired) != 0 {
+		t.Fatalf("run=%+v want 1 replaced, 1 failed, nothing retired yet", run)
+	}
+	var archivedAt sql.NullString
+	if err := db.DB().QueryRow("SELECT archived_at FROM chatgpt_accounts WHERE id=?", banned).Scan(&archivedAt); err != nil {
+		t.Fatal(err)
+	}
+	if archivedAt.Valid {
+		t.Fatal("banned account was taken offline while a customer was still on it")
+	}
+
+	if _, err := repo.CreateAccount(ctx, AccountSeed{
+		DisplayUsername: "rescue-2", DisplayPassword: "secret-password", DisplayTOTPSecret: "secret-totp",
+		AccountExpiry: now.Add(30 * 24 * time.Hour), MaxConcurrentUsers: 1, MonitorStatus: "alive",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	second, err := repo.ProcessReplacements(ctx, now.Add(2*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second.Replaced) != 1 || second.Failed != 0 || len(second.Retired) != 1 ||
+		second.Retired[0].AccountID != banned || second.Retired[0].Reason != RetireReasonBanned {
+		t.Fatalf("run=%+v want the banned account retired once everyone moved", second)
+	}
+	var status string
+	var allocations int
+	if err := db.DB().QueryRow("SELECT status,current_allocations,archived_at FROM chatgpt_accounts WHERE id=?", banned).
+		Scan(&status, &allocations, &archivedAt); err != nil {
+		t.Fatal(err)
+	}
+	if status != "disabled" || allocations != 0 || !archivedAt.Valid {
+		t.Fatalf("offline state status=%s allocations=%d archived=%v", status, allocations, archivedAt.Valid)
+	}
+}
+
+// 订阅正常到期的账号：顾客迁走后自动下线，迁移未完成前必须留在线上。
+func TestExpiredAccountRetiredOnlyAfterCustomersMoveOff(t *testing.T) {
+	db := openStore(t)
+	defer db.Close()
+	repo := New(db.DB(), testCredentialKeyring(t))
+	ctx := context.Background()
+	start := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	repo.SetNow(func() time.Time { return start })
+
+	expiring, err := repo.CreateAccount(ctx, AccountSeed{
+		DisplayUsername: "expiring", DisplayPassword: "secret-password", DisplayTOTPSecret: "secret-totp",
+		AccountExpiry: start.Add(30 * time.Hour), MaxConcurrentUsers: 1, MonitorStatus: "alive",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cardID, err := repo.CreateCard(ctx, CardSeed{CodeHash: cardHashForCode("EXPI-REDA-0001"), CodeSuffix: "0001", DurationDays: 30})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.RedeemCard(ctx, cardID); err != nil {
+		t.Fatal(err)
+	}
+	spare, err := repo.CreateAccount(ctx, AccountSeed{
+		DisplayUsername: "spare", DisplayPassword: "secret-password", DisplayTOTPSecret: "secret-totp",
+		AccountExpiry: start.Add(30 * 24 * time.Hour), MaxConcurrentUsers: 1, MonitorStatus: "alive",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 到期前 24 小时内换号：老账号进入宽限期，顾客还在上面，不能下线。
+	first, err := repo.ProcessReplacements(ctx, start.Add(7*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Replaced) != 1 || first.Replaced[0].NewAccountID != spare || len(first.Retired) != 0 {
+		t.Fatalf("run=%+v want one replacement onto %d and nothing retired yet", first, spare)
+	}
+	var archivedAt sql.NullString
+	if err := db.DB().QueryRow("SELECT archived_at FROM chatgpt_accounts WHERE id=?", expiring).Scan(&archivedAt); err != nil {
+		t.Fatal(err)
+	}
+	if archivedAt.Valid {
+		t.Fatal("expiring account was taken offline while a customer was still in the grace window")
+	}
+
+	// 宽限期结束（此时账号也已过期）：应当自动下线。
+	second, err := repo.ProcessReplacements(ctx, start.Add(32*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.GraceExpired != 1 {
+		t.Fatalf("grace should have expired: %+v", second)
+	}
+	if len(second.Retired) != 1 || second.Retired[0].AccountID != expiring || second.Retired[0].Reason != RetireReasonExpired {
+		t.Fatalf("run=%+v want account %d retired as expired", second.Retired, expiring)
+	}
+	var status string
+	var allocations int
+	var passwordLen int
+	if err := db.DB().QueryRow("SELECT status,current_allocations,archived_at,length(display_password_secret) FROM chatgpt_accounts WHERE id=?", expiring).
+		Scan(&status, &allocations, &archivedAt, &passwordLen); err != nil {
+		t.Fatal(err)
+	}
+	if status != "disabled" || allocations != 0 || !archivedAt.Valid || passwordLen != 0 {
+		t.Fatalf("offline state status=%s allocations=%d archived=%v password_len=%d", status, allocations, archivedAt.Valid, passwordLen)
+	}
+	var retireAudit int
+	if err := db.DB().QueryRow("SELECT count(*) FROM audit_events WHERE action='account.retired' AND target_id=? AND metadata_json LIKE '%expired%'", expiring).Scan(&retireAudit); err != nil {
+		t.Fatal(err)
+	}
+	if retireAudit != 1 {
+		t.Fatalf("expired retirement audit count=%d want 1", retireAudit)
+	}
+	// 换到新账号的顾客不受影响。
+	var activeAccount int64
+	if err := db.DB().QueryRow("SELECT account_id FROM allocations WHERE card_id=? AND active=1 AND allocation_state='primary'", cardID).Scan(&activeAccount); err != nil {
+		t.Fatal(err)
+	}
+	if activeAccount != spare {
+		t.Fatalf("customer allocation moved to %d want %d", activeAccount, spare)
+	}
+}
+
+// 监控推来的 dead_normal 事件应当让空闲账号立刻下线。
+func TestMonitorDeadNormalEventRetiresIdleAccount(t *testing.T) {
+	ctx := context.Background()
+	database := openStore(t)
+	defer database.Close()
+	repo := New(database.DB(), testCredentialKeyring(t))
+	now := time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)
+	repo.SetNow(func() time.Time { return now })
+
+	if _, err := repo.ApplyMonitorAccountEvent(ctx, accountsync.Event{
+		EventID: "expired-created", Version: 1, Type: accountsync.EventAccountCreated, OccurredAt: now,
+		ProviderAccountID: "monitor-expiring", Email: "expiring@example.test", Plan: "plus",
+		SubscriptionExpiry: now.Add(24 * time.Hour), Status: "alive",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := repo.ApplyMonitorAccountEvent(ctx, accountsync.Event{
+		EventID: "expired-dead", Version: 2, Type: accountsync.EventAccountUpdated, OccurredAt: now,
+		ProviderAccountID: "monitor-expiring", Email: "expiring@example.test", Plan: "plus",
+		SubscriptionExpiry: now.Add(24 * time.Hour), Status: "dead_normal",
+	})
+	if err != nil || !result.Retired {
+		t.Fatalf("dead_normal event should retire an idle account: %+v err=%v", result, err)
+	}
+	var status string
+	var archivedAt sql.NullString
+	if err := database.DB().QueryRow("SELECT status,archived_at FROM chatgpt_accounts WHERE monitor_account_id='monitor-expiring'").
+		Scan(&status, &archivedAt); err != nil {
+		t.Fatal(err)
+	}
+	if status != "disabled" || !archivedAt.Valid {
+		t.Fatalf("status=%s archived=%v", status, archivedAt.Valid)
+	}
 }
