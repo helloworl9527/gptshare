@@ -51,28 +51,38 @@ func (s *Service) Start(ctx context.Context, interval time.Duration) {
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	// 启动即扫一次：到期卡的坑位不必再等满一个周期才释放。
+	s.scanOnce(ctx)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			run, err := s.RunOnce(ctx)
-			if err != nil {
-				s.logger.Error("replacement scan failed", "error_code", "replacement_run_failed")
-				continue
-			}
-			if len(run.Replaced) > 0 || run.GraceExpired > 0 || run.Failed > 0 || len(run.Retired) > 0 {
-				retiredBanned, retiredExpired := 0, 0
-				for _, item := range run.Retired {
-					if item.Reason == repository.RetireReasonBanned {
-						retiredBanned++
-						continue
-					}
-					retiredExpired++
-				}
-				s.logger.Info("replacement scan completed", "replaced", len(run.Replaced), "grace_expired", run.GraceExpired,
-					"failed", run.Failed, "retired_banned", retiredBanned, "retired_expired", retiredExpired)
-			}
+			s.scanOnce(ctx)
 		}
 	}
+}
+
+func (s *Service) scanOnce(ctx context.Context) {
+	run, err := s.RunOnce(ctx)
+	if err != nil {
+		s.logger.Error("replacement scan failed", "error_code", "replacement_run_failed")
+		return
+	}
+	if len(run.Replaced) == 0 && run.GraceExpired == 0 && run.Failed == 0 && len(run.Retired) == 0 &&
+		run.CardsExpired == 0 && run.AvailabilityRestored == 0 && run.MarkedFull == 0 {
+		return
+	}
+	retiredBanned, retiredExpired := 0, 0
+	for _, item := range run.Retired {
+		if item.Reason == repository.RetireReasonBanned {
+			retiredBanned++
+			continue
+		}
+		retiredExpired++
+	}
+	s.logger.Info("replacement scan completed", "replaced", len(run.Replaced), "grace_expired", run.GraceExpired,
+		"failed", run.Failed, "retired_banned", retiredBanned, "retired_expired", retiredExpired,
+		"cards_expired", run.CardsExpired, "availability_restored", run.AvailabilityRestored,
+		"marked_full", run.MarkedFull)
 }

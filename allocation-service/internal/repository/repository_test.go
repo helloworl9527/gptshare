@@ -1866,3 +1866,192 @@ func TestMonitorDeadNormalEventRetiresIdleAccount(t *testing.T) {
 		t.Fatalf("status=%s archived=%v", status, archivedAt.Valid)
 	}
 }
+
+func TestReplacementScanExpiresDueCardsAndFreesCapacity(t *testing.T) {
+	db := openStore(t)
+	defer db.Close()
+	repo := New(db.DB(), testCredentialKeyring(t))
+	ctx := context.Background()
+	start := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	repo.SetNow(func() time.Time { return start })
+
+	accountID, err := repo.CreateAccount(ctx, AccountSeed{
+		DisplayUsername: "expiry-sweep", DisplayPassword: "secret-password", DisplayTOTPSecret: "secret-totp",
+		AccountExpiry: start.Add(90 * 24 * time.Hour), MaxConcurrentUsers: 3, MonitorStatus: "alive",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cardID, err := repo.CreateCard(ctx, CardSeed{CodeHash: cardHashForCode("EXPI-REDU-E001"), CodeSuffix: "E001", DurationDays: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.RedeemCard(ctx, cardID); err != nil {
+		t.Fatal(err)
+	}
+
+	// 卡到期 5 天后才跑扫描：过去没有任何后台任务会结算它，坑位被永久占住。
+	run, err := repo.ProcessReplacements(ctx, start.Add(9*24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.CardsExpired != 1 {
+		t.Fatalf("cards_expired=%d want 1", run.CardsExpired)
+	}
+	var cardStatus, allocationState string
+	var active int
+	if err := db.DB().QueryRow("SELECT status FROM cards WHERE id=?", cardID).Scan(&cardStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DB().QueryRow("SELECT allocation_state,active FROM allocations WHERE card_id=?", cardID).Scan(&allocationState, &active); err != nil {
+		t.Fatal(err)
+	}
+	if cardStatus != "expired" || allocationState != "expired" || active != 0 {
+		t.Fatalf("card=%s allocation=%s active=%d want expired/expired/0", cardStatus, allocationState, active)
+	}
+	account, err := repo.Account(ctx, accountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if account.CurrentAllocations != 0 {
+		t.Fatalf("current_allocations=%d want 0 after card expiry", account.CurrentAllocations)
+	}
+}
+
+func TestStaleFullAccountIsReconciledAndRedeemableAgain(t *testing.T) {
+	db := openStore(t)
+	defer db.Close()
+	repo := New(db.DB(), testCredentialKeyring(t))
+	ctx := context.Background()
+	start := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	repo.SetNow(func() time.Time { return start })
+
+	accountID, err := repo.CreateAccount(ctx, AccountSeed{
+		DisplayUsername: "stale-full", DisplayPassword: "secret-password", DisplayTOTPSecret: "secret-totp",
+		AccountExpiry: start.Add(90 * 24 * time.Hour), MaxConcurrentUsers: 1, MonitorStatus: "alive",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstCard, err := repo.CreateCard(ctx, CardSeed{CodeHash: cardHashForCode("STAL-EFUL-L001"), CodeSuffix: "L001", DurationDays: 30})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.RedeemCard(ctx, firstCard); err != nil {
+		t.Fatal(err)
+	}
+	// 容量上调没有重算 status：账号停在 'full'，选号 SQL 永远选不中它，
+	// 而库存看板仍把这 2 个坑算成空余容量——线上"有容量却兑不了"就是这么来的。
+	if _, err := db.DB().Exec("UPDATE chatgpt_accounts SET max_concurrent_users=3 WHERE id=?", accountID); err != nil {
+		t.Fatal(err)
+	}
+	blocked, err := repo.CreateCard(ctx, CardSeed{CodeHash: cardHashForCode("STAL-EFUL-L002"), CodeSuffix: "L002", DurationDays: 30})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.RedeemCard(ctx, blocked); !errors.Is(err, ErrNoAccountCapacity) {
+		t.Fatalf("redeem before reconcile err=%v want ErrNoAccountCapacity", err)
+	}
+
+	run, err := repo.ProcessReplacements(ctx, start.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.AvailabilityRestored != 1 || run.MarkedFull != 0 {
+		t.Fatalf("restored=%d marked_full=%d want 1/0", run.AvailabilityRestored, run.MarkedFull)
+	}
+	account, err := repo.Account(ctx, accountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if account.Status != "available" {
+		t.Fatalf("status=%s want available", account.Status)
+	}
+	if _, err := repo.RedeemCard(ctx, blocked); err != nil {
+		t.Fatalf("redeem after reconcile: %v", err)
+	}
+}
+
+func TestReconcileMarksOversubscribedAccountFull(t *testing.T) {
+	db := openStore(t)
+	defer db.Close()
+	repo := New(db.DB(), testCredentialKeyring(t))
+	ctx := context.Background()
+	start := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	repo.SetNow(func() time.Time { return start })
+
+	accountID, err := repo.CreateAccount(ctx, AccountSeed{
+		DisplayUsername: "over-subscribed", DisplayPassword: "secret-password", DisplayTOTPSecret: "secret-totp",
+		AccountExpiry: start.Add(90 * 24 * time.Hour), MaxConcurrentUsers: 5, MonitorStatus: "alive",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 容量下调同样不会重算 status，反向漂移必须一并纠正。
+	if _, err := db.DB().Exec("UPDATE chatgpt_accounts SET current_allocations=5,max_concurrent_users=2,status='available' WHERE id=?", accountID); err != nil {
+		t.Fatal(err)
+	}
+	run, err := repo.ProcessReplacements(ctx, start.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.MarkedFull != 1 || run.AvailabilityRestored != 0 {
+		t.Fatalf("marked_full=%d restored=%d want 1/0", run.MarkedFull, run.AvailabilityRestored)
+	}
+	account, err := repo.Account(ctx, accountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if account.Status != "full" {
+		t.Fatalf("status=%s want full", account.Status)
+	}
+}
+
+func TestReconcileLeavesSuspectedAndArchivedAccountsAlone(t *testing.T) {
+	db := openStore(t)
+	defer db.Close()
+	repo := New(db.DB(), testCredentialKeyring(t))
+	ctx := context.Background()
+	start := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	repo.SetNow(func() time.Time { return start })
+
+	suspected, err := repo.CreateAccount(ctx, AccountSeed{
+		DisplayUsername: "suspect-hold", DisplayPassword: "secret-password", DisplayTOTPSecret: "secret-totp",
+		AccountExpiry: start.Add(90 * 24 * time.Hour), MaxConcurrentUsers: 5, MonitorStatus: "alive",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 疑似封禁的账号有空余坑位，但必须留在分配池外，等人工确认。
+	if _, err := db.DB().Exec("UPDATE chatgpt_accounts SET status='suspected',current_allocations=1 WHERE id=?", suspected); err != nil {
+		t.Fatal(err)
+	}
+	archived, err := repo.CreateAccount(ctx, AccountSeed{
+		DisplayUsername: "archived-hold", DisplayPassword: "secret-password", DisplayTOTPSecret: "secret-totp",
+		AccountExpiry: start.Add(90 * 24 * time.Hour), MaxConcurrentUsers: 5, MonitorStatus: "alive",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.DB().Exec("UPDATE chatgpt_accounts SET status='full',current_allocations=0,archived_at=? WHERE id=?", formatTime(start), archived); err != nil {
+		t.Fatal(err)
+	}
+
+	run, err := repo.ProcessReplacements(ctx, start.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.AvailabilityRestored != 0 || run.MarkedFull != 0 {
+		t.Fatalf("restored=%d marked_full=%d want 0/0", run.AvailabilityRestored, run.MarkedFull)
+	}
+	var suspectedStatus, archivedStatus string
+	if err := db.DB().QueryRow("SELECT status FROM chatgpt_accounts WHERE id=?", suspected).Scan(&suspectedStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DB().QueryRow("SELECT status FROM chatgpt_accounts WHERE id=?", archived).Scan(&archivedStatus); err != nil {
+		t.Fatal(err)
+	}
+	if suspectedStatus != "suspected" || archivedStatus != "full" {
+		t.Fatalf("suspected=%s archived=%s want suspected/full", suspectedStatus, archivedStatus)
+	}
+}

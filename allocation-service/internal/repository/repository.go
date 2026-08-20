@@ -111,6 +111,11 @@ type ReplacementRun struct {
 	GraceExpired int
 	Failed       int
 	Retired      []RetiredAccount
+	// CardsExpired 是本轮自动清理的到期卡数量；过去只有管理端手动触发才会释放这些坑位。
+	CardsExpired int
+	// AvailabilityRestored / MarkedFull 记录 status 与容量对账的纠偏结果。
+	AvailabilityRestored int
+	MarkedFull           int
 }
 
 // RetiredAccount 记录一次自动下线及其原因。
@@ -556,6 +561,7 @@ func (r *Repository) ExtendCard(ctx context.Context, cardID int64, days int) (mo
 	return r.CardByID(ctx, cardID)
 }
 
+// ExpireDueCards 供管理端手动触发；后台扫描复用同一段逻辑（见 ProcessReplacements）。
 func (r *Repository) ExpireDueCards(ctx context.Context, now time.Time) (int64, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -563,6 +569,21 @@ func (r *Repository) ExpireDueCards(ctx context.Context, now time.Time) (int64, 
 	}
 	defer tx.Rollback()
 	stamp := now.UTC()
+	count, err := expireDueCards(ctx, tx, stamp)
+	if err != nil {
+		return 0, err
+	}
+	if _, _, err := reconcileAccountAvailability(ctx, tx, stamp); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+// expireDueCards 结算已到期的卡：释放账号容量、把分配置为 expired、把卡置为 expired。
+func expireDueCards(ctx context.Context, tx *sql.Tx, stamp time.Time) (int64, error) {
 	rows, err := tx.QueryContext(ctx, `SELECT a.account_id,count(*)
 		FROM allocations a JOIN cards c ON c.id=a.card_id
 		WHERE c.status='redeemed' AND c.expires_at IS NOT NULL AND datetime(c.expires_at) <= datetime(?)
@@ -609,10 +630,34 @@ func (r *Repository) ExpireDueCards(ctx context.Context, now time.Time) (int64, 
 		return 0, err
 	}
 	count, _ := result.RowsAffected()
-	if err := tx.Commit(); err != nil {
-		return 0, err
-	}
 	return count, nil
+}
+
+// reconcileAccountAvailability 把 status 重新对齐到 current_allocations/max_concurrent_users。
+// 容量上调或历史漂移会让账号永久停在 'full'：既选不中（selectCandidateAccount 只认 'available'），
+// 又仍被库存看板计成空余容量，于是出现"有容量却兑不了"。每轮扫描纠正一次，双向都纠。
+func reconcileAccountAvailability(ctx context.Context, tx *sql.Tx, now time.Time) (int, int, error) {
+	restored, err := tx.ExecContext(ctx, `UPDATE chatgpt_accounts
+		SET status='available', updated_at=?
+		WHERE status='full'
+		  AND archived_at IS NULL
+		  AND current_allocations < max_concurrent_users
+		  AND datetime(account_expiry) > datetime(?)
+		  AND monitor_status NOT IN ('dead_banned','dead_normal')`, formatTime(now), formatTime(now))
+	if err != nil {
+		return 0, 0, err
+	}
+	restoredCount, _ := restored.RowsAffected()
+	filled, err := tx.ExecContext(ctx, `UPDATE chatgpt_accounts
+		SET status='full', updated_at=?
+		WHERE status='available'
+		  AND archived_at IS NULL
+		  AND current_allocations >= max_concurrent_users`, formatTime(now))
+	if err != nil {
+		return 0, 0, err
+	}
+	filledCount, _ := filled.RowsAffected()
+	return int(restoredCount), int(filledCount), nil
 }
 
 func (r *Repository) Audit(ctx context.Context, action, targetType string, targetID int64, metadata map[string]any) error {
@@ -650,6 +695,12 @@ func (r *Repository) ProcessReplacements(ctx context.Context, now time.Time) (Re
 	defer tx.Rollback()
 	stamp := now.UTC()
 	run := ReplacementRun{}
+	// 先结算到期卡：释放出来的坑位本轮就能用于换号，也避免过期分配长期占容量。
+	expiredCards, err := expireDueCards(ctx, tx, stamp)
+	if err != nil {
+		return ReplacementRun{}, err
+	}
+	run.CardsExpired = int(expiredCards)
 	expiredGrace, err := expireGraceAllocations(ctx, tx, stamp)
 	if err != nil {
 		return ReplacementRun{}, err
@@ -724,6 +775,20 @@ func (r *Repository) ProcessReplacements(ctx context.Context, now time.Time) (Re
 		return ReplacementRun{}, err
 	}
 	run.Retired = retired
+	// 对账放在最后：本轮释放/归档造成的状态变化也一并纠偏。
+	restored, filled, err := reconcileAccountAvailability(ctx, tx, stamp)
+	if err != nil {
+		return ReplacementRun{}, err
+	}
+	run.AvailabilityRestored = restored
+	run.MarkedFull = filled
+	if restored > 0 || filled > 0 {
+		if err := auditWithTx(ctx, tx, r.now, "accounts.availability_reconciled", "account_batch", 0, map[string]any{
+			"restored_available": restored, "marked_full": filled,
+		}); err != nil {
+			return ReplacementRun{}, err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return ReplacementRun{}, err
 	}

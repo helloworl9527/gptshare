@@ -176,6 +176,10 @@ func TestVitalsBinaryUnifiedFlowAndCrashLoopMatrix(t *testing.T) {
 			}
 			continue
 		}
+		if item.MonitorStatus == "dead_banned" {
+			// 封禁账号没有存量顾客时会被换号扫描自动归档，管理端不再接受编辑。
+			continue
+		}
 		updated := admin.request(t, http.MethodPut, "/api/admin/accounts/"+strconv.FormatInt(item.ID, 10), csrf, map[string]any{
 			"display_username":     item.DisplayUsername,
 			"display_password":     "DISPLAY_PASSWORD_BINARY_SENTINEL_" + item.MonitorAccountID,
