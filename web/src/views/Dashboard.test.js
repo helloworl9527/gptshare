@@ -53,6 +53,33 @@ describe('Unified dashboard', () => {
     expect(wrapper.findAll('.domain-panel')).toHaveLength(2)
   })
 
+  it('reports blocked capacity so a dashboard number can never promise seats redemption cannot allocate', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(response({ accounts: monitorAccounts }))
+      .mockResolvedValueOnce(response({
+        dashboard: {
+          capacity: 28, available_capacity: 0, blocked_capacity: 6, warning_level: 'exhausted', days_to_exhaust: 0,
+          blocked_breakdown: [
+            { reason: 'suspected', accounts: 1, free_slots: 4 },
+            { reason: 'full', accounts: 1, free_slots: 2 },
+          ],
+        },
+      }))
+      .mockResolvedValueOnce(response({ accounts: allocationAccounts }))
+      .mockResolvedValueOnce(response({ cards }))
+    const wrapper = await render(fetchMock)
+    expect(wrapper.text()).toContain('另有 6 位受阻')
+    expect(wrapper.text()).toContain('疑似封禁待确认')
+    expect(wrapper.text()).toContain('状态漂移（已纠偏中）')
+    expect(wrapper.findAll('.blocked-breakdown li')).toHaveLength(2)
+  })
+
+  it('hides the blocked breakdown when every free seat is allocatable', async () => {
+    const wrapper = await render(successResponses(vi.fn()))
+    expect(wrapper.find('.blocked-breakdown').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('位受阻')
+  })
+
   it('shows a recovery status after a failed aggregate request succeeds', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(response({}, 503))

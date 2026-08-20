@@ -116,6 +116,8 @@ type ReplacementRun struct {
 	// AvailabilityRestored / MarkedFull 记录 status 与容量对账的纠偏结果。
 	AvailabilityRestored int
 	MarkedFull           int
+	// AllocationCountsFixed 是 current_allocations 与实际活跃分配数对不上、被纠正的账号数。
+	AllocationCountsFixed int
 }
 
 // RetiredAccount 记录一次自动下线及其原因。
@@ -131,10 +133,16 @@ const (
 )
 
 type InventoryMetrics struct {
-	Capacity               int
-	Used                   int
-	AvailableCapacity      int
-	EligibleAccounts       int
+	Capacity int
+	Used     int
+	// AvailableCapacity 只统计"兑换真能选中"的坑位，口径与 selectCandidateAccount 完全一致。
+	AvailableCapacity int
+	EligibleAccounts  int
+	// AllocatableAccounts 是当前真正可被选中的账号数。
+	AllocatableAccounts int
+	// BlockedCapacity 是有空位却选不中的坑位数，BlockedBreakdown 给出按状态的归因。
+	BlockedCapacity        int
+	BlockedBreakdown       []BlockedCapacityBucket
 	UnusedCards            int
 	RedeemedLast7Days      int
 	DailyRedemptionRate    float64
@@ -144,6 +152,13 @@ type InventoryMetrics struct {
 	WarningLevel           string
 	WarningLabel           string
 	ExhaustionWindow       string
+}
+
+// BlockedCapacityBucket 记录某个状态下"看得见但分不出去"的容量。
+type BlockedCapacityBucket struct {
+	Status    string
+	Accounts  int
+	FreeSlots int
 }
 
 type RevealedCardCode struct {
@@ -573,6 +588,9 @@ func (r *Repository) ExpireDueCards(ctx context.Context, now time.Time) (int64, 
 	if err != nil {
 		return 0, err
 	}
+	if _, err := reconcileAllocationCounts(ctx, tx, r.now, stamp); err != nil {
+		return 0, err
+	}
 	if _, _, err := reconcileAccountAvailability(ctx, tx, stamp); err != nil {
 		return 0, err
 	}
@@ -631,6 +649,53 @@ func expireDueCards(ctx context.Context, tx *sql.Tx, stamp time.Time) (int64, er
 	}
 	count, _ := result.RowsAffected()
 	return count, nil
+}
+
+// activeAllocationCountExpr 是账号真实占用的坑位数，口径与 ActiveAllocationCount 一致。
+const activeAllocationCountExpr = `(SELECT count(*) FROM allocations a
+		WHERE a.account_id=chatgpt_accounts.id AND a.active=1 AND a.allocation_state IN ('primary','grace'))`
+
+// reconcileAllocationCounts 把 current_allocations 拉回实际活跃分配数。
+// 这个计数一直靠增减维护，任何一次漏减都会永久吃掉坑位且无法自愈。
+func reconcileAllocationCounts(ctx context.Context, tx *sql.Tx, nowFunc func() time.Time, now time.Time) (int, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT id,current_allocations,`+activeAllocationCountExpr+` AS actual
+		FROM chatgpt_accounts
+		WHERE archived_at IS NULL AND current_allocations <> `+activeAllocationCountExpr)
+	if err != nil {
+		return 0, err
+	}
+	type drift struct {
+		accountID int64
+		stored    int
+		actual    int
+	}
+	var drifted []drift
+	for rows.Next() {
+		var item drift
+		if err := rows.Scan(&item.accountID, &item.stored, &item.actual); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		drifted = append(drifted, item)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, err
+	}
+	rows.Close()
+	for _, item := range drifted {
+		if _, err := tx.ExecContext(ctx, `UPDATE chatgpt_accounts
+			SET current_allocations=?, updated_at=?
+			WHERE id=? AND archived_at IS NULL`, item.actual, formatTime(now), item.accountID); err != nil {
+			return 0, err
+		}
+		if err := auditWithTx(ctx, tx, nowFunc, "account.allocation_count_reconciled", "account", item.accountID, map[string]any{
+			"stored": item.stored, "actual": item.actual, "operator": "system",
+		}); err != nil {
+			return 0, err
+		}
+	}
+	return len(drifted), nil
 }
 
 // reconcileAccountAvailability 把 status 重新对齐到 current_allocations/max_concurrent_users。
@@ -776,6 +841,12 @@ func (r *Repository) ProcessReplacements(ctx context.Context, now time.Time) (Re
 	}
 	run.Retired = retired
 	// 对账放在最后：本轮释放/归档造成的状态变化也一并纠偏。
+	// 先纠计数、再纠状态，保证状态判断读到的是真实占用数。
+	countsFixed, err := reconcileAllocationCounts(ctx, tx, r.now, stamp)
+	if err != nil {
+		return ReplacementRun{}, err
+	}
+	run.AllocationCountsFixed = countsFixed
 	restored, filled, err := reconcileAccountAvailability(ctx, tx, stamp)
 	if err != nil {
 		return ReplacementRun{}, err
@@ -811,10 +882,22 @@ func (r *Repository) InventoryMetrics(ctx context.Context, now time.Time) (Inven
 		Scan(&metrics.Capacity, &metrics.Used, &metrics.EligibleAccounts, &metrics.AverageAccountCapacity); err != nil {
 		return InventoryMetrics{}, err
 	}
-	metrics.AvailableCapacity = metrics.Capacity - metrics.Used
-	if metrics.AvailableCapacity < 0 {
-		metrics.AvailableCapacity = 0
+	// 可用容量按"兑换真能选中"的口径统计，而不是 capacity-used：后者会把 unknown_monitor、
+	// 疑似封禁、状态漂移成 full 的账号的空位也算进来，看板因此会虚高一档。
+	if err := r.db.QueryRowContext(ctx, `SELECT
+			coalesce(sum(max_concurrent_users - current_allocations),0),
+			count(*)
+		FROM chatgpt_accounts
+		WHERE `+allocatableAccountClause, formatTime(stamp)).
+		Scan(&metrics.AvailableCapacity, &metrics.AllocatableAccounts); err != nil {
+		return InventoryMetrics{}, err
 	}
+	blocked, blockedTotal, err := blockedCapacityBreakdown(ctx, r.db, stamp)
+	if err != nil {
+		return InventoryMetrics{}, err
+	}
+	metrics.BlockedBreakdown = blocked
+	metrics.BlockedCapacity = blockedTotal
 	if err := r.db.QueryRowContext(ctx, `SELECT count(*) FROM cards WHERE status='unused'`).Scan(&metrics.UnusedCards); err != nil {
 		return InventoryMetrics{}, err
 	}
@@ -839,6 +922,46 @@ func (r *Repository) InventoryMetrics(ctx context.Context, now time.Time) (Inven
 	}
 	metrics.WarningLevel, metrics.WarningLabel, metrics.ExhaustionWindow = inventoryWarning(metrics.AvailableCapacity, metrics.DaysToExhaust)
 	return metrics, nil
+}
+
+// blockedCapacityBreakdown 统计"有空位但兑换选不中"的坑位，并按原因归因，
+// 让看板能直接说明容量卡在哪里，而不是给出一个分不出去的数字。
+func blockedCapacityBreakdown(ctx context.Context, db *sql.DB, stamp time.Time) ([]BlockedCapacityBucket, int, error) {
+	rows, err := db.QueryContext(ctx, `SELECT
+			CASE
+				WHEN datetime(account_expiry) <= datetime(?) THEN 'account_expired'
+				WHEN monitor_status='dead_banned' THEN 'monitor_banned'
+				ELSE status
+			END AS reason,
+			count(*),
+			sum(max_concurrent_users - current_allocations)
+		FROM chatgpt_accounts
+		WHERE archived_at IS NULL
+		  AND current_allocations < max_concurrent_users
+		  AND NOT (`+allocatableAccountClause+`)
+		GROUP BY reason
+		ORDER BY 3 DESC, reason ASC`, formatTime(stamp), formatTime(stamp))
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	buckets := make([]BlockedCapacityBucket, 0)
+	total := 0
+	for rows.Next() {
+		var bucket BlockedCapacityBucket
+		if err := rows.Scan(&bucket.Status, &bucket.Accounts, &bucket.FreeSlots); err != nil {
+			return nil, 0, err
+		}
+		if bucket.FreeSlots <= 0 {
+			continue
+		}
+		total += bucket.FreeSlots
+		buckets = append(buckets, bucket)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	return buckets, total, nil
 }
 
 func (r *Repository) redeemCard(ctx context.Context, where string, arg any, monitorAvailable bool) (RedeemResult, error) {
@@ -1746,13 +1869,17 @@ func selectCandidateAccount(ctx context.Context, tx *sql.Tx, now, cardExpiresAt 
 	return selectCandidateAccountExcluding(ctx, tx, now, cardExpiresAt, monitorAvailable, 0)
 }
 
-func selectCandidateAccountExcluding(ctx context.Context, tx *sql.Tx, now, cardExpiresAt time.Time, monitorAvailable bool, excludedAccountID int64) (int64, error) {
-	row := tx.QueryRowContext(ctx, `SELECT id FROM chatgpt_accounts
-		WHERE datetime(account_expiry) > datetime(?)
+// allocatableAccountClause 是"兑换能否选中这个账号"的唯一判据（占位符：now）。
+// 库存看板与选号 SQL 共用同一份条件，避免再次出现"看板显示有容量、兑换却报 no_account_capacity"。
+const allocatableAccountClause = `datetime(account_expiry) > datetime(?)
 		  AND archived_at IS NULL
 		  AND status='available'
 		  AND current_allocations < max_concurrent_users
-		  AND monitor_status != 'dead_banned'
+		  AND monitor_status != 'dead_banned'`
+
+func selectCandidateAccountExcluding(ctx context.Context, tx *sql.Tx, now, cardExpiresAt time.Time, monitorAvailable bool, excludedAccountID int64) (int64, error) {
+	row := tx.QueryRowContext(ctx, `SELECT id FROM chatgpt_accounts
+		WHERE `+allocatableAccountClause+`
 		  AND (? = 0 OR id != ?)
 		ORDER BY
 		  CASE WHEN ? = 0 THEN 1 ELSE CASE monitor_status WHEN 'alive' THEN 0 WHEN 'unknown' THEN 1 WHEN 'unknown_monitor' THEN 1 WHEN 'dead_normal' THEN 2 ELSE 3 END END ASC,

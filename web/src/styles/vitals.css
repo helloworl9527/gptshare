@@ -186,6 +186,14 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .domain-kpi > small { display: block; margin-top: 10px; color: #87918c; font: 10px/1.5 var(--mono); }
 .domain-kpi .status-value { font-size: 22px; text-transform: uppercase; }
 .domain-panel > .panel-link { margin-top: 18px; }
+.blocked-breakdown { margin-top: 18px; border: 1px solid var(--line); padding: 14px 16px; }
+.blocked-breakdown h3 { margin: 0 0 10px; color: var(--muted); font: 11px/1.4 var(--mono); text-transform: uppercase; }
+.blocked-breakdown ul { margin: 0; padding: 0; list-style: none; }
+.blocked-breakdown li { display: flex; align-items: baseline; gap: 10px; padding: 6px 0; border-top: 1px solid var(--line); }
+.blocked-breakdown li:first-child { border-top: 0; }
+.blocked-breakdown li > span { flex: 1; min-width: 0; font-size: 13px; overflow-wrap: anywhere; }
+.blocked-breakdown li > strong { font: 650 15px var(--display); }
+.blocked-breakdown li > small { color: #87918c; font: 10px var(--mono); }
 
 /* Security boundary groups */
 .security-boundaries { margin-bottom: 18px; }

@@ -19,6 +19,24 @@ const pendingCredentials = computed(() => allocationAccounts.value.filter((item)
 const capacity = computed(() => Number(inventory.value.capacity ?? allocation.value.capacity))
 const available = computed(() => Number(inventory.value.available_capacity ?? allocation.value.availableCapacity))
 const dailyRate = computed(() => Number.isFinite(Number(inventory.value.daily_redemption_rate)) ? Number(inventory.value.daily_redemption_rate).toFixed(2) : '—')
+const blocked = computed(() => Number(inventory.value.blocked_capacity ?? 0))
+const blockedReasonLabels = {
+  full: '状态漂移（已纠偏中）',
+  suspected: '疑似封禁待确认',
+  monitor_banned: '监控判定封禁',
+  account_expired: '账号订阅已过期',
+  expired: '账号订阅已过期',
+  banned: '已标记封禁',
+  pending_credentials: '凭据未补全',
+  unknown_monitor: '监控状态未知',
+  disabled: '已下线',
+}
+const blockedBreakdown = computed(() => (inventory.value.blocked_breakdown || []).map((item) => ({
+  reason: item.reason,
+  label: blockedReasonLabels[item.reason] || item.reason,
+  accounts: Number(item.accounts ?? 0),
+  freeSlots: Number(item.free_slots ?? 0),
+})))
 
 async function load() {
   const hadError = Boolean(error.value)
@@ -104,8 +122,9 @@ onMounted(load)
           <article class="domain-kpi tone-amber">
             <span>库存预警</span><strong class="status-value">{{ inventory.warning_level || 'normal' }}</strong><small>预计 {{ inventory.days_to_exhaust ?? '—' }} 天耗尽</small>
           </article>
-          <article class="domain-kpi">
-            <span>可用容量</span><strong>{{ available }}<small>/{{ capacity }}</small></strong><small>剩余可分配并发位</small>
+          <article class="domain-kpi" :class="{ 'tone-red': available === 0 }">
+            <span>可用容量</span><strong>{{ available }}<small>/{{ capacity }}</small></strong>
+            <small>兑换真能选中的并发位<template v-if="blocked > 0">，另有 {{ blocked }} 位受阻</template></small>
           </article>
           <article class="domain-kpi tone-cyan">
             <span>近 7 天兑换</span><strong>{{ inventory.redeemed_last_7_days ?? allocation.redeemed }}</strong><small>日均 {{ dailyRate }}</small>
@@ -114,6 +133,18 @@ onMounted(load)
             <span>待补全账号</span><strong>{{ pendingCredentials }}</strong><small>缺密码或 2FA，不参与兑换</small>
           </article>
         </div>
+        <section v-if="blockedBreakdown.length" class="blocked-breakdown" aria-labelledby="blocked-capacity-title">
+          <h3 id="blocked-capacity-title">
+            受阻容量归因 · 共 {{ blocked }} 位
+          </h3>
+          <ul>
+            <li v-for="item in blockedBreakdown" :key="item.reason">
+              <span>{{ item.label }}</span>
+              <strong>{{ item.freeSlots }} 位</strong>
+              <small>{{ item.accounts }} 个账号</small>
+            </li>
+          </ul>
+        </section>
         <RouterLink class="panel-link" to="/allocation/accounts">
           管理账号池
         </RouterLink>

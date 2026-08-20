@@ -1151,6 +1151,9 @@ func serializeInventoryMetrics(metrics repository.InventoryMetrics) gin.H {
 		"used":                     metrics.Used,
 		"available_capacity":       metrics.AvailableCapacity,
 		"eligible_accounts":        metrics.EligibleAccounts,
+		"allocatable_accounts":     metrics.AllocatableAccounts,
+		"blocked_capacity":         metrics.BlockedCapacity,
+		"blocked_breakdown":        serializeBlockedCapacity(metrics.BlockedBreakdown),
 		"unused_cards":             metrics.UnusedCards,
 		"redeemed_last_7_days":     metrics.RedeemedLast7Days,
 		"daily_redemption_rate":    metrics.DailyRedemptionRate,
@@ -1167,6 +1170,14 @@ func serializeInventoryMetrics(metrics repository.InventoryMetrics) gin.H {
 		body["days_to_exhaust"] = nil
 	}
 	return body
+}
+
+func serializeBlockedCapacity(buckets []repository.BlockedCapacityBucket) []gin.H {
+	out := make([]gin.H, 0, len(buckets))
+	for _, bucket := range buckets {
+		out = append(out, gin.H{"reason": bucket.Status, "accounts": bucket.Accounts, "free_slots": bucket.FreeSlots})
+	}
+	return out
 }
 
 func serializeGeneratedCards(cards []cardsvc.GeneratedCard) []gin.H {

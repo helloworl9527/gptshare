@@ -70,7 +70,7 @@ func (s *Service) scanOnce(ctx context.Context) {
 		return
 	}
 	if len(run.Replaced) == 0 && run.GraceExpired == 0 && run.Failed == 0 && len(run.Retired) == 0 &&
-		run.CardsExpired == 0 && run.AvailabilityRestored == 0 && run.MarkedFull == 0 {
+		run.CardsExpired == 0 && run.AvailabilityRestored == 0 && run.MarkedFull == 0 && run.AllocationCountsFixed == 0 {
 		return
 	}
 	retiredBanned, retiredExpired := 0, 0
@@ -84,5 +84,5 @@ func (s *Service) scanOnce(ctx context.Context) {
 	s.logger.Info("replacement scan completed", "replaced", len(run.Replaced), "grace_expired", run.GraceExpired,
 		"failed", run.Failed, "retired_banned", retiredBanned, "retired_expired", retiredExpired,
 		"cards_expired", run.CardsExpired, "availability_restored", run.AvailabilityRestored,
-		"marked_full", run.MarkedFull)
+		"marked_full", run.MarkedFull, "allocation_counts_fixed", run.AllocationCountsFixed)
 }
