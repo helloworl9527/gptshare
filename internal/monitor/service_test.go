@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"allocation-service/accountsync"
 	"chatgpt-monitor/internal/account"
 	"chatgpt-monitor/internal/chatgpt"
 	credentialcrypto "chatgpt-monitor/internal/crypto"
@@ -885,7 +886,9 @@ func TestFieldLevelLogsOnlyActualChangesAndAuthSnapshotIsImmutable(t *testing.T)
 	authExpiry := now.Add(10 * 24 * time.Hour)
 	id := seedAccount(t, db, keyring, "acct-fields", authExpiry, now)
 	currentExpiry := now.Add(20 * 24 * time.Hour)
-	client.statuses["acct-fields"] = chatgpt.StatusResult{ProviderAccountID: "acct-fields", RawPlan: "chatgptfreeplan", Plan: chatgpt.PlanFree, SubscriptionExpiry: &currentExpiry, AccountState: chatgpt.StateActive, EvidenceCode: "access_claim+accounts_check_2xx", EvidenceLevel: chatgpt.EvidenceLiveVerified}
+	// 用 team 而不是 free：free 会被判定为订阅终止并停掉轮询，那是另一条路径的行为，
+	// 这个用例只关心"字段真的变了才记一条变更日志"。
+	client.statuses["acct-fields"] = chatgpt.StatusResult{ProviderAccountID: "acct-fields", RawPlan: "chatgptteamplan", Plan: chatgpt.PlanTeam, SubscriptionExpiry: &currentExpiry, AccountState: chatgpt.StateActive, EvidenceCode: "access_claim+accounts_check_2xx", EvidenceLevel: chatgpt.EvidenceLiveVerified}
 	if _, _, err := s.RefreshNow(context.Background(), id); err != nil {
 		t.Fatal(err)
 	}
@@ -901,7 +904,7 @@ func TestFieldLevelLogsOnlyActualChangesAndAuthSnapshotIsImmutable(t *testing.T)
 	if err := db.QueryRow("SELECT auth_expiry,plan,current_expiry FROM accounts WHERE id=?", id).Scan(&storedAuth, &plan, &current); err != nil {
 		t.Fatal(err)
 	}
-	if storedAuth != formatTime(authExpiry) || plan != "free" || current != formatTime(currentExpiry) {
+	if storedAuth != formatTime(authExpiry) || plan != "team" || current != formatTime(currentExpiry) {
 		t.Fatalf("auth=%s plan=%s current=%s", storedAuth, plan, current)
 	}
 }
@@ -1342,4 +1345,71 @@ func TestReauthorizationRequiredNeitherCountsNorClearsDenialStreak(t *testing.T)
 	if status != StateAlive {
 		t.Fatalf("reauthorization must never imply a ban, status=%s", status)
 	}
+}
+
+// 本系统只导入付费账号，所以轮询观测到 free 只可能是订阅没续上。
+// 这不是封禁：账号按正常终止归档、停止轮询，并立刻通知分配域把顾客迁走后下线。
+func TestFreePlanDowngradeRetiresAccountAndNotifiesAllocation(t *testing.T) {
+	s, db, keyring, client, now := newTestService(t)
+	authExpiry := now.Add(30 * 24 * time.Hour)
+	id := seedAccount(t, db, keyring, "acct-downgrade", authExpiry, now)
+	client.statuses["acct-downgrade"] = chatgpt.StatusResult{
+		ProviderAccountID: "acct-downgrade", RawPlan: "chatgptfreeplan", Plan: chatgpt.PlanFree,
+		AccountState: chatgpt.StateActive, EvidenceCode: "access_claim+accounts_check_2xx", EvidenceLevel: chatgpt.EvidenceLiveVerified,
+	}
+	if _, _, err := s.RefreshNow(context.Background(), id); err != nil {
+		t.Fatal(err)
+	}
+	assertAccountState(t, db, id, StateDeadNormal, CheckOK, true)
+
+	var plan, deathType, pauseReason string
+	var currentExpiry, nextRetry sql.NullString
+	if err := db.QueryRow("SELECT plan,death_type,pause_reason,current_expiry,next_retry_at FROM accounts WHERE id=?", id).
+		Scan(&plan, &deathType, &pauseReason, &currentExpiry, &nextRetry); err != nil {
+		t.Fatal(err)
+	}
+	if plan != "free" || deathType != "normal_expiry" || pauseReason != "plan_downgraded_to_free" {
+		t.Fatalf("plan=%s death_type=%s pause_reason=%s", plan, deathType, pauseReason)
+	}
+	// free 账号没有订阅到期时间，也不该再被排进下一轮轮询。
+	if currentExpiry.Valid || nextRetry.Valid {
+		t.Fatalf("current_expiry=%v next_retry=%v", currentExpiry, nextRetry)
+	}
+	// 授权期必须收口，否则账号仍会被当成在授权期内。
+	assertCount(t, db, "SELECT count(*) FROM authorization_epochs WHERE ended_at IS NOT NULL AND terminal_status='dead_normal'", 1)
+	// 降级不是封禁：不能产生封禁告警，也不能记生存天数，否则会污染封禁样本。
+	assertCount(t, db, "SELECT count(*) FROM alert_events", 0)
+	assertCount(t, db, "SELECT count(*) FROM accounts WHERE banned_survival_days IS NOT NULL", 0)
+
+	var payload string
+	if err := db.QueryRow("SELECT payload_json FROM allocation_account_outbox WHERE account_id=? ORDER BY account_version DESC LIMIT 1", id).Scan(&payload); err != nil {
+		t.Fatal(err)
+	}
+	var event accountsync.Event
+	if err := json.Unmarshal([]byte(payload), &event); err != nil {
+		t.Fatal(err)
+	}
+	if event.Status != StateDeadNormal || event.Plan != accountsync.PlanFree {
+		t.Fatalf("event status=%s plan=%s", event.Status, event.Plan)
+	}
+	// 关键：不能拿 auth_expiry（凭据到期）冒充订阅到期发出去，
+	// 否则分配域会以为订阅还有一个月，继续往这个账号里塞顾客。
+	if !event.SubscriptionExpiry.Equal(now) {
+		t.Fatalf("subscription_expiry=%s want=%s (auth_expiry=%s)", event.SubscriptionExpiry, now, authExpiry)
+	}
+}
+
+// 凭据到期的 dead_normal 过去不发事件，只能等每小时换号扫描兜底。现在也要立刻通知分配域。
+func TestNormalExpiryNotifiesAllocation(t *testing.T) {
+	s, db, keyring, client, now := newTestService(t)
+	id := seedAccount(t, db, keyring, "acct-authexpired", now.Add(-time.Hour), now.Add(-48*time.Hour))
+	client.statuses["acct-authexpired"] = chatgpt.StatusResult{
+		ProviderAccountID: "acct-authexpired", RawPlan: "chatgptplusplan", Plan: chatgpt.PlanPlus,
+		AccountState: chatgpt.StateActive, EvidenceCode: "access_claim+accounts_check_2xx", EvidenceLevel: chatgpt.EvidenceLiveVerified,
+	}
+	if _, _, err := s.RefreshNow(context.Background(), id); err != nil {
+		t.Fatal(err)
+	}
+	assertAccountState(t, db, id, StateDeadNormal, CheckOK, true)
+	assertCount(t, db, "SELECT count(*) FROM allocation_account_outbox", 1)
 }

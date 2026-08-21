@@ -7,6 +7,9 @@ import (
 	"time"
 )
 
+// PlanFree 是监控侧判定的免费档。本系统只导入付费账号，因此这个值等同于"订阅已终止"。
+const PlanFree = "free"
+
 const (
 	EventAccountCreated      = "account.created"
 	EventAccountUpdated      = "account.updated"
@@ -59,7 +62,7 @@ func (e Event) Validate() error {
 		return errors.New("unsupported monitor account status")
 	}
 	switch e.Plan {
-	case "free", "plus", "team", "unknown":
+	case PlanFree, "plus", "team", "unknown":
 	default:
 		return errors.New("unsupported monitor account plan")
 	}

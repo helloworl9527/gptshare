@@ -14,6 +14,7 @@ const reason = ref('')
 
 const REASON_LABELS = {
   account_expiring: '账号临期',
+  account_expired: '订阅终止',
   banned: '账号封禁',
   account_retired: '账号下线',
   grace_expired: '宽限期结束',
@@ -23,6 +24,7 @@ const REASON_LABELS = {
 const REASON_BADGES = {
   banned: 'status-revoked',
   account_expiring: 'status-full',
+  account_expired: 'status-expired',
   account_retired: 'status-expired',
 }
 
@@ -137,6 +139,8 @@ onMounted(load)
               全部
             </option><option value="account_expiring">
               账号临期
+            </option><option value="account_expired">
+              订阅终止
             </option><option value="banned">
               账号封禁
             </option><option value="account_retired">

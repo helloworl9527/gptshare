@@ -206,6 +206,18 @@ func (s *Service) applyResult(ctx context.Context, runID string, record accountR
 			if outcome.status.SubscriptionExpiry != nil {
 				newExpiry = formatTime(*outcome.status.SubscriptionExpiry)
 			}
+			// 本系统只导入付费账号，所以观测到 free 只可能是订阅没续上被降级。
+			// 这是"订阅正常终止"而不是封禁：按 normal_expiry 归档，停止轮询，
+			// 并通知分配域把顾客迁走后下线。plan='free' 本身就把降级和凭据到期区分开了。
+			// free 账号没有 subscription_expiry，current_expiry 会随之置空。
+			if newPlan == string(chatgpt.PlanFree) && currentStatus != StateDeadBanned {
+				newStatus = StateDeadNormal
+				deadAt, deathType = formatTime(now), "normal_expiry"
+				pollingPaused, pauseReason = 1, "plan_downgraded_to_free"
+				if err := closeEpoch(tx, record.EpochID, StateDeadNormal, now, nil); err != nil {
+					return false, err
+				}
+			}
 		} else {
 			if level != chatgpt.EvidenceContractVerifiedLivePending {
 				level = chatgpt.EvidenceUnverified
@@ -294,8 +306,18 @@ func (s *Service) applyResult(ctx context.Context, runID string, record accountR
 			return false, err
 		}
 	}
+	enqueued := false
 	if wasSuspected != nowSuspected && newStatus != StateDeadBanned {
 		// 疑似状态翻转要立刻同步给分配域：置位后不再分配新顾客，解除后恢复分配。
+		if _, err := allocationsync.EnqueueAccountTx(ctx, tx, record.ID, accountsync.EventAccountUpdated, now); err != nil {
+			return false, err
+		}
+		enqueued = true
+	}
+	if !enqueued && currentStatus != StateDeadNormal && newStatus == StateDeadNormal {
+		// 订阅终止（凭据到期或被降级成 free）同样要立刻同步：分配域据此把顾客迁走并下线账号。
+		// 过去这条迁移不发事件，只能等每小时换号扫描按 account_expiry 兜底，
+		// 而降级账号的 account_expiry 还停在旧的付费到期日，于是顾客会被晾在一个没有会员的账号上。
 		if _, err := allocationsync.EnqueueAccountTx(ctx, tx, record.ID, accountsync.EventAccountUpdated, now); err != nil {
 			return false, err
 		}

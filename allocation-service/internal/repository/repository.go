@@ -2114,6 +2114,18 @@ func archiveRetiredAccount(ctx context.Context, tx *sql.Tx, nowFunc func() time.
 	return true, nil
 }
 
+// ReplacementReasonExpired 是"订阅已经终止"的换号原因：账号正常到期或被降级成 free。
+// 与 account_expiring（还能用，只是快到期了，提前迁走）区分开。
+const ReplacementReasonExpired = "account_expired"
+
+// replacementKeepsGrace 决定旧分配要不要留 24 小时宽限期。
+// 宽限期的意义是"新旧账号都能用"，所以只在旧账号还提供着会员服务时才成立：
+// 封禁和订阅终止的账号已经给不了服务，留着只会让顾客继续用一个没有会员的号，
+// 也会把账号卡在"仍有活跃分配"的状态而迟迟无法下线。
+func replacementKeepsGrace(reason string) bool {
+	return reason != "banned" && reason != ReplacementReasonExpired
+}
+
 func replaceOneAllocation(ctx context.Context, tx *sql.Tx, now time.Time, item replacementDueAllocation) (ReplacementResult, error) {
 	newAccountID, err := selectCandidateAccountExcluding(ctx, tx, now, item.cardExpiresAt, true, item.oldAccountID)
 	if err != nil {
@@ -2147,7 +2159,7 @@ func replaceOneAllocation(ctx context.Context, tx *sql.Tx, now time.Time, item r
 		NewAccountID:    newAccountID,
 		Reason:          item.reason,
 	}
-	if item.reason == "banned" {
+	if !replacementKeepsGrace(item.reason) {
 		if err := releaseAccountCapacity(ctx, tx, item.oldAccountID, 1, now); err != nil {
 			return ReplacementResult{}, err
 		}

@@ -55,6 +55,12 @@ func EnqueueAccountTx(ctx context.Context, tx *sql.Tx, accountID int64, eventTyp
 		return accountsync.Event{}, err
 	}
 	event.SubscriptionExpiry = parsedExpiry.UTC()
+	if event.Plan == accountsync.PlanFree {
+		// free 账号没有订阅到期时间，上面的 COALESCE 会退到 auth_expiry（凭据到期），
+		// 分配域会据此以为订阅还有效、继续往里分配顾客。降级即订阅当场终止，
+		// 按观测时刻发出：分配域的到期判定、换号扫描和自动下线都会立刻生效。
+		event.SubscriptionExpiry = event.OccurredAt
+	}
 	if err := event.Validate(); err != nil {
 		return accountsync.Event{}, err
 	}
