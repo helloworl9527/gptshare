@@ -17,10 +17,13 @@ import (
 )
 
 func (s *Service) loadDueAccounts(ctx context.Context, onlyID int64) ([]accountRecord, error) {
+	// 终态账号（已封禁 / 订阅已终止）一律不再监控。
+	// 关闭 epoch 本来就让它们选不中，这里再按 status 显式挡一道：
+	// 少写一次 closeEpoch 就让死号继续被轮询的代价太大，不值得只靠单一条件。
 	query := `SELECT a.id,a.provider_account_id,a.token_type,a.enc_credentials,a.auth_expiry,a.status,a.import_time,
 		a.last_check_state,a.polling_paused,e.id,a.credential_generation
 		FROM accounts a JOIN authorization_epochs e ON e.account_id=a.id AND e.ended_at IS NULL
-		WHERE a.deleted_at IS NULL`
+		WHERE a.deleted_at IS NULL AND a.status='alive'`
 	args := []any{}
 	if onlyID != 0 {
 		query += " AND a.id=?"

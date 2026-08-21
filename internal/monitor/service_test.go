@@ -1413,3 +1413,38 @@ func TestNormalExpiryNotifiesAllocation(t *testing.T) {
 	assertAccountState(t, db, id, StateDeadNormal, CheckOK, true)
 	assertCount(t, db, "SELECT count(*) FROM allocation_account_outbox", 1)
 }
+
+// 已封禁 / 订阅已终止的账号一律不再监控。
+// 这里故意把 epoch 留成未关闭状态，模拟"某条终态分支漏写了 closeEpoch"，
+// 验证 status 这道显式条件能独立挡住它们。
+func TestTerminalAccountsAreExcludedEvenWithOpenEpoch(t *testing.T) {
+	s, db, keyring, _, now := newTestService(t)
+	alive := seedAccount(t, db, keyring, "acct-alive", now.Add(24*time.Hour), now)
+	for _, terminal := range []struct {
+		pid    string
+		status string
+	}{{"acct-banned", StateDeadBanned}, {"acct-expired", StateDeadNormal}} {
+		id := seedAccount(t, db, keyring, terminal.pid, now.Add(24*time.Hour), now)
+		if _, err := db.Exec("UPDATE accounts SET status=?,polling_paused=0,next_retry_at=NULL WHERE id=?", terminal.status, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run, err := s.RunScheduled(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 本轮只应该轮到那个正常账号。
+	if run.AccountsTotal != 1 || run.AccountsOK != 1 || run.AccountsFailed != 0 {
+		t.Fatalf("run=%+v want only the alive account polled", run)
+	}
+	assertAccountState(t, db, alive, StateAlive, CheckOK, false)
+	// 终态账号的状态和检查结果都不能被这轮扫描碰过。
+	var untouched int
+	if err := db.QueryRow(`SELECT count(*) FROM accounts
+		WHERE status IN ('dead_banned','dead_normal') AND last_check_state='ok' AND last_alive_at=import_time`).Scan(&untouched); err != nil {
+		t.Fatal(err)
+	}
+	if untouched != 2 {
+		t.Fatalf("terminal accounts were touched by the scan: untouched=%d", untouched)
+	}
+}
