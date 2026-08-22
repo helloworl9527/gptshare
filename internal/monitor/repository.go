@@ -253,7 +253,7 @@ func (s *Service) applyResult(ctx context.Context, runID string, record accountR
 		} else if level == chatgpt.EvidenceUnverified || outcome.typed.Kind == chatgpt.ErrorContractChanged {
 			newCheck, pollingPaused = CheckContractChanged, 1
 			pauseReason, pendingSignature, pendingDetected = "contract_changed", signature, formatTime(now)
-		} else if isAuthorizationFailure(outcome.typed) {
+		} else if isCredentialFailure(outcome.typed) {
 			newCheck, pollingPaused = CheckReauthorizationRequired, 1
 			pauseReason = "reauthorization_required"
 			nextRetry = nil
@@ -388,14 +388,24 @@ func (s *Service) evaluateDenialStreak(ctx context.Context, tx *sql.Tx, in denia
 }
 
 // isAccountDenial 判断这次失败是否属于"账号被拒"。
-// 明确排除 ErrorAuthorizationRequired：那代表凭据要重新授权，不是账号被封。
+// 分界线是"上游拒的是账号，还是我们手里的凭据"：
+//   - ErrorAccountDisabled：上游明说账号本身有问题，算；
+//   - 403：通过了身份认证但被拒绝，指向账号权限，算；
+//   - 401：没通过身份认证，只说明这个 token 不再被接受，不算；
+//   - ErrorAuthorizationRequired、ErrorCredentialRevoked：凭据被吊销或失效，
+//     账号很可能完好无损（在别处登录、改密码、token 轮换都会导致），不算。
+//
+// 最后两条是线上教训：token_revoked 曾计入连续拒绝，
+// 把三个只是需要重新授权的正常账号误标成了疑似封禁。
 func isAccountDenial(typed *chatgpt.TypedError) bool {
 	if typed == nil {
 		return false
 	}
 	switch typed.Kind {
-	case chatgpt.ErrorAccountDisabled, chatgpt.ErrorCredentialRevoked, chatgpt.ErrorPermissionDenied:
+	case chatgpt.ErrorAccountDisabled:
 		return true
+	case chatgpt.ErrorPermissionDenied:
+		return typed.EvidenceCode == "http_403"
 	default:
 		return false
 	}

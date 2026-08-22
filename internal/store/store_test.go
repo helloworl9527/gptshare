@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -10,6 +11,8 @@ import (
 	"testing"
 	"testing/fstest"
 	"time"
+
+	"allocation-service/accountsync"
 
 	_ "modernc.org/sqlite"
 )
@@ -483,5 +486,139 @@ func assertMode(t *testing.T, name string, want fs.FileMode) {
 	}
 	if got := info.Mode().Perm(); got != want {
 		t.Fatalf("%s mode=%04o, want %04o", name, got, want)
+	}
+}
+
+// TestCredentialFalsePositiveMigrationClearsSuspicion 覆盖迁移 0010。
+// 线上有三个账号因为凭据被吊销（token_revoked）被误标成疑似封禁，其中两个还在
+// 无限重试。迁移要做三件事：解除误标、把账号停在"需要重新授权"、
+// 并给分配域补一条事件让它把 suspected 撤掉。
+func TestCredentialFalsePositiveMigrationClearsSuspicion(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(privateTempDir(t), "monitor.db")
+	seeded, err := Open(ctx, dbPath, firstNMigrations(t, 9))
+	if err != nil {
+		t.Fatalf("open schema 9: %v", err)
+	}
+	if _, err := seeded.db.Exec(`INSERT INTO accounts
+		(id,provider_account_id,label,email,token_type,enc_credentials,credential_key_id,plan,current_expiry,auth_expiry,
+		 status,import_time,last_check_state,last_check_error_code,next_retry_at,polling_paused,updated_at,sync_version,
+		 denial_streak,denial_streak_started_at,suspected_banned_at)
+		VALUES (1,'acct-revoked','acct-revoked','revoked@example.com','access',x'01','key','plus','2026-09-19T00:00:00Z','2026-09-19T00:00:00Z',
+		 'alive','2026-08-01T00:00:00Z','error','token_revoked','2026-08-22T06:00:00Z',0,'2026-08-22T05:00:00Z',2,
+		 91,'2026-08-21T06:00:00Z','2026-08-21T06:30:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	// 分配域还不认识的账号不能凭空建出来：它没有 outbox 历史，所以只清标记、不发事件。
+	if _, err := seeded.db.Exec(`INSERT INTO accounts
+		(id,provider_account_id,label,token_type,enc_credentials,credential_key_id,plan,auth_expiry,
+		 status,import_time,last_check_state,last_check_error_code,polling_paused,updated_at,sync_version,
+		 denial_streak,denial_streak_started_at,suspected_banned_at)
+		VALUES (2,'acct-unknown','acct-unknown','access',x'01','key','plus','2026-09-19T00:00:00Z',
+		 'alive','2026-08-01T00:00:00Z','reauthorization_required','oauth_refresh_token_invalid',1,'2026-08-22T05:00:00Z',1,
+		 118,'2026-08-20T06:00:00Z','2026-08-20T07:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	// 正常账号：迁移一个字段都不该动。
+	if _, err := seeded.db.Exec(`INSERT INTO accounts
+		(id,provider_account_id,label,token_type,enc_credentials,credential_key_id,plan,auth_expiry,
+		 status,import_time,last_check_state,next_retry_at,polling_paused,updated_at,sync_version)
+		VALUES (3,'acct-healthy','acct-healthy','access',x'01','key','plus','2026-09-19T00:00:00Z',
+		 'alive','2026-08-01T00:00:00Z','ok','2026-08-22T06:00:00Z',0,'2026-08-22T05:00:00Z',1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := seeded.db.Exec(`INSERT INTO allocation_account_outbox
+		(event_id,account_id,account_version,event_type,payload_json,delivery_status,created_at,updated_at)
+		VALUES ('seed-1',1,2,'account.updated','{}','delivered','2026-08-21T00:00:00Z','2026-08-21T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := seeded.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	upgraded, err := Open(ctx, dbPath, repositoryMigrations(t))
+	if err != nil {
+		t.Fatalf("apply migration 10: %v", err)
+	}
+	defer upgraded.Close()
+
+	var suspected int
+	if err := upgraded.db.QueryRow("SELECT count(*) FROM accounts WHERE suspected_banned_at IS NOT NULL OR denial_streak>0").Scan(&suspected); err != nil {
+		t.Fatal(err)
+	}
+	if suspected != 0 {
+		t.Fatalf("accounts still carrying denial evidence = %d, want 0", suspected)
+	}
+
+	var state, code, pauseReason string
+	var paused int
+	var nextRetry sql.NullString
+	if err := upgraded.db.QueryRow(`SELECT last_check_state,last_check_error_code,polling_paused,pause_reason,next_retry_at
+		FROM accounts WHERE id=1`).Scan(&state, &code, &paused, &pauseReason, &nextRetry); err != nil {
+		t.Fatal(err)
+	}
+	if state != "reauthorization_required" || code != "oauth_refresh_token_invalid" || paused != 1 || pauseReason != "reauthorization_required" {
+		t.Fatalf("account 1 = %s/%s/%d/%s, want reauthorization_required/oauth_refresh_token_invalid/1/reauthorization_required", state, code, paused, pauseReason)
+	}
+	if nextRetry.Valid {
+		t.Fatalf("account 1 next_retry_at=%q, want NULL: 凭据永远刷不回来，不该继续空转", nextRetry.String)
+	}
+
+	var healthyState string
+	var healthyPaused int
+	if err := upgraded.db.QueryRow("SELECT last_check_state,polling_paused FROM accounts WHERE id=3").Scan(&healthyState, &healthyPaused); err != nil {
+		t.Fatal(err)
+	}
+	if healthyState != "ok" || healthyPaused != 0 {
+		t.Fatalf("healthy account changed to %s/paused=%d", healthyState, healthyPaused)
+	}
+
+	rows, err := upgraded.db.Query("SELECT event_id,account_id,account_version,payload_json FROM allocation_account_outbox WHERE delivery_status='pending' ORDER BY account_id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var enqueued []int64
+	for rows.Next() {
+		var eventID, payload string
+		var accountID, version int64
+		if err := rows.Scan(&eventID, &accountID, &version, &payload); err != nil {
+			t.Fatal(err)
+		}
+		var event accountsync.Event
+		if err := json.Unmarshal([]byte(payload), &event); err != nil {
+			t.Fatalf("payload for account %d is not a valid event: %v", accountID, err)
+		}
+		if err := event.Validate(); err != nil {
+			t.Fatalf("payload for account %d rejected by contract: %v", accountID, err)
+		}
+		// outbox 主键和 payload 里的 event_id 必须一致，否则分配域的幂等键失准。
+		if event.EventID != eventID {
+			t.Fatalf("event_id mismatch: column=%q payload=%q", eventID, event.EventID)
+		}
+		if event.Version != version {
+			t.Fatalf("version mismatch: column=%d payload=%d", version, event.Version)
+		}
+		if event.Suspected {
+			t.Fatal("补发的事件仍带 suspected，分配域不会解除疑似状态")
+		}
+		if event.Status != "alive" || event.Plan != "plus" {
+			t.Fatalf("event status/plan = %s/%s, want alive/plus", event.Status, event.Plan)
+		}
+		enqueued = append(enqueued, accountID)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if len(enqueued) != 1 || enqueued[0] != 1 {
+		t.Fatalf("enqueued accounts = %v, want [1]: 分配域没见过的账号不能补事件", enqueued)
+	}
+
+	var version int64
+	if err := upgraded.db.QueryRow("SELECT sync_version FROM accounts WHERE id=1").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != 3 {
+		t.Fatalf("sync_version=%d want 3: 版本没递增会被分配域当成 stale 丢掉", version)
 	}
 }

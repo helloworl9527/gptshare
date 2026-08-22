@@ -484,6 +484,15 @@ func isAuthorizationFailure(typed *chatgpt.TypedError) bool {
 	return typed != nil && typed.Kind == chatgpt.ErrorAuthorizationRequired
 }
 
+// isCredentialFailure 判断这次失败是不是"存的凭据不能用了"。
+// token 刷新链路上的 credential_revoked 早就被 normalizeOAuthRefreshFailure
+// 归一成 authorization_required 了；账号查询链路上的同一个上游码却没有，
+// 于是同一件事在两条链路上一个是"需要重新授权"、一个被当成账号被拒并无限重试。
+// 这里把两条链路对齐：都停轮询、都等人工重新授权。
+func isCredentialFailure(typed *chatgpt.TypedError) bool {
+	return isAuthorizationFailure(typed) || (typed != nil && typed.Kind == chatgpt.ErrorCredentialRevoked)
+}
+
 func normalizeOAuthRefreshFailure(outcome pollResult) pollResult {
 	if outcome.typed == nil || outcome.typed.Retryable || isAuthorizationFailure(outcome.typed) {
 		return outcome
