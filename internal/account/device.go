@@ -364,7 +364,7 @@ func (s *Service) reauthorizeDeviceTx(ctx context.Context, tx *sql.Tx, accountID
 	if _, err := tx.ExecContext(ctx, `UPDATE accounts SET email=CASE WHEN (email IS NULL OR email='') AND ? IS NOT NULL THEN ? ELSE email END,
 		label=?,token_type=?,enc_credentials=?,credential_key_id=?,plan=?,raw_plan=?,current_expiry=?,auth_expiry=?,
 		status='alive',last_alive_at=?,dead_at=NULL,death_type=NULL,banned_survival_days=NULL,import_time=?,last_check_state='ok',last_check_error_code=NULL,next_retry_at=NULL,
-		polling_paused=0,pause_reason=NULL,pending_evidence_signature=NULL,pending_detected_at=NULL,denial_streak=0,denial_streak_started_at=NULL,suspected_banned_at=NULL,credential_generation=credential_generation+1,updated_at=? WHERE id=?`,
+		polling_paused=0,pause_reason=NULL,pending_evidence_signature=NULL,pending_detected_at=NULL,credential_generation=credential_generation+1,updated_at=? WHERE id=?`,
 		nullable(prepared.status.Email), nullable(prepared.status.Email), label, string(prepared.kind), envelope, s.cipher.ActiveKeyID(), string(prepared.status.Plan), prepared.status.RawPlan, expiry.Format(time.RFC3339Nano), expiry.Format(time.RFC3339Nano), stamp, stamp, stamp, accountID); err != nil {
 		return internalError("account_reauthorize")
 	}

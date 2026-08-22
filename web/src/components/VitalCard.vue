@@ -9,12 +9,10 @@ const emit = defineEmits(['select'])
 const visualState = computed(() => {
   if (props.account.status === 'dead_banned') return 'banned'
   if (props.account.status === 'dead_normal') return 'retired'
-  if (props.account.suspected_banned_at) return 'suspect'
   return props.account.near_expiry ? 'near' : 'alive'
 })
-const stateLabel = computed(() => ({ alive: '存活', near: '临期', suspect: '疑似封号', banned: '封号', retired: '正常退役' })[visualState.value])
-const stateCode = computed(() => ({ alive: 'ALIVE', near: 'EXPIRING', suspect: 'SUSPECT', banned: 'BANNED', retired: 'RETIRED' })[visualState.value])
-const denialStreak = computed(() => Number(props.account.denial_streak) || 0)
+const stateLabel = computed(() => ({ alive: '存活', near: '临期', banned: '封号', retired: '正常退役' })[visualState.value])
+const stateCode = computed(() => ({ alive: 'ALIVE', near: 'EXPIRING', banned: 'BANNED', retired: 'RETIRED' })[visualState.value])
 const checkAbnormal = computed(() => ['error', 'verification_required', 'contract_changed', 'reauthorization_required'].includes(props.account.last_check_state))
 const checkIssue = computed(() => checkAbnormal.value ? monitorCheckIssue(props.account) : null)
 
@@ -46,9 +44,6 @@ function formatDate(value) {
       <span>SIGNAL</span><strong translate="no">{{ stateCode }}</strong>
       <span v-if="checkAbnormal" class="check-warning" :title="checkIssue?.title || '检查异常'">{{ checkIssue?.badge || '检查异常' }}</span>
     </div>
-    <p v-if="visualState === 'suspect'" class="suspect-note">
-      连续 {{ denialStreak }} 次账号级拒绝，已退出分配池等待人工确认；存量顾客未变动。
-    </p>
     <dl class="vital-stats">
       <div><dt>订阅类型</dt><dd>{{ account.plan?.toUpperCase() || 'UNKNOWN' }}</dd></div>
       <div><dt>订阅到期</dt><dd>{{ formatDate(account.current_expiry || account.auth_expiry) }}</dd></div>

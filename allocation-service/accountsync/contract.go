@@ -28,9 +28,6 @@ type Event struct {
 	Plan               string    `json:"plan"`
 	SubscriptionExpiry time.Time `json:"subscription_expiry"`
 	Status             string    `json:"status"`
-	// Suspected 表示监控侧已连续多次观察到账号级拒绝，疑似被封禁但尚未确认。
-	// 分配域据此停止把新顾客分配给它，存量顾客不动。
-	Suspected bool `json:"suspected,omitempty"`
 }
 
 type Result struct {

@@ -22,7 +22,6 @@ const dailyRate = computed(() => Number.isFinite(Number(inventory.value.daily_re
 const blocked = computed(() => Number(inventory.value.blocked_capacity ?? 0))
 const blockedReasonLabels = {
   full: '状态漂移（已纠偏中）',
-  suspected: '疑似封禁待确认',
   monitor_banned: '监控判定封禁',
   account_expired: '账号订阅已过期',
   expired: '账号订阅已过期',

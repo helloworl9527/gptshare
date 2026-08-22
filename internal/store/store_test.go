@@ -489,10 +489,10 @@ func assertMode(t *testing.T, name string, want fs.FileMode) {
 	}
 }
 
-// TestCredentialFalsePositiveMigrationClearsSuspicion 覆盖迁移 0010。
+// TestCredentialFalsePositiveMigrationClearsSuspicion 覆盖迁移 0010 与 0011。
 // 线上有三个账号因为凭据被吊销（token_revoked）被误标成疑似封禁，其中两个还在
-// 无限重试。迁移要做三件事：解除误标、把账号停在"需要重新授权"、
-// 并给分配域补一条事件让它把 suspected 撤掉。
+// 无限重试。0010 解除误标、把账号停在"需要重新授权"、并给分配域补事件撤掉 suspected；
+// 0011 随后把整套连续拒绝计数的列删掉。两条迁移要能在同一个库上依次跑通。
 func TestCredentialFalsePositiveMigrationClearsSuspicion(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(privateTempDir(t), "monitor.db")
@@ -538,16 +538,26 @@ func TestCredentialFalsePositiveMigrationClearsSuspicion(t *testing.T) {
 
 	upgraded, err := Open(ctx, dbPath, repositoryMigrations(t))
 	if err != nil {
-		t.Fatalf("apply migration 10: %v", err)
+		t.Fatalf("apply migrations 10 and 11: %v", err)
 	}
 	defer upgraded.Close()
 
-	var suspected int
-	if err := upgraded.db.QueryRow("SELECT count(*) FROM accounts WHERE suspected_banned_at IS NOT NULL OR denial_streak>0").Scan(&suspected); err != nil {
+	// 0011 之后连续拒绝计数的三列必须彻底消失，索引也不能留下。
+	for _, column := range []string{"denial_streak", "denial_streak_started_at", "suspected_banned_at"} {
+		var present int
+		if err := upgraded.db.QueryRow("SELECT count(*) FROM pragma_table_info('accounts') WHERE name=?", column).Scan(&present); err != nil {
+			t.Fatal(err)
+		}
+		if present != 0 {
+			t.Fatalf("column %s still present after migration 11", column)
+		}
+	}
+	var index int
+	if err := upgraded.db.QueryRow("SELECT count(*) FROM sqlite_master WHERE type='index' AND name='accounts_suspected_idx'").Scan(&index); err != nil {
 		t.Fatal(err)
 	}
-	if suspected != 0 {
-		t.Fatalf("accounts still carrying denial evidence = %d, want 0", suspected)
+	if index != 0 {
+		t.Fatal("accounts_suspected_idx still present after migration 11")
 	}
 
 	var state, code, pauseReason string
@@ -598,9 +608,6 @@ func TestCredentialFalsePositiveMigrationClearsSuspicion(t *testing.T) {
 		}
 		if event.Version != version {
 			t.Fatalf("version mismatch: column=%d payload=%d", version, event.Version)
-		}
-		if event.Suspected {
-			t.Fatal("补发的事件仍带 suspected，分配域不会解除疑似状态")
 		}
 		if event.Status != "alive" || event.Plan != "plus" {
 			t.Fatalf("event status/plan = %s/%s, want alive/plus", event.Status, event.Plan)

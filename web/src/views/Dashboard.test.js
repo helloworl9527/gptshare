@@ -60,7 +60,7 @@ describe('Unified dashboard', () => {
         dashboard: {
           capacity: 28, available_capacity: 0, blocked_capacity: 6, warning_level: 'exhausted', days_to_exhaust: 0,
           blocked_breakdown: [
-            { reason: 'suspected', accounts: 1, free_slots: 4 },
+            { reason: 'pending_credentials', accounts: 1, free_slots: 4 },
             { reason: 'full', accounts: 1, free_slots: 2 },
           ],
         },
@@ -69,7 +69,7 @@ describe('Unified dashboard', () => {
       .mockResolvedValueOnce(response({ cards }))
     const wrapper = await render(fetchMock)
     expect(wrapper.text()).toContain('另有 6 位受阻')
-    expect(wrapper.text()).toContain('疑似封禁待确认')
+    expect(wrapper.text()).toContain('凭据未补全')
     expect(wrapper.text()).toContain('状态漂移（已纠偏中）')
     expect(wrapper.findAll('.blocked-breakdown li')).toHaveLength(2)
   })

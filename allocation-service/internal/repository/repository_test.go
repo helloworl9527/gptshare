@@ -2066,7 +2066,7 @@ func TestReconcileRepairsAllocationCountDrift(t *testing.T) {
 	}
 }
 
-func TestReconcileLeavesSuspectedAndArchivedAccountsAlone(t *testing.T) {
+func TestReconcileLeavesArchivedAccountsAlone(t *testing.T) {
 	db := openStore(t)
 	defer db.Close()
 	repo := New(db.DB(), testCredentialKeyring(t))
@@ -2074,17 +2074,6 @@ func TestReconcileLeavesSuspectedAndArchivedAccountsAlone(t *testing.T) {
 	start := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
 	repo.SetNow(func() time.Time { return start })
 
-	suspected, err := repo.CreateAccount(ctx, AccountSeed{
-		DisplayUsername: "suspect-hold", DisplayPassword: "secret-password", DisplayTOTPSecret: "secret-totp",
-		AccountExpiry: start.Add(90 * 24 * time.Hour), MaxConcurrentUsers: 5, MonitorStatus: "alive",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	// 疑似封禁的账号有空余坑位，但必须留在分配池外，等人工确认。
-	if _, err := db.DB().Exec("UPDATE chatgpt_accounts SET status='suspected',current_allocations=1 WHERE id=?", suspected); err != nil {
-		t.Fatal(err)
-	}
 	archived, err := repo.CreateAccount(ctx, AccountSeed{
 		DisplayUsername: "archived-hold", DisplayPassword: "secret-password", DisplayTOTPSecret: "secret-totp",
 		AccountExpiry: start.Add(90 * 24 * time.Hour), MaxConcurrentUsers: 5, MonitorStatus: "alive",
@@ -2103,15 +2092,13 @@ func TestReconcileLeavesSuspectedAndArchivedAccountsAlone(t *testing.T) {
 	if run.AvailabilityRestored != 0 || run.MarkedFull != 0 {
 		t.Fatalf("restored=%d marked_full=%d want 0/0", run.AvailabilityRestored, run.MarkedFull)
 	}
-	var suspectedStatus, archivedStatus string
-	if err := db.DB().QueryRow("SELECT status FROM chatgpt_accounts WHERE id=?", suspected).Scan(&suspectedStatus); err != nil {
-		t.Fatal(err)
-	}
+	var archivedStatus string
 	if err := db.DB().QueryRow("SELECT status FROM chatgpt_accounts WHERE id=?", archived).Scan(&archivedStatus); err != nil {
 		t.Fatal(err)
 	}
-	if suspectedStatus != "suspected" || archivedStatus != "full" {
-		t.Fatalf("suspected=%s archived=%s want suspected/full", suspectedStatus, archivedStatus)
+	// 已归档账号不再参与纠偏：状态就该停在下线那一刻的样子。
+	if archivedStatus != "full" {
+		t.Fatalf("archived=%s want full", archivedStatus)
 	}
 }
 
@@ -2123,7 +2110,7 @@ func TestInventoryAvailableCapacityMatchesRedeemableCapacity(t *testing.T) {
 	now := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
 	repo.SetNow(func() time.Time { return now })
 
-	// 三种"看得见但分不出去"的容量：状态漂移成 full、疑似封禁、监控判定封禁。
+	// 三种"看得见但分不出去"的容量：状态漂移成 full、凭据未补全、监控判定封禁。
 	seeds := []struct {
 		name       string
 		status     string
@@ -2132,7 +2119,7 @@ func TestInventoryAvailableCapacityMatchesRedeemableCapacity(t *testing.T) {
 		allocation int
 	}{
 		{name: "stale-full", status: "full", monitor: "alive", capacity: 3, allocation: 1},
-		{name: "suspect", status: "suspected", monitor: "alive", capacity: 4, allocation: 0},
+		{name: "incomplete", status: "pending_credentials", monitor: "alive", capacity: 4, allocation: 0},
 		{name: "banned", status: "available", monitor: "dead_banned", capacity: 5, allocation: 0},
 		{name: "healthy", status: "available", monitor: "alive", capacity: 2, allocation: 0},
 	}
@@ -2164,7 +2151,7 @@ func TestInventoryAvailableCapacityMatchesRedeemableCapacity(t *testing.T) {
 	for _, bucket := range metrics.BlockedBreakdown {
 		reasons[bucket.Status] = bucket.FreeSlots
 	}
-	if reasons["full"] != 2 || reasons["suspected"] != 4 || reasons["monitor_banned"] != 5 {
+	if reasons["full"] != 2 || reasons["pending_credentials"] != 4 || reasons["monitor_banned"] != 5 {
 		t.Fatalf("blocked breakdown mismatch: %+v", metrics.BlockedBreakdown)
 	}
 

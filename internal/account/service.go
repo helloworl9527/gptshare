@@ -88,8 +88,6 @@ type Account struct {
 	NextRetryAt        *time.Time        `json:"next_retry_at,omitempty"`
 	NearExpiry         bool              `json:"near_expiry"`
 	PollingPaused      bool              `json:"polling_paused"`
-	DenialStreak       int               `json:"denial_streak"`
-	SuspectedBannedAt  *time.Time        `json:"suspected_banned_at,omitempty"`
 	LastAuthorizedAt   time.Time         `json:"last_authorized_at"`
 	Credential         CredentialSummary `json:"credential"`
 	AllocationSync     SyncStatus        `json:"allocation_sync"`
@@ -245,7 +243,7 @@ func (s *Service) ReauthorizeByToken(ctx context.Context, accountID int64, input
 		email=CASE WHEN (email IS NULL OR email='') AND ? IS NOT NULL THEN ? ELSE email END,
 		label=?,token_type=?,enc_credentials=?,credential_key_id=?,plan=?,raw_plan=?,current_expiry=?,auth_expiry=?,
 		status='alive',last_alive_at=?,dead_at=NULL,death_type=NULL,banned_survival_days=NULL,import_time=?,last_check_state='ok',last_check_error_code=NULL,next_retry_at=NULL,
-		polling_paused=0,pause_reason=NULL,pending_evidence_signature=NULL,pending_detected_at=NULL,denial_streak=0,denial_streak_started_at=NULL,suspected_banned_at=NULL,credential_generation=credential_generation+1,updated_at=?
+		polling_paused=0,pause_reason=NULL,pending_evidence_signature=NULL,pending_detected_at=NULL,credential_generation=credential_generation+1,updated_at=?
 		WHERE id=?`, nullable(prepared.status.Email), nullable(prepared.status.Email), label, string(prepared.kind), envelope, s.cipher.ActiveKeyID(), string(prepared.status.Plan), prepared.status.RawPlan,
 		expiry.Format(time.RFC3339Nano), expiry.Format(time.RFC3339Nano), stamp, stamp, stamp, accountID); err != nil {
 		return Account{}, internalError("account_reauthorize")
@@ -318,7 +316,7 @@ func (s *Service) Get(ctx context.Context, accountID int64) (Account, error) {
 
 const accountSelect = `SELECT a.id,a.provider_account_id,a.label,a.plan,a.current_expiry,a.auth_expiry,a.status,
 	a.last_alive_at,a.dead_at,a.death_type,a.banned_survival_days,a.last_check_state,a.last_check_error_code,a.next_retry_at,a.polling_paused,
-	e.started_at,a.token_type,length(a.enc_credentials)>0,a.email,a.denial_streak,a.suspected_banned_at,
+	e.started_at,a.token_type,length(a.enc_credentials)>0,a.email,
 	COALESCE(o.delivery_status,'pending'),COALESCE(o.event_id,''),COALESCE(o.account_version,0),COALESCE(o.last_error_code,'')
 	FROM accounts a JOIN authorization_epochs e ON e.id=(SELECT e2.id FROM authorization_epochs e2 WHERE e2.account_id=a.id ORDER BY e2.started_at DESC,e2.id DESC LIMIT 1)
 	LEFT JOIN allocation_account_outbox o ON o.event_id=(SELECT o2.event_id FROM allocation_account_outbox o2 WHERE o2.account_id=a.id ORDER BY o2.account_version DESC LIMIT 1)`
@@ -327,13 +325,13 @@ type scanner interface{ Scan(...any) error }
 
 func scanAccount(row scanner, now time.Time, nearExpiryDays int) (Account, error) {
 	var account Account
-	var currentExpiry, lastAlive, deadAt, deathType, lastError, nextRetry, email, suspectedAt sql.NullString
+	var currentExpiry, lastAlive, deadAt, deathType, lastError, nextRetry, email sql.NullString
 	var survival sql.NullFloat64
 	var authExpiry, authorizedAt, credentialType string
 	var configured bool
 	if err := row.Scan(&account.ID, &account.ProviderAccountID, &account.Label, &account.Plan, &currentExpiry, &authExpiry, &account.Status,
 		&lastAlive, &deadAt, &deathType, &survival, &account.LastCheckState, &lastError, &nextRetry, &account.PollingPaused,
-		&authorizedAt, &credentialType, &configured, &email, &account.DenialStreak, &suspectedAt,
+		&authorizedAt, &credentialType, &configured, &email,
 		&account.AllocationSync.Status, &account.AllocationSync.EventID, &account.AllocationSync.Version, &account.AllocationSync.ErrorCode); err != nil {
 		return Account{}, err
 	}
@@ -365,13 +363,6 @@ func scanAccount(row scanner, now time.Time, nearExpiryDays int) (Account, error
 			return Account{}, err
 		}
 		account.DeadAt = &parsed
-	}
-	if suspectedAt.Valid {
-		parsed, err := time.Parse(time.RFC3339Nano, suspectedAt.String)
-		if err != nil {
-			return Account{}, err
-		}
-		account.SuspectedBannedAt = &parsed
 	}
 	if nextRetry.Valid {
 		parsed, err := time.Parse(time.RFC3339Nano, nextRetry.String)

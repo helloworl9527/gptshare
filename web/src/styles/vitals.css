@@ -130,8 +130,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .vital-card:hover, .vital-card:focus-within { border-color: color-mix(in srgb, var(--state) 45%, var(--line)); transform: translateY(-2px); box-shadow: 0 12px 34px rgba(14,27,23,.07); }
 .card-action { position: absolute; inset: 0; z-index: 2; width: 100%; height: 100%; border: 0; background: transparent; }
 .card-action:focus-visible { outline: 3px solid rgba(14, 116, 144, .42); outline-offset: 3px; }
-.state-near { --state: var(--amber); }.state-banned { --state: var(--red); }.state-retired { --state: var(--retired); }.state-suspect { --state: #b4530a; }
-.suspect-note { margin: 6px 0 0; color: #8a4208; font: 600 11px/1.5 var(--mono); }
+.state-near { --state: var(--amber); }.state-banned { --state: var(--red); }.state-retired { --state: var(--retired); }
 .vital-card header { display: flex; justify-content: space-between; align-items: flex-start; gap: 14px; }
 .account-id { overflow: hidden; margin: 0; color: var(--ink); font: 650 14px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
 .provider-id { overflow: hidden; max-width: 210px; margin: 6px 0 0; color: #89948e; font: 10px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
@@ -234,7 +233,7 @@ tbody tr { border-left: 4px solid var(--green); }
 .muted-value { color: var(--muted); }
 .reveal-code { color: var(--ink); font-weight: 800; }
 .status-badge { display: inline-flex; max-width: 100%; border-radius: 3px; padding: 4px 8px; background: #e7f7f2; color: var(--green-dark); font: 700 10px var(--mono); text-transform: uppercase; overflow-wrap: anywhere; }
-.status-full, .status-unknown_monitor, .status-pending_credentials { background: #fff8e7; color: #735000; }.status-suspected { background: #fff0e2; color: #8a4208; }.status-revoked, .status-dead_banned { background: #fff0f1; color: #9d2730; }.status-expired, .status-disabled { background: #edf1ef; color: #56645d; }
+.status-full, .status-unknown_monitor, .status-pending_credentials { background: #fff8e7; color: #735000; }.status-revoked, .status-dead_banned { background: #fff0f1; color: #9d2730; }.status-expired, .status-disabled { background: #edf1ef; color: #56645d; }
 .row-actions, .action-row { display: flex; flex-wrap: wrap; gap: 8px; }
 .row-actions button, .nav-action { min-height: 36px; border: 1px solid #cbd6d1; border-radius: 3px; background: #fff; color: var(--ink); padding: 0 12px; font-size: 12px; }
 .row-actions button:hover:not(:disabled), .nav-action:hover { border-color: var(--green); color: var(--green-dark); }

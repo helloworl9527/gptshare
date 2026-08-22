@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
-	"strings"
 	"time"
 
 	"allocation-service/accountsync"
@@ -152,12 +151,10 @@ func (s *Service) applyResult(ctx context.Context, runID string, record accountR
 	var currentSurvival sql.NullFloat64
 	var paused bool
 	var currentGeneration int64
-	var currentStreak int
-	var currentStreakStarted, currentSuspectedAt sql.NullString
 	if err := tx.QueryRowContext(ctx, `SELECT status,plan,raw_plan,current_expiry,last_check_state,polling_paused,email,label,credential_generation,
-		dead_at,death_type,banned_survival_days,denial_streak,denial_streak_started_at,suspected_banned_at FROM accounts WHERE id=? AND deleted_at IS NULL`, record.ID).
+		dead_at,death_type,banned_survival_days FROM accounts WHERE id=? AND deleted_at IS NULL`, record.ID).
 		Scan(&currentStatus, &currentPlan, &currentRawPlan, &currentExpiryNull, &lastCheck, &paused, &currentEmail, &currentLabel, &currentGeneration,
-			&currentDeadAt, &currentDeathType, &currentSurvival, &currentStreak, &currentStreakStarted, &currentSuspectedAt); err != nil {
+			&currentDeadAt, &currentDeathType, &currentSurvival); err != nil {
 		return false, err
 	}
 	if outcome.generation != 0 && currentGeneration != outcome.generation {
@@ -265,19 +262,6 @@ func (s *Service) applyResult(ctx context.Context, runID string, record accountR
 		}
 	}
 
-	streak, streakStarted, suspectedAt := s.evaluateDenialStreak(ctx, tx, denialStreakInput{
-		outcome:       outcome,
-		code:          code,
-		newCheck:      newCheck,
-		newStatus:     newStatus,
-		currentStreak: currentStreak,
-		streakStarted: currentStreakStarted,
-		suspectedAt:   currentSuspectedAt,
-		now:           now,
-	})
-	wasSuspected := currentSuspectedAt.Valid
-	nowSuspected := suspectedAt != nil
-
 	nextDue := nextRetry
 	if nextDue == nil && newCheck == CheckOK && newStatus == StateAlive {
 		nextDue = formatTime(now.Add(interval + s.jitter(record.ID, interval)))
@@ -285,9 +269,9 @@ func (s *Service) applyResult(ctx context.Context, runID string, record accountR
 	fillEmail, fillLabel := fillOnlyEmailProjection(currentEmail, currentLabel, record.ProviderID, outcome)
 	if _, err := tx.ExecContext(ctx, `UPDATE accounts SET plan=?,raw_plan=?,current_expiry=?,status=?,last_alive_at=CASE WHEN ?='alive' AND ?='ok' THEN ? ELSE last_alive_at END,
 		dead_at=?,death_type=?,banned_survival_days=?,last_check_state=?,last_check_error_code=?,next_retry_at=?,polling_paused=?,pause_reason=?,pending_evidence_signature=?,pending_detected_at=?,
-		denial_streak=?,denial_streak_started_at=?,suspected_banned_at=?,updated_at=? WHERE id=?`,
+		updated_at=? WHERE id=?`,
 		newPlan, newRawPlan, nullable(newExpiry), newStatus, newStatus, newCheck, formatTime(now), deadAt, deathType, survival, newCheck, nullableError(newCheck, code), nextDue, pollingPaused, pauseReason, pendingSignature, pendingDetected,
-		streak, streakStarted, suspectedAt, formatTime(now), record.ID); err != nil {
+		formatTime(now), record.ID); err != nil {
 		return false, err
 	}
 	if fillEmail != nil || fillLabel != nil {
@@ -309,15 +293,7 @@ func (s *Service) applyResult(ctx context.Context, runID string, record accountR
 			return false, err
 		}
 	}
-	enqueued := false
-	if wasSuspected != nowSuspected && newStatus != StateDeadBanned {
-		// 疑似状态翻转要立刻同步给分配域：置位后不再分配新顾客，解除后恢复分配。
-		if _, err := allocationsync.EnqueueAccountTx(ctx, tx, record.ID, accountsync.EventAccountUpdated, now); err != nil {
-			return false, err
-		}
-		enqueued = true
-	}
-	if !enqueued && currentStatus != StateDeadNormal && newStatus == StateDeadNormal {
+	if currentStatus != StateDeadNormal && newStatus == StateDeadNormal {
 		// 订阅终止（凭据到期或被降级成 free）同样要立刻同步：分配域据此把顾客迁走并下线账号。
 		// 过去这条迁移不发事件，只能等每小时换号扫描按 account_expiry 兜底，
 		// 而降级账号的 account_expiry 还停在旧的付费到期日，于是顾客会被晾在一个没有会员的账号上。
@@ -337,90 +313,6 @@ func (s *Service) applyResult(ctx context.Context, runID string, record accountR
 		return false, err
 	}
 	return true, nil
-}
-
-// denialSuspectThresholdKey 控制连续多少次账号级拒绝后标记为疑似封禁。
-const denialSuspectThresholdKey = "denial_suspect_threshold"
-
-const defaultDenialSuspectThreshold = 3
-
-type denialStreakInput struct {
-	outcome       pollResult
-	code          string
-	newCheck      string
-	newStatus     string
-	currentStreak int
-	streakStarted sql.NullString
-	suspectedAt   sql.NullString
-	now           time.Time
-}
-
-// evaluateDenialStreak 维护"连续账号级拒绝"计数并决定是否标记疑似封禁。
-//
-// 判定原则（依据线上已确认封禁样本得出）：
-//   - 只有一次成功轮询才能证明账号正常，因此只有成功才清零；
-//   - 需要重新授权（凭据过期/失效）既不计数也不清零 —— 凭据问题不能当作封禁判据；
-//   - 限流、上游 5xx、契约变更同理不计数，避免基础设施抖动污染证据。
-//
-// 这里只做"疑似"标记，不改 status、不迁移顾客，供人工观察确认。
-func (s *Service) evaluateDenialStreak(ctx context.Context, tx *sql.Tx, in denialStreakInput) (int, any, any) {
-	// 终态账号（正常到期 / 已封禁）不再需要计数。
-	if in.newStatus == StateDeadNormal || in.newStatus == StateDeadBanned {
-		return 0, nil, nil
-	}
-	if in.newCheck == CheckOK && in.outcome.typed == nil {
-		return 0, nil, nil
-	}
-	if !isAccountDenial(in.outcome.typed) {
-		// 不计数也不清零：保留此前累积的证据。
-		return in.currentStreak, nullableSQLString(in.streakStarted), nullableSQLString(in.suspectedAt)
-	}
-	streak := in.currentStreak + 1
-	started := nullableSQLString(in.streakStarted)
-	if !in.streakStarted.Valid {
-		started = formatTime(in.now)
-	}
-	suspected := nullableSQLString(in.suspectedAt)
-	if !in.suspectedAt.Valid && streak >= s.denialSuspectThreshold(ctx, tx) {
-		suspected = formatTime(in.now)
-	}
-	return streak, started, suspected
-}
-
-// isAccountDenial 判断这次失败是否属于"账号被拒"。
-// 分界线是"上游拒的是账号，还是我们手里的凭据"：
-//   - ErrorAccountDisabled：上游明说账号本身有问题，算；
-//   - 403：通过了身份认证但被拒绝，指向账号权限，算；
-//   - 401：没通过身份认证，只说明这个 token 不再被接受，不算；
-//   - ErrorAuthorizationRequired、ErrorCredentialRevoked：凭据被吊销或失效，
-//     账号很可能完好无损（在别处登录、改密码、token 轮换都会导致），不算。
-//
-// 最后两条是线上教训：token_revoked 曾计入连续拒绝，
-// 把三个只是需要重新授权的正常账号误标成了疑似封禁。
-func isAccountDenial(typed *chatgpt.TypedError) bool {
-	if typed == nil {
-		return false
-	}
-	switch typed.Kind {
-	case chatgpt.ErrorAccountDisabled:
-		return true
-	case chatgpt.ErrorPermissionDenied:
-		return typed.EvidenceCode == "http_403"
-	default:
-		return false
-	}
-}
-
-func (s *Service) denialSuspectThreshold(ctx context.Context, tx *sql.Tx) int {
-	var value []byte
-	if tx.QueryRowContext(ctx, "SELECT value FROM settings WHERE key=?", denialSuspectThresholdKey).Scan(&value) != nil {
-		return defaultDenialSuspectThreshold
-	}
-	threshold, err := strconv.Atoi(strings.TrimSpace(string(value)))
-	if err != nil || threshold < 2 || threshold > 1000 {
-		return defaultDenialSuspectThreshold
-	}
-	return threshold
 }
 
 func isStableBanCandidate(typed *chatgpt.TypedError) bool {

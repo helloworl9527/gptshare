@@ -69,7 +69,7 @@ func (r *Repository) ApplyMonitorAccountEvent(ctx context.Context, event account
 		if err != nil {
 			return accountsync.Result{}, err
 		}
-		status := eventAllocationStatus(event.Status, event.Plan, event.Suspected, false, 0, capacity, event.SubscriptionExpiry, now)
+		status := eventAllocationStatus(event.Status, event.Plan, false, 0, capacity, event.SubscriptionExpiry, now)
 		insert, err := tx.ExecContext(ctx, `INSERT INTO chatgpt_accounts
 			(display_username,display_password_secret,display_password_key_id,display_2fa_secret,display_2fa_key_id,
 			 account_expiry,max_concurrent_users,monitor_account_id,monitor_status,status,created_at,updated_at,monitor_sync_version,monitor_plan)
@@ -90,7 +90,7 @@ func (r *Repository) ApplyMonitorAccountEvent(ctx context.Context, event account
 			FROM chatgpt_accounts WHERE id=?`, accountID).Scan(&credentialsComplete, &allocations, &capacity); err != nil {
 			return accountsync.Result{}, err
 		}
-		status := eventAllocationStatus(event.Status, event.Plan, event.Suspected, credentialsComplete, allocations, capacity, event.SubscriptionExpiry, now)
+		status := eventAllocationStatus(event.Status, event.Plan, credentialsComplete, allocations, capacity, event.SubscriptionExpiry, now)
 		if _, err := tx.ExecContext(ctx, `UPDATE chatgpt_accounts SET display_username=?,account_expiry=?,monitor_status=?,status=?,
 			monitor_sync_version=?,monitor_plan=?,updated_at=? WHERE id=?`, username, formatTime(event.SubscriptionExpiry.UTC()), event.Status,
 			status, event.Version, event.Plan, formatTime(now), accountID); err != nil {
@@ -145,7 +145,7 @@ func (r *Repository) ApplyMonitorAccountEvent(ctx context.Context, event account
 	return result, nil
 }
 
-func eventAllocationStatus(monitorStatus, plan string, suspected, credentialsComplete bool, allocations, capacity int, expiry, now time.Time) string {
+func eventAllocationStatus(monitorStatus, plan string, credentialsComplete bool, allocations, capacity int, expiry, now time.Time) string {
 	switch monitorStatus {
 	case "dead_banned":
 		return "banned"
@@ -159,10 +159,6 @@ func eventAllocationStatus(monitorStatus, plan string, suspected, credentialsCom
 	}
 	if !expiry.After(now) {
 		return "expired"
-	}
-	// 疑似封禁：退出分配池但不动存量顾客，等人工确认。
-	if suspected {
-		return "suspected"
 	}
 	if !credentialsComplete {
 		return "pending_credentials"

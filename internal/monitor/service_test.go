@@ -295,18 +295,14 @@ func TestCredentialRevocationFromStatusRequiresReauthorization(t *testing.T) {
 		if nextRetry.Valid {
 			t.Fatalf("%s next_retry_at=%q, want NULL", code, nextRetry.String)
 		}
-		// 关键回归：凭据问题一次都不能计入连续拒绝，更不能标疑似封禁。
-		if streak, suspected := denialState(t, db, id); streak != 0 || suspected {
-			t.Fatalf("%s streak=%d suspected=%v, want 0/false", code, streak, suspected)
-		}
 	}
 	assertCount(t, db, "SELECT count(*) FROM alert_events", 0)
 }
 
-// 凭据吊销永远攒不出疑似封禁：第一次就停轮询，后续排期根本不会再碰它。
+// 凭据被吊销时第一次就停轮询，后续排期根本不会再碰它。
 // 线上正是这里出的事 —— 旧代码把它留在重试队列里，
-// 两个正常账号各累计了 90 多次 token_revoked，然后被误标成疑似封禁。
-func TestRepeatedCredentialRevocationNeverMarksSuspected(t *testing.T) {
+// 两个正常账号各累计了 90 多次 token_revoked，然后被误判成疑似封禁。
+func TestRepeatedCredentialRevocationStopsPollingImmediately(t *testing.T) {
 	s, db, keyring, client, now := newTestService(t)
 	client.errors["acct-revoked"] = candidate("token_revoked")
 	id := seedAccount(t, db, keyring, "acct-revoked", now.Add(24*time.Hour), now)
@@ -322,17 +318,14 @@ func TestRepeatedCredentialRevocationNeverMarksSuspected(t *testing.T) {
 		if run.AccountsTotal != 0 {
 			t.Fatalf("round %d polled %d accounts, want 0: 已停轮询的账号不该再被选中", round, run.AccountsTotal)
 		}
-		if streak, suspected := denialState(t, db, id); streak != 0 || suspected {
-			t.Fatalf("round %d streak=%d suspected=%v", round, streak, suspected)
-		}
 	}
 	assertCount(t, db, "SELECT count(*) FROM alert_events", 0)
-	// 也不能因此给分配域发疑似事件。
-	assertCount(t, db, `SELECT count(*) FROM allocation_account_outbox WHERE payload_json LIKE '%"suspected":true%'`, 0)
+	// 凭据问题也不该惊动分配域。
+	assertCount(t, db, "SELECT count(*) FROM allocation_account_outbox", 0)
 }
 
-// 401 是"这个 token 不再被接受"，不是"这个账号被拒"：不计入封禁证据。
-func TestUnauthorizedStatusIsNotAccountDenial(t *testing.T) {
+// 401 是"这个 token 不再被接受"，不是"这个账号没了"：重试就好，不能牵连账号状态。
+func TestUnauthorizedStatusKeepsAccountAlive(t *testing.T) {
 	s, db, keyring, client, now := newTestService(t)
 	client.errors["acct-401"] = denied("http_401", 401)
 	id := seedAccount(t, db, keyring, "acct-401", now.Add(24*time.Hour), now)
@@ -341,10 +334,8 @@ func TestUnauthorizedStatusIsNotAccountDenial(t *testing.T) {
 			t.Fatalf("attempt %d: %v", attempt, err)
 		}
 	}
-	if streak, suspected := denialState(t, db, id); streak != 0 || suspected {
-		t.Fatalf("streak=%d suspected=%v, want 0/false", streak, suspected)
-	}
 	assertAccountState(t, db, id, StateAlive, CheckError, false)
+	assertCount(t, db, "SELECT count(*) FROM alert_events", 0)
 }
 
 func TestRejectAndUnverifiedRemainFailClosed(t *testing.T) {
@@ -1312,105 +1303,43 @@ func denied(code string, status int) *chatgpt.TypedError {
 		EvidenceLevel: chatgpt.EvidenceContractVerifiedLivePending, PreserveBusinessState: true}
 }
 
-func denialState(t *testing.T, db *sql.DB, id int64) (int, bool) {
-	t.Helper()
-	var streak int
-	var suspectedAt sql.NullString
-	if err := db.QueryRow("SELECT denial_streak,suspected_banned_at FROM accounts WHERE id=?", id).Scan(&streak, &suspectedAt); err != nil {
-		t.Fatal(err)
-	}
-	return streak, suspectedAt.Valid
-}
-
-// 连续三次账号级拒绝后标记疑似封禁；账号状态保持 alive，不做任何终态处理。
-func TestConsecutiveAccountDenialsMarkSuspectedWithoutBanning(t *testing.T) {
+// 判定封禁只认一条证据：上游明说 account_disabled / account_deactivated。
+// 403 撞多少次都不算 —— 疑似封禁机制拆除前正是这里越权替上游下结论。
+func TestRepeatedDenialsNeverBanWithoutExplicitEvidence(t *testing.T) {
 	s, db, keyring, client, now := newTestService(t)
-	// 用 403 而不是 401：403 是"认证通过但被拒"，指向账号权限；
-	// 401 只说明这个 token 不再被接受，是凭据问题，不该计入封禁证据。
 	client.errors["acct-denied"] = denied("http_403", 403)
 	id := seedAccount(t, db, keyring, "acct-denied", now.Add(24*time.Hour), now)
-
-	for attempt := 1; attempt <= 3; attempt++ {
+	for attempt := 1; attempt <= 5; attempt++ {
 		if _, _, err := s.RefreshNow(context.Background(), id); err != nil {
 			t.Fatalf("attempt %d: %v", attempt, err)
 		}
-		streak, suspected := denialState(t, db, id)
-		if streak != attempt {
-			t.Fatalf("attempt %d streak=%d", attempt, streak)
-		}
-		if suspected != (attempt >= 3) {
-			t.Fatalf("attempt %d suspected=%v", attempt, suspected)
-		}
+		// 账号照常留在分配池里：既不封禁，也不停轮询。
+		assertAccountState(t, db, id, StateAlive, CheckError, false)
 	}
-	// 疑似阶段绝不动账号状态：既不封禁也不停轮询。
-	assertAccountState(t, db, id, StateAlive, CheckError, false)
 	assertCount(t, db, "SELECT count(*) FROM alert_events", 0)
+	assertCount(t, db, "SELECT count(*) FROM allocation_account_outbox", 0)
 
-	// 疑似标记要推给分配域，且事件载荷里 suspected 为真。
-	var payload string
-	if err := db.QueryRow("SELECT payload_json FROM allocation_account_outbox WHERE account_id=? ORDER BY account_version DESC LIMIT 1", id).Scan(&payload); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(payload, `"suspected":true`) {
-		t.Fatalf("outbox payload missing suspected flag: %s", payload)
-	}
-}
-
-// 一次成功轮询即清零计数并解除疑似标记。
-func TestSuccessfulPollClearsDenialStreakAndSuspicion(t *testing.T) {
-	s, db, keyring, client, now := newTestService(t)
-	client.errors["acct-recovers"] = denied("http_403", 403)
-	id := seedAccount(t, db, keyring, "acct-recovers", now.Add(24*time.Hour), now)
-	for i := 0; i < 3; i++ {
-		if _, _, err := s.RefreshNow(context.Background(), id); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if streak, suspected := denialState(t, db, id); streak != 3 || !suspected {
-		t.Fatalf("streak=%d suspected=%v", streak, suspected)
-	}
-	delete(client.errors, "acct-recovers")
+	// 换成明确证据后才允许判封禁。
+	client.errors["acct-denied"] = candidate("account_disabled")
 	if _, _, err := s.RefreshNow(context.Background(), id); err != nil {
 		t.Fatal(err)
 	}
-	if streak, suspected := denialState(t, db, id); streak != 0 || suspected {
-		t.Fatalf("after recovery streak=%d suspected=%v", streak, suspected)
-	}
-	assertAccountState(t, db, id, StateAlive, CheckOK, false)
+	assertAccountState(t, db, id, StateDeadBanned, CheckOK, true)
+	assertCount(t, db, "SELECT count(*) FROM alert_events", 1)
 }
 
-// 需要重新授权（凭据过期/失效）既不计入疑似计数，也不清零已有证据。
-func TestReauthorizationRequiredNeitherCountsNorClearsDenialStreak(t *testing.T) {
+// 重新授权永远不能被当成封禁：凭据过期或失效跟账号存活与否无关。
+func TestReauthorizationNeverImpliesBan(t *testing.T) {
 	s, db, keyring, client, now := newTestService(t)
-	client.errors["acct-reauth"] = denied("http_403", 403)
-	// 用纯访问令牌账号：403 来自 accounts/check
-	// （带 refresh 凭据时会先在换取令牌阶段转成 reauthorization_required 并暂停轮询）。
-	id := seedAccount(t, db, keyring, "acct-reauth", now.Add(24*time.Hour), now)
-	for i := 0; i < 2; i++ {
-		if _, _, err := s.RefreshNow(context.Background(), id); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if streak, suspected := denialState(t, db, id); streak != 2 || suspected {
-		t.Fatalf("streak=%d suspected=%v", streak, suspected)
-	}
-
 	client.errors["acct-reauth"] = &chatgpt.TypedError{Kind: chatgpt.ErrorAuthorizationRequired, StatusCode: 400,
 		EvidenceCode: "oauth_refresh_token_invalid", EvidenceLevel: chatgpt.EvidenceContractVerifiedLivePending, PreserveBusinessState: true}
+	id := seedAccount(t, db, keyring, "acct-reauth", now.Add(24*time.Hour), now)
 	if _, _, err := s.RefreshNow(context.Background(), id); err != nil {
 		t.Fatal(err)
 	}
-	// 计数停在 2：不因重新授权而 +1，也不被它清零。
-	if streak, suspected := denialState(t, db, id); streak != 2 || suspected {
-		t.Fatalf("after reauthorization streak=%d suspected=%v", streak, suspected)
-	}
-	var status string
-	if err := db.QueryRow("SELECT status FROM accounts WHERE id=?", id).Scan(&status); err != nil {
-		t.Fatal(err)
-	}
-	if status != StateAlive {
-		t.Fatalf("reauthorization must never imply a ban, status=%s", status)
-	}
+	assertAccountState(t, db, id, StateAlive, CheckReauthorizationRequired, true)
+	assertCount(t, db, "SELECT count(*) FROM alert_events", 0)
+	assertCount(t, db, "SELECT count(*) FROM accounts WHERE death_type IS NOT NULL", 0)
 }
 
 // 本系统只导入付费账号，所以轮询观测到 free 只可能是订阅没续上。
