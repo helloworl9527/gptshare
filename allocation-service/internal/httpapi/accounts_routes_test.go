@@ -66,7 +66,7 @@ func TestAdminAccountCRUDSyncDegradeAndLeakRedaction(t *testing.T) {
 	create := postJSON(t, client, server.URL+"/api/admin/accounts", csrf, map[string]any{
 		"display_password":     "LEAK_PASSWORD_SENTINEL",
 		"display_2fa_secret":   "LEAK_TOTP_SENTINEL",
-		"source_url":           "https://accounts.example.test/orders/LEAK_SOURCE_SENTINEL",
+		"pickup_address":       "https://accounts.example.test/orders/LEAK_SOURCE_SENTINEL",
 		"max_concurrent_users": 2,
 		"monitor_token":        "monitor-token-sentinel",
 		"monitor_token_type":   "session_token",
@@ -117,7 +117,7 @@ func TestAdminAccountCRUDSyncDegradeAndLeakRedaction(t *testing.T) {
 		"display_username":     "updated-account",
 		"display_password":     "UPDATED_PASSWORD_SENTINEL",
 		"display_2fa_secret":   "UPDATED_TOTP_SENTINEL",
-		"source_url":           "https://accounts.example.test/orders/UPDATED_SOURCE_SENTINEL",
+		"pickup_address":       "https://accounts.example.test/orders/UPDATED_SOURCE_SENTINEL",
 		"account_expiry":       time.Now().UTC().Add(24 * time.Hour).Format(time.RFC3339Nano),
 		"max_concurrent_users": 3,
 		"status":               "available",
@@ -125,7 +125,7 @@ func TestAdminAccountCRUDSyncDegradeAndLeakRedaction(t *testing.T) {
 		"monitor_account_id":   "phase-one-123",
 	})
 	updateBody := readBody(t, update)
-	if update.StatusCode != http.StatusOK || !strings.Contains(updateBody, "updated-account") || !strings.Contains(updateBody, "UPDATED_SOURCE_SENTINEL") {
+	if update.StatusCode != http.StatusOK || !strings.Contains(updateBody, "updated-account") || !strings.Contains(updateBody, "UPDATED_SOURCE_SENTINEL") || !strings.Contains(updateBody, "pickup_address") {
 		t.Fatalf("update status=%d body=%s", update.StatusCode, updateBody)
 	}
 	assertNoCredentialLeak(t, updateBody)

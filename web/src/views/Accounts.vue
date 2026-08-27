@@ -41,7 +41,7 @@ const editForm = reactive({
   display_username: '',
   display_password: '',
   display_2fa_secret: '',
-  source_url: '',
+  pickup_address: '',
   account_expiry: '',
   max_concurrent_users: 3,
   status: 'available',
@@ -177,7 +177,7 @@ function openEdit(account) {
     display_username: account.display_username || '',
     display_password: '',
     display_2fa_secret: '',
-    source_url: account.source_url || '',
+    pickup_address: account.pickup_address || account.source_url || '',
     account_expiry: toLocalDatetime(account.account_expiry),
     max_concurrent_users: account.max_concurrent_users || 1,
     status: account.status || 'available',
@@ -357,14 +357,14 @@ onBeforeUnmount(() => {
       <StatePanel v-else-if="visible.length === 0" title="暂无账号" message="一期新增账号后会自动同步到这里，补齐密码和 2FA 即可分配卡密。" />
       <div v-else class="table-wrap">
         <table>
-          <thead><tr><th>账号</th><th>来源</th><th>状态</th><th>容量</th><th>到期</th><th>一期状态</th><th>操作</th></tr></thead>
+          <thead><tr><th>账号</th><th>取件地址</th><th>状态</th><th>容量</th><th>到期</th><th>一期状态</th><th>操作</th></tr></thead>
           <tbody>
             <tr v-for="account in visible" :key="account.id" :class="`row-${accountTone(account)}`">
               <td class="mono-cell">
                 {{ account.display_username }}
               </td>
               <td>
-                <a v-if="account.source_url" class="source-link" :href="account.source_url" target="_blank" rel="noopener noreferrer">打开来源</a>
+                <a v-if="account.pickup_address || account.source_url" class="source-link" :href="account.pickup_address || account.source_url" target="_blank" rel="noopener noreferrer">打开取件地址</a>
                 <span v-else class="muted-value">未填写</span>
               </td>
               <td><span class="status-badge" :class="`status-${account.status}`">{{ account.status }}</span></td>
@@ -449,14 +449,14 @@ onBeforeUnmount(() => {
         </div>
       </section>
       <form class="modal-form" @submit.prevent="updateAccount">
-        <label for="edit-display-username">邮箱</label>
+        <label for="edit-display-username">账号</label>
         <input id="edit-display-username" v-model="editForm.display_username" required readonly autocomplete="off">
-        <label for="edit-display-password">替换密码</label>
+        <label for="edit-display-password">密码</label>
         <input id="edit-display-password" v-model="editForm.display_password" type="password" autocomplete="new-password" placeholder="留空不修改">
+        <label for="edit-pickup-address">取件地址</label>
+        <input id="edit-pickup-address" v-model="editForm.pickup_address" maxlength="2048" autocomplete="off" placeholder="输入用户取件地址（留空清除）">
         <label for="edit-display-totp">替换 2FA Secret</label>
         <input id="edit-display-totp" v-model="editForm.display_2fa_secret" autocomplete="off" placeholder="留空不修改">
-        <label for="edit-source-url">账号来源链接</label>
-        <input id="edit-source-url" v-model="editForm.source_url" type="url" maxlength="2048" autocomplete="off" placeholder="https://…（留空清除）">
         <label for="edit-account-expiry">账号到期</label>
         <input id="edit-account-expiry" v-model="editForm.account_expiry" required type="datetime-local">
         <label for="edit-max-users">最大并发</label>

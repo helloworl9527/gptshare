@@ -346,6 +346,7 @@ type createAccountRequest struct {
 	DisplayUsername    string `json:"display_username" binding:"max=256"`
 	DisplayPassword    string `json:"display_password" binding:"required,max=2048"`
 	DisplayTOTPSecret  string `json:"display_2fa_secret" binding:"required,max=2048"`
+	PickupAddress      string `json:"pickup_address" binding:"max=2048"`
 	SourceURL          string `json:"source_url" binding:"max=2048"`
 	AccountExpiry      string `json:"account_expiry" binding:"max=64"`
 	MaxConcurrentUsers int    `json:"max_concurrent_users" binding:"min=0,max=1000"`
@@ -358,6 +359,7 @@ type updateAccountRequest struct {
 	DisplayUsername    string  `json:"display_username" binding:"required,max=256"`
 	DisplayPassword    string  `json:"display_password" binding:"max=2048"`
 	DisplayTOTPSecret  string  `json:"display_2fa_secret" binding:"max=2048"`
+	PickupAddress      *string `json:"pickup_address" binding:"omitempty,max=2048"`
 	SourceURL          *string `json:"source_url" binding:"omitempty,max=2048"`
 	AccountExpiry      string  `json:"account_expiry" binding:"required"`
 	MaxConcurrentUsers int     `json:"max_concurrent_users" binding:"required,min=1,max=1000"`
@@ -454,11 +456,16 @@ func createAccountHandler(service *accountsvc.Service) gin.HandlerFunc {
 		if !bindJSON(c, &request, 16*1024) {
 			return
 		}
+		pickupAddress := request.PickupAddress
+		if strings.TrimSpace(pickupAddress) == "" {
+			// Keep accepting the old field while callers migrate to pickup_address.
+			pickupAddress = request.SourceURL
+		}
 		result, err := service.Create(c.Request.Context(), accountsvc.CreateInput{
 			DisplayUsername:    request.DisplayUsername,
 			DisplayPassword:    request.DisplayPassword,
 			DisplayTOTPSecret:  request.DisplayTOTPSecret,
-			SourceURL:          request.SourceURL,
+			SourceURL:          pickupAddress,
 			MaxConcurrentUsers: request.MaxConcurrentUsers,
 			SyncMonitor:        true,
 			MonitorToken:       request.MonitorToken,
@@ -523,11 +530,15 @@ func updateAccountHandler(service *accountsvc.Service) gin.HandlerFunc {
 		if status == "pending_credentials" && strings.TrimSpace(request.DisplayPassword) != "" && strings.TrimSpace(request.DisplayTOTPSecret) != "" {
 			status = "available"
 		}
+		pickupAddress := request.SourceURL
+		if request.PickupAddress != nil {
+			pickupAddress = request.PickupAddress
+		}
 		account, err := service.Update(c.Request.Context(), id, accountsvc.UpdateInput{
 			DisplayUsername:    request.DisplayUsername,
 			DisplayPassword:    request.DisplayPassword,
 			DisplayTOTPSecret:  request.DisplayTOTPSecret,
-			SourceURL:          request.SourceURL,
+			SourceURL:          pickupAddress,
 			AccountExpiry:      expiry,
 			MaxConcurrentUsers: request.MaxConcurrentUsers,
 			Status:             status,
@@ -1130,6 +1141,7 @@ func serializeAccount(account models.Account) gin.H {
 		"status":               account.Status,
 	}
 	if account.SourceURL != "" {
+		body["pickup_address"] = account.SourceURL
 		body["source_url"] = account.SourceURL
 	}
 	if account.MonitorAccountID != "" {
@@ -1326,6 +1338,9 @@ func serializeUserQuery(result userquerysvc.QueryResult) gin.H {
 		},
 		"duration_ms": result.Elapsed.Milliseconds(),
 	}
+	if view.Account.SourceURL != "" {
+		body["account"].(gin.H)["pickup_address"] = view.Account.SourceURL
+	}
 	if view.Allocation.GraceUntil != nil {
 		body["replacement_notice"] = gin.H{
 			"state":       view.Allocation.AllocationState,
@@ -1350,6 +1365,9 @@ func serializeUserQueryAccounts(views []repository.UserAllocationView) []gin.H {
 				"digits":    6,
 				"algorithm": "SHA1",
 			},
+		}
+		if view.Account.SourceURL != "" {
+			item["account"].(gin.H)["pickup_address"] = view.Account.SourceURL
 		}
 		out = append(out, item)
 	}

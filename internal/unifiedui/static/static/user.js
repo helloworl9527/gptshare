@@ -149,6 +149,12 @@ async function renderResult(result) {
   validUntil = new Date(result.card.valid_until);
   document.querySelector("#account").textContent = result.account.display_username;
   document.querySelector("#password").textContent = result.account.password;
+  const pickup = document.querySelector("#pickup-address");
+  const pickupAddress = result.account.pickup_address || result.account.source_url || "";
+  pickup.textContent = pickupAddress || "未提供";
+  if (pickupAddress) pickup.href = pickupAddress;
+  else pickup.removeAttribute("href");
+  pickup.toggleAttribute("aria-disabled", !pickupAddress);
   document.querySelector("#replacement-notice").textContent = result.replacement_notice.state === "grace" ? "当前处于换号宽限期，请留意后续替换通知。" : "当前账号为主账号。";
   await refreshDisplayedTOTP();
   setCopyStatus("");

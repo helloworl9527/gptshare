@@ -16,7 +16,7 @@
   <main id="main">
     <p class="eyebrow">Vitals Access</p>
     <h1>卡密查询</h1>
-    <p class="lead">输入卡密查看当前分配的账号信息、订阅剩余时间和本地生成的验证码。</p>
+    <p class="lead">输入卡密查看当前分配的账号、密码、取件地址和订阅信息。</p>
 
     <section class="panel" aria-labelledby="query-title">
       <h2 id="query-title" class="eyebrow">Query</h2>
@@ -42,6 +42,7 @@
       <ul class="info-list">
         <li class="info-item"><span class="info-label">账号</span><span class="info-value copy-row"><span id="account"></span><button class="copy-button" type="button" data-copy-target="account" aria-label="复制账号">复制</button></span></li>
         <li class="info-item"><span class="info-label">密码</span><span class="info-value copy-row"><span id="password"></span><button class="copy-button" type="button" data-copy-target="password" aria-label="复制密码">复制</button></span></li>
+        <li class="info-item"><span class="info-label">取件地址</span><span class="info-value copy-row"><a id="pickup-address" class="pickup-address" target="_blank" rel="noopener noreferrer"></a><button class="copy-button" type="button" data-copy-target="pickup-address" aria-label="复制取件地址">复制</button></span></li>
         <li class="info-item"><span class="info-label">验证码</span><span class="info-value"><span class="totp-row"><span id="totp-code" class="totp-code">------</span><button class="copy-button" type="button" data-copy-target="totp-code" aria-label="复制验证码">复制</button><button id="refresh-totp" type="button">刷新验证码</button><span id="totp-timer" class="timer"></span></span></span></li>
         <li class="info-item"><span class="info-label">订阅剩余时间</span><span class="info-value" id="expires-in"></span></li>
       </ul>
