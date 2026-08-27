@@ -158,7 +158,10 @@ async function extend() {
   busy.value = true
   notice.value = ''
   try {
-    await api.extendCard(form.selected.id, form.extend_days)
+    const result = await api.extendCard(form.selected.id, form.extend_days)
+    if (lookup.result?.card?.id === form.selected.id && result.card) {
+      lookup.result.card = result.card
+    }
     modal.value = ''
     notice.value = '卡密有效期已延期。'
     await load()
@@ -247,6 +250,12 @@ onMounted(load)
         <div class="credential-field">
           <span class="credential-label">当前对应账号</span>
           <strong class="mono-cell">{{ lookup.result.current_account?.display_username || '暂无对应账号' }}</strong>
+        </div>
+        <div class="credential-field">
+          <span class="credential-label">有效期操作</span>
+          <button type="button" :disabled="remainingExtensionDays(lookup.result.card) < 1" @click="openExtend(lookup.result.card)">
+            延期
+          </button>
         </div>
       </div>
     </section>

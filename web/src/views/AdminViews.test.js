@@ -330,6 +330,14 @@ describe('P2 admin views', () => {
         },
         current_account: { id: 7, display_username: 'assigned@example.test' },
       }))
+      .mockResolvedValueOnce(response({ card: {
+        id: 2,
+        code_suffix: 'EFGH',
+        status: 'redeemed',
+        redeemed_at: '2026-07-24T01:00:00Z',
+        expires_at: '2026-08-28T01:00:00Z',
+      } }))
+      .mockResolvedValueOnce(response({ cards }))
     const wrapper = await render(Cards, fetchMock)
     await wrapper.get('#card-lookup-code').setValue('2345-6789-EFGH')
     await wrapper.get('form.controls').trigger('submit')
@@ -340,6 +348,15 @@ describe('P2 admin views', () => {
     expect(wrapper.text()).toContain('assigned@example.test')
     expect(wrapper.text()).toContain('redeemed')
     expect(wrapper.text()).toContain('2026')
+    const lookupSection = wrapper.get('section[aria-labelledby="card-lookup-title"]')
+    await lookupSection.findAll('button').find((button) => button.text() === '延期').trigger('click')
+    await wrapper.get('#extend-days').setValue(5)
+    await wrapper.get('.modal-form').trigger('submit')
+    await flushPromises()
+    const extendCall = fetchMock.mock.calls.find(([url]) => String(url) === '/api/admin/cards/2/extend')
+    expect(extendCall).toBeTruthy()
+    expect(JSON.parse(extendCall[1].body)).toEqual({ days: 5 })
+    expect(wrapper.text()).toContain('卡密有效期已延期')
     wrapper.unmount()
   })
 
