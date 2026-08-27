@@ -208,6 +208,14 @@ type AdminAllocationView struct {
 	Account    models.Account
 }
 
+// CardLookupView contains the non-secret card and current allocation metadata
+// used by the administrator card lookup endpoint.
+type CardLookupView struct {
+	Card       models.Card
+	Allocation *models.Allocation
+	Account    *models.Account
+}
+
 type CaptchaChallenge struct {
 	ID        int64
 	Question  string
@@ -483,6 +491,57 @@ func (r *Repository) CardByID(ctx context.Context, cardID int64) (models.Card, e
 
 func (r *Repository) CardByHash(ctx context.Context, codeHash []byte) (models.Card, error) {
 	return r.cardByQuery(ctx, "code_hash=?", codeHash)
+}
+
+func (r *Repository) CardLookupByHash(ctx context.Context, codeHash []byte) (CardLookupView, error) {
+	card, err := r.CardByHash(ctx, codeHash)
+	if err != nil {
+		return CardLookupView{}, err
+	}
+	row := r.db.QueryRowContext(ctx, `SELECT
+			a.id,a.card_id,a.account_id,a.allocated_at,a.valid_until,a.grace_until,a.allocation_state,a.active,a.superseded_by_allocation_id,
+			ac.id,ac.display_username
+		FROM allocations a
+		JOIN chatgpt_accounts ac ON ac.id=a.account_id
+		WHERE a.card_id=? AND a.active=1 AND a.allocation_state IN ('primary','grace')
+		ORDER BY CASE a.allocation_state WHEN 'primary' THEN 0 ELSE 1 END, a.id DESC
+		LIMIT 1`, card.ID)
+	var allocation models.Allocation
+	var account models.Account
+	var allocatedAt, validUntil string
+	var graceUntil sql.NullString
+	var active int
+	var supersededBy sql.NullInt64
+	if err := row.Scan(
+		&allocation.ID, &allocation.CardID, &allocation.AccountID,
+		&allocatedAt, &validUntil, &graceUntil, &allocation.AllocationState,
+		&active, &supersededBy, &account.ID, &account.DisplayUsername,
+	); errors.Is(err, sql.ErrNoRows) {
+		return CardLookupView{Card: card}, nil
+	} else if err != nil {
+		return CardLookupView{}, err
+	}
+	allocation.Active = active == 1
+	allocation.AllocatedAt, err = parseTime(allocatedAt)
+	if err != nil {
+		return CardLookupView{}, err
+	}
+	allocation.ValidUntil, err = parseTime(validUntil)
+	if err != nil {
+		return CardLookupView{}, err
+	}
+	if graceUntil.Valid {
+		value, err := parseTime(graceUntil.String)
+		if err != nil {
+			return CardLookupView{}, err
+		}
+		allocation.GraceUntil = &value
+	}
+	if supersededBy.Valid {
+		value := supersededBy.Int64
+		allocation.SupersededByAllocationID = &value
+	}
+	return CardLookupView{Card: card, Allocation: &allocation, Account: &account}, nil
 }
 
 func (r *Repository) RevealCardCode(ctx context.Context, cardID int64) (RevealedCardCode, error) {

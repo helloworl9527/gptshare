@@ -190,6 +190,21 @@ func TestCardRevokeBlocksUserQueryAndExtendUpdatesView(t *testing.T) {
 		t.Fatalf("generated=%+v", parsed)
 	}
 	redeemCardForHTTPTest(t, server, accountID, parsed.Cards[0].ID, 7)
+	lookup := postJSON(t, client, server.URL+"/api/admin/cards/lookup", csrf, map[string]any{"code": strings.ToLower(parsed.Cards[0].Code)})
+	lookupBody := readBody(t, lookup)
+	if lookup.StatusCode != http.StatusOK || !strings.Contains(lookupBody, `"status":"redeemed"`) || !strings.Contains(lookupBody, `"redeemed_at":`) || !strings.Contains(lookupBody, `"expires_at":`) || !strings.Contains(lookupBody, `"display_username":"local-account"`) {
+		t.Fatalf("lookup status=%d body=%s", lookup.StatusCode, lookupBody)
+	}
+	if strings.Contains(lookupBody, parsed.Cards[0].Code) {
+		t.Fatalf("lookup response leaked full card code: %s", lookupBody)
+	}
+	if countAuditEvents(t, server, "cards.lookup") != 1 {
+		t.Fatalf("cards.lookup audit count=%d want 1", countAuditEvents(t, server, "cards.lookup"))
+	}
+	invalidLookup := postJSON(t, client, server.URL+"/api/admin/cards/lookup", csrf, map[string]any{"code": "invalid"})
+	if invalidLookup.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("invalid lookup status=%d body=%s", invalidLookup.StatusCode, readBody(t, invalidLookup))
+	}
 	view := getRaw(t, server.Client(), server.URL+"/api/cards/"+parsed.Cards[0].Code+"/status")
 	viewBody := readBody(t, view)
 	if view.StatusCode != http.StatusOK || !strings.Contains(viewBody, `"status":"redeemed"`) {

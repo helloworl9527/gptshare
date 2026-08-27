@@ -316,6 +316,33 @@ describe('P2 admin views', () => {
     wrapper.unmount()
   })
 
+  it('looks up activation, expiry, and the current account by full card code', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(response({ cards }))
+      .mockResolvedValueOnce(response({ csrf_token: 'c'.repeat(43) }))
+      .mockResolvedValueOnce(response({
+        card: {
+          id: 2,
+          code_suffix: 'EFGH',
+          status: 'redeemed',
+          redeemed_at: '2026-07-24T01:00:00Z',
+          expires_at: '2026-08-23T01:00:00Z',
+        },
+        current_account: { id: 7, display_username: 'assigned@example.test' },
+      }))
+    const wrapper = await render(Cards, fetchMock)
+    await wrapper.get('#card-lookup-code').setValue('2345-6789-EFGH')
+    await wrapper.get('form.controls').trigger('submit')
+    await flushPromises()
+    const lookupCall = fetchMock.mock.calls.find(([url]) => String(url) === '/api/admin/cards/lookup')
+    expect(lookupCall).toBeTruthy()
+    expect(JSON.parse(lookupCall[1].body)).toEqual({ code: '2345-6789-EFGH' })
+    expect(wrapper.text()).toContain('assigned@example.test')
+    expect(wrapper.text()).toContain('redeemed')
+    expect(wrapper.text()).toContain('2026')
+    wrapper.unmount()
+  })
+
   it('reveals a single card plaintext only after an explicit click', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(response({ cards }))

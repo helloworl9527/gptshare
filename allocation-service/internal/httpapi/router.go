@@ -201,6 +201,7 @@ func registerProtectedAdminRoutes(router *gin.Engine, cfg Config, boundary Admin
 	}
 	if cfg.Cards != nil {
 		admin.GET("/cards", listCardsHandler(cfg.Cards))
+		admin.POST("/cards/lookup", boundary.RequireOrigin, boundary.RequireCSRF, lookupCardHandler(cfg.Cards))
 		admin.POST("/cards/generate", boundary.RequireOrigin, boundary.RequireCSRF, generateCardsHandler(cfg.Cards))
 		admin.POST("/cards/export", boundary.RequireOrigin, boundary.RequireCSRF, exportCardsHandler(cfg.Cards))
 		admin.POST("/cards/expire-due", boundary.RequireOrigin, boundary.RequireCSRF, expireDueCardsHandler(cfg.Cards))
@@ -381,6 +382,10 @@ type exportCardsRequest struct {
 	Quantity     int    `json:"quantity" binding:"required,min=1,max=1000"`
 	DurationDays int    `json:"duration_days" binding:"required,min=1,max=90"`
 	Format       string `json:"format" binding:"required,oneof=csv txt"`
+}
+
+type lookupCardRequest struct {
+	Code string `json:"code" binding:"required,max=32"`
 }
 
 type extendCardRequest struct {
@@ -668,6 +673,32 @@ func listCardsHandler(service *cardsvc.Service) gin.HandlerFunc {
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"cards": serializeCards(cards), "request_id": c.GetString("request_id")})
+	}
+}
+
+func lookupCardHandler(service *cardsvc.Service) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var request lookupCardRequest
+		if !bindJSON(c, &request, 4096) {
+			return
+		}
+		result, err := service.Lookup(c.Request.Context(), request.Code)
+		if err != nil {
+			writeCardError(c, err)
+			return
+		}
+		body := gin.H{
+			"card":       serializeCard(result.Card),
+			"request_id": c.GetString("request_id"),
+		}
+		if result.Account != nil && result.Allocation != nil {
+			body["current_account"] = gin.H{
+				"id":               result.Account.ID,
+				"display_username": result.Account.DisplayUsername,
+			}
+			body["allocation"] = serializeAllocation(*result.Allocation)
+		}
+		c.JSON(http.StatusOK, body)
 	}
 }
 

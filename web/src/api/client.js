@@ -123,6 +123,7 @@ export const api = {
 		return request(`/api/admin/cards${suffix ? `?${suffix}` : ''}`)
 	},
 	generateCards: (body) => request('/api/admin/cards/generate', { method: 'POST', body }),
+	lookupCard: (code) => request('/api/admin/cards/lookup', { method: 'POST', body: { code } }),
 	exportCards: (body) => request('/api/admin/cards/export', { method: 'POST', body }),
 	revealCard: (id) => request(`/api/admin/cards/${encodeURIComponent(id)}/reveal`, { requireCSRF: true }),
 	revokeCard: (id) => request(`/api/admin/cards/${encodeURIComponent(id)}/revoke`, { method: 'POST', body: {} }),

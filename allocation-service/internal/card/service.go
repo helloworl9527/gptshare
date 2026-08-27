@@ -35,6 +35,7 @@ type Repository interface {
 	ListCards(context.Context, repository.CardFilter) ([]models.Card, error)
 	CardByID(context.Context, int64) (models.Card, error)
 	CardByHash(context.Context, []byte) (models.Card, error)
+	CardLookupByHash(context.Context, []byte) (repository.CardLookupView, error)
 	RevokeCard(context.Context, int64) (models.Card, error)
 	ExtendCard(context.Context, int64, int) (models.Card, error)
 	ExpireDueCards(context.Context, time.Time) (int64, error)
@@ -57,6 +58,12 @@ type GeneratedCard struct {
 
 type GenerateResult struct {
 	Cards []GeneratedCard
+}
+
+type LookupResult struct {
+	Card       models.Card
+	Allocation *models.Allocation
+	Account    *models.Account
 }
 
 type ExportFormat string
@@ -122,6 +129,26 @@ func (s *Service) List(ctx context.Context, filter repository.CardFilter) ([]mod
 		return nil, ErrValidation
 	}
 	return s.repo.ListCards(ctx, filter)
+}
+
+func (s *Service) Lookup(ctx context.Context, code string) (LookupResult, error) {
+	normalized := strings.ToUpper(strings.TrimSpace(code))
+	if !ValidCode(normalized) {
+		return LookupResult{}, ErrValidation
+	}
+	view, err := s.repo.CardLookupByHash(ctx, HashCode(normalized))
+	if errors.Is(err, sql.ErrNoRows) {
+		return LookupResult{}, ErrNotFound
+	}
+	if err != nil {
+		return LookupResult{}, err
+	}
+	accountID := int64(0)
+	if view.Account != nil {
+		accountID = view.Account.ID
+	}
+	_ = s.repo.Audit(ctx, "cards.lookup", "card", view.Card.ID, map[string]any{"account_id": accountID, "status": view.Card.Status})
+	return LookupResult{Card: view.Card, Allocation: view.Allocation, Account: view.Account}, nil
 }
 
 func (s *Service) Revoke(ctx context.Context, id int64) (models.Card, error) {

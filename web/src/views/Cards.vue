@@ -16,6 +16,7 @@ const busy = ref(false)
 const generated = ref([])
 const revealed = reactive({})
 const form = reactive({ quantity: 10, duration_days: 30, format: 'csv', extend_days: 7, selected: null })
+const lookup = reactive({ code: '', result: null, error: '' })
 
 const visible = computed(() => cards.value)
 const maxExtendDays = computed(() => remainingExtensionDays(form.selected))
@@ -67,6 +68,20 @@ async function generate() {
     await load()
   } catch (reason) {
     notice.value = reason.message
+  } finally {
+    busy.value = false
+  }
+}
+
+async function lookupCard() {
+  busy.value = true
+  lookup.error = ''
+  lookup.result = null
+  try {
+    lookup.result = await api.lookupCard(lookup.code)
+    lookup.code = ''
+  } catch (reason) {
+    lookup.error = reason.message || '未找到该卡密。'
   } finally {
     busy.value = false
   }
@@ -195,11 +210,51 @@ onMounted(load)
         <code v-for="card in generated" :key="card.id">{{ card.code }}</code>
       </div>
     </section>
+    <section class="panel" aria-labelledby="card-lookup-title">
+      <div class="section-head">
+        <div>
+          <p class="section-index">
+            01 / LOOKUP
+          </p>
+          <h2 id="card-lookup-title">
+            指定卡密查询
+          </h2>
+        </div>
+      </div>
+      <form class="controls" @submit.prevent="lookupCard">
+        <label for="card-lookup-code">完整卡密</label>
+        <input id="card-lookup-code" v-model.trim="lookup.code" required maxlength="32" autocomplete="off" placeholder="XXXX-XXXX-XXXX">
+        <button class="primary-action compact-action" type="submit" :disabled="busy">
+          查询
+        </button>
+      </form>
+      <p v-if="lookup.error" class="credential-alert" role="alert">
+        {{ lookup.error }}
+      </p>
+      <div v-if="lookup.result" class="credential-values" aria-live="polite">
+        <div class="credential-field">
+          <span class="credential-label">状态</span>
+          <strong>{{ lookup.result.card.status }}</strong>
+        </div>
+        <div class="credential-field">
+          <span class="credential-label">激活时间</span>
+          <strong>{{ lookup.result.card.redeemed_at ? formatDateTime(lookup.result.card.redeemed_at) : '尚未激活' }}</strong>
+        </div>
+        <div class="credential-field">
+          <span class="credential-label">过期时间</span>
+          <strong>{{ lookup.result.card.expires_at ? formatDateTime(lookup.result.card.expires_at) : '尚未生成' }}</strong>
+        </div>
+        <div class="credential-field">
+          <span class="credential-label">当前对应账号</span>
+          <strong class="mono-cell">{{ lookup.result.current_account?.display_username || '暂无对应账号' }}</strong>
+        </div>
+      </div>
+    </section>
     <section class="panel table-panel" aria-labelledby="cards-title">
       <div class="section-head">
         <div>
           <p class="section-index">
-            01 / CARDS
+            02 / CARDS
           </p>
           <h2 id="cards-title">
             卡密列表
