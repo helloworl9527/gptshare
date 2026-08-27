@@ -10,12 +10,13 @@ import (
 )
 
 const (
-	AccountTable        = "chatgpt_accounts"
-	CardsTable          = "cards"
-	CredentialPassword  = "display_password"
-	CredentialTOTP      = "display_2fa"
-	CredentialSourceURL = "source_url"
-	CredentialCardCode  = "code"
+	AccountTable            = "chatgpt_accounts"
+	CardsTable              = "cards"
+	CredentialPassword      = "display_password"
+	CredentialTOTP          = "display_2fa"
+	CredentialSourceURL     = "source_url"
+	CredentialPickupAddress = "pickup_address"
+	CredentialCardCode      = "code"
 )
 
 var (

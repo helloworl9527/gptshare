@@ -51,6 +51,7 @@ type AccountSeed struct {
 	DisplayPassword    string
 	DisplayTOTPSecret  string
 	SourceURL          string
+	PickupAddress      string
 	AccountExpiry      time.Time
 	MaxConcurrentUsers int
 	MonitorAccountID   string
@@ -63,6 +64,7 @@ type AccountUpdate struct {
 	DisplayPassword    string
 	DisplayTOTPSecret  string
 	SourceURL          *string
+	PickupAddress      *string
 	AccountExpiry      time.Time
 	MaxConcurrentUsers int
 	Status             string
@@ -304,12 +306,22 @@ func (r *Repository) CreateAccount(ctx context.Context, seed AccountSeed) (int64
 		sourceKeyID = source.KeyID
 		sourceCiphertext = source.Ciphertext
 	}
+	var pickupKeyID any
+	var pickupCiphertext any
+	if strings.TrimSpace(seed.PickupAddress) != "" {
+		pickup, err := r.credentials.Seal(accountID, credential.CredentialPickupAddress, []byte(seed.PickupAddress))
+		if err != nil {
+			return 0, err
+		}
+		pickupKeyID = pickup.KeyID
+		pickupCiphertext = pickup.Ciphertext
+	}
 	if _, err := tx.ExecContext(ctx, `UPDATE chatgpt_accounts
 		SET display_password_secret=?, display_password_key_id=?, display_2fa_secret=?, display_2fa_key_id=?,
-		    source_url_key_id=?, source_url_secret=?, updated_at=?
+		    source_url_key_id=?, source_url_secret=?, pickup_address_key_id=?, pickup_address_secret=?, updated_at=?
 		WHERE id=?`,
 		password.Ciphertext, password.KeyID, totp.Ciphertext, totp.KeyID,
-		sourceKeyID, sourceCiphertext, formatTime(now), accountID); err != nil {
+		sourceKeyID, sourceCiphertext, pickupKeyID, pickupCiphertext, formatTime(now), accountID); err != nil {
 		return 0, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -1194,13 +1206,13 @@ func (r *Repository) ListReplacementHistory(ctx context.Context, limit int) ([]R
 }
 
 func (r *Repository) Account(ctx context.Context, accountID int64) (models.Account, error) {
-	row := r.db.QueryRowContext(ctx, `SELECT id,display_username,account_expiry,max_concurrent_users,current_allocations,monitor_account_id,monitor_status,status,last_allocated_at,source_url_key_id,source_url_secret
+	row := r.db.QueryRowContext(ctx, `SELECT id,display_username,account_expiry,max_concurrent_users,current_allocations,monitor_account_id,monitor_status,status,last_allocated_at,source_url_key_id,source_url_secret,pickup_address_key_id,pickup_address_secret
 		FROM chatgpt_accounts WHERE id=? AND archived_at IS NULL`, accountID)
 	return r.scanAccount(row)
 }
 
 func (r *Repository) ListAccounts(ctx context.Context) ([]models.Account, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT id,display_username,account_expiry,max_concurrent_users,current_allocations,monitor_account_id,monitor_status,status,last_allocated_at,source_url_key_id,source_url_secret
+	rows, err := r.db.QueryContext(ctx, `SELECT id,display_username,account_expiry,max_concurrent_users,current_allocations,monitor_account_id,monitor_status,status,last_allocated_at,source_url_key_id,source_url_secret,pickup_address_key_id,pickup_address_secret
 		FROM chatgpt_accounts WHERE archived_at IS NULL ORDER BY id ASC`)
 	if err != nil {
 		return nil, err
@@ -1243,7 +1255,7 @@ func (r *Repository) UpdateAccount(ctx context.Context, accountID int64, update 
 	if affected != 1 {
 		return models.Account{}, sql.ErrNoRows
 	}
-	if update.DisplayPassword != "" || update.DisplayTOTPSecret != "" || (update.SourceURL != nil && strings.TrimSpace(*update.SourceURL) != "") {
+	if update.DisplayPassword != "" || update.DisplayTOTPSecret != "" || (update.SourceURL != nil && strings.TrimSpace(*update.SourceURL) != "") || (update.PickupAddress != nil && strings.TrimSpace(*update.PickupAddress) != "") {
 		if r.credentials == nil {
 			return models.Account{}, credential.ErrInvalidKeyring
 		}
@@ -1285,6 +1297,25 @@ func (r *Repository) UpdateAccount(ctx context.Context, accountID int64, update 
 			if _, err := tx.ExecContext(ctx, `UPDATE chatgpt_accounts
 				SET source_url_secret=?, source_url_key_id=?, updated_at=?
 				WHERE id=?`, source.Ciphertext, source.KeyID, formatTime(now), accountID); err != nil {
+				return models.Account{}, err
+			}
+		}
+	}
+	if update.PickupAddress != nil {
+		if strings.TrimSpace(*update.PickupAddress) == "" {
+			if _, err := tx.ExecContext(ctx, `UPDATE chatgpt_accounts
+				SET pickup_address_secret=NULL, pickup_address_key_id=NULL, updated_at=?
+				WHERE id=?`, formatTime(now), accountID); err != nil {
+				return models.Account{}, err
+			}
+		} else {
+			pickup, err := r.credentials.Seal(accountID, credential.CredentialPickupAddress, []byte(*update.PickupAddress))
+			if err != nil {
+				return models.Account{}, err
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE chatgpt_accounts
+				SET pickup_address_secret=?, pickup_address_key_id=?, updated_at=?
+				WHERE id=?`, pickup.Ciphertext, pickup.KeyID, formatTime(now), accountID); err != nil {
 				return models.Account{}, err
 			}
 		}
@@ -1515,7 +1546,8 @@ func (r *Repository) RetireAccount(ctx context.Context, accountID int64) (Retire
 		SET archived_at=?,status='disabled',current_allocations=0,
 			display_password_secret=x'',display_password_key_id='',
 			display_2fa_secret=x'',display_2fa_key_id='',
-			source_url_secret=NULL,source_url_key_id=NULL,updated_at=?
+			source_url_secret=NULL,source_url_key_id=NULL,
+			pickup_address_secret=NULL,pickup_address_key_id=NULL,updated_at=?
 		WHERE id=? AND archived_at IS NULL`, formatTime(now), formatTime(now), accountID)
 	if err != nil {
 		return RetireAccountResult{}, err
@@ -1632,7 +1664,7 @@ func (r *Repository) ReencryptCredentials(ctx context.Context) (int64, error) {
 		return 0, err
 	}
 	defer tx.Rollback()
-	rows, err := tx.QueryContext(ctx, `SELECT id,display_password_key_id,display_password_secret,display_2fa_key_id,display_2fa_secret,source_url_key_id,source_url_secret FROM chatgpt_accounts WHERE archived_at IS NULL ORDER BY id ASC`)
+	rows, err := tx.QueryContext(ctx, `SELECT id,display_password_key_id,display_password_secret,display_2fa_key_id,display_2fa_secret,source_url_key_id,source_url_secret,pickup_address_key_id,pickup_address_secret FROM chatgpt_accounts WHERE archived_at IS NULL ORDER BY id ASC`)
 	if err != nil {
 		return 0, err
 	}
@@ -1644,11 +1676,13 @@ func (r *Repository) ReencryptCredentials(ctx context.Context) (int64, error) {
 		totpCiphertext     []byte
 		sourceKeyID        sql.NullString
 		sourceCiphertext   []byte
+		pickupKeyID        sql.NullString
+		pickupCiphertext   []byte
 	}
 	var accounts []row
 	for rows.Next() {
 		var item row
-		if err := rows.Scan(&item.id, &item.passwordKeyID, &item.passwordCiphertext, &item.totpKeyID, &item.totpCiphertext, &item.sourceKeyID, &item.sourceCiphertext); err != nil {
+		if err := rows.Scan(&item.id, &item.passwordKeyID, &item.passwordCiphertext, &item.totpKeyID, &item.totpCiphertext, &item.sourceKeyID, &item.sourceCiphertext, &item.pickupKeyID, &item.pickupCiphertext); err != nil {
 			rows.Close()
 			return 0, err
 		}
@@ -1694,12 +1728,29 @@ func (r *Repository) ReencryptCredentials(ctx context.Context) (int64, error) {
 			sourceKeyID = resealedSource.KeyID
 			sourceCiphertext = resealedSource.Ciphertext
 		}
+		var pickupKeyID any
+		var pickupCiphertext any
+		if item.pickupKeyID.Valid || len(item.pickupCiphertext) > 0 {
+			if !item.pickupKeyID.Valid || len(item.pickupCiphertext) == 0 {
+				return 0, credential.ErrDecryptCredential
+			}
+			pickup, err := r.credentials.Open(item.id, credential.CredentialPickupAddress, item.pickupKeyID.String, item.pickupCiphertext)
+			if err != nil {
+				return 0, err
+			}
+			resealedPickup, err := r.credentials.Seal(item.id, credential.CredentialPickupAddress, pickup)
+			if err != nil {
+				return 0, err
+			}
+			pickupKeyID = resealedPickup.KeyID
+			pickupCiphertext = resealedPickup.Ciphertext
+		}
 		if _, err := tx.ExecContext(ctx, `UPDATE chatgpt_accounts
 			SET display_password_secret=?, display_password_key_id=?, display_2fa_secret=?, display_2fa_key_id=?,
-			    source_url_key_id=?, source_url_secret=?, updated_at=?
+			    source_url_key_id=?, source_url_secret=?, pickup_address_key_id=?, pickup_address_secret=?, updated_at=?
 			WHERE id=?`,
 			resealedPassword.Ciphertext, resealedPassword.KeyID, resealedTOTP.Ciphertext, resealedTOTP.KeyID,
-			sourceKeyID, sourceCiphertext, formatTime(now), item.id); err != nil {
+			sourceKeyID, sourceCiphertext, pickupKeyID, pickupCiphertext, formatTime(now), item.id); err != nil {
 			return 0, err
 		}
 	}
@@ -2096,7 +2147,8 @@ func archiveRetiredAccount(ctx context.Context, tx *sql.Tx, nowFunc func() time.
 		SET archived_at=?,status='disabled',current_allocations=0,
 			display_password_secret=x'',display_password_key_id='',
 			display_2fa_secret=x'',display_2fa_key_id='',
-			source_url_secret=NULL,source_url_key_id=NULL,updated_at=?
+			source_url_secret=NULL,source_url_key_id=NULL,
+			pickup_address_secret=NULL,pickup_address_key_id=NULL,updated_at=?
 		WHERE `+clause+`
 		  AND id=? AND archived_at IS NULL
 		  AND NOT EXISTS (SELECT 1 FROM allocations a WHERE a.account_id=? AND a.active=1)`, args...)
@@ -2294,7 +2346,9 @@ func (r *Repository) scanAccount(scanner accountScanner) (models.Account, error)
 	var monitorAccount sql.NullString
 	var sourceKeyID sql.NullString
 	var sourceCiphertext []byte
-	if err := scanner.Scan(&account.ID, &account.DisplayUsername, &expiry, &account.MaxConcurrentUsers, &account.CurrentAllocations, &monitorAccount, &account.MonitorStatus, &account.Status, &lastAllocated, &sourceKeyID, &sourceCiphertext); err != nil {
+	var pickupKeyID sql.NullString
+	var pickupCiphertext []byte
+	if err := scanner.Scan(&account.ID, &account.DisplayUsername, &expiry, &account.MaxConcurrentUsers, &account.CurrentAllocations, &monitorAccount, &account.MonitorStatus, &account.Status, &lastAllocated, &sourceKeyID, &sourceCiphertext, &pickupKeyID, &pickupCiphertext); err != nil {
 		return models.Account{}, err
 	}
 	parsed, err := parseTime(expiry.String)
@@ -2321,6 +2375,16 @@ func (r *Repository) scanAccount(scanner accountScanner) (models.Account, error)
 			return models.Account{}, err
 		}
 		account.SourceURL = string(sourceURL)
+	}
+	if pickupKeyID.Valid || len(pickupCiphertext) > 0 {
+		if !pickupKeyID.Valid || len(pickupCiphertext) == 0 || r.credentials == nil {
+			return models.Account{}, credential.ErrDecryptCredential
+		}
+		pickupAddress, err := r.credentials.Open(account.ID, credential.CredentialPickupAddress, pickupKeyID.String, pickupCiphertext)
+		if err != nil {
+			return models.Account{}, err
+		}
+		account.PickupAddress = string(pickupAddress)
 	}
 	return account, nil
 }

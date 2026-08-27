@@ -114,7 +114,7 @@ async function renderResult(result) {
   document.querySelector("#account").textContent = result.account.display_username;
   document.querySelector("#password").textContent = result.account.password;
   const pickup = document.querySelector("#pickup-address");
-  const pickupAddress = result.account.pickup_address || result.account.source_url || "";
+  const pickupAddress = result.account.pickup_address || "";
   pickup.textContent = pickupAddress || "未提供";
   if (pickupAddress) pickup.href = pickupAddress;
   else pickup.removeAttribute("href");

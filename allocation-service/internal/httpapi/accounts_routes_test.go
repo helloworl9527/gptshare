@@ -66,7 +66,8 @@ func TestAdminAccountCRUDSyncDegradeAndLeakRedaction(t *testing.T) {
 	create := postJSON(t, client, server.URL+"/api/admin/accounts", csrf, map[string]any{
 		"display_password":     "LEAK_PASSWORD_SENTINEL",
 		"display_2fa_secret":   "LEAK_TOTP_SENTINEL",
-		"pickup_address":       "https://accounts.example.test/orders/LEAK_SOURCE_SENTINEL",
+		"source_url":           "https://accounts.example.test/source/LEAK_SOURCE_SENTINEL",
+		"pickup_address":       "pickup-LEAK_ADDRESS_SENTINEL",
 		"max_concurrent_users": 2,
 		"monitor_token":        "monitor-token-sentinel",
 		"monitor_token_type":   "session_token",
@@ -84,13 +85,14 @@ func TestAdminAccountCRUDSyncDegradeAndLeakRedaction(t *testing.T) {
 			DisplayUsername  string `json:"display_username"`
 			AccountExpiry    string `json:"account_expiry"`
 			SourceURL        string `json:"source_url"`
+			PickupAddress    string `json:"pickup_address"`
 		} `json:"account"`
 		Warnings []string `json:"warnings"`
 	}
 	if err := json.Unmarshal([]byte(createBody), &created); err != nil {
 		t.Fatal(err)
 	}
-	if created.Account.ID == 0 || created.Account.MonitorAccountID != "phase-one-123" || created.Account.MonitorStatus != "alive" || created.Account.DisplayUsername != "synced@example.test" || created.Account.SourceURL != "https://accounts.example.test/orders/LEAK_SOURCE_SENTINEL" || len(created.Warnings) != 0 {
+	if created.Account.ID == 0 || created.Account.MonitorAccountID != "phase-one-123" || created.Account.MonitorStatus != "alive" || created.Account.DisplayUsername != "synced@example.test" || created.Account.SourceURL != "https://accounts.example.test/source/LEAK_SOURCE_SENTINEL" || created.Account.PickupAddress != "pickup-LEAK_ADDRESS_SENTINEL" || len(created.Warnings) != 0 {
 		t.Fatalf("bad create response: %+v", created)
 	}
 	if !strings.Contains(created.Account.AccountExpiry, "T") {
@@ -100,12 +102,12 @@ func TestAdminAccountCRUDSyncDegradeAndLeakRedaction(t *testing.T) {
 	if !ok {
 		t.Fatal("test database not registered")
 	}
-	var passwordCipher, totpCipher, sourceCipher []byte
-	if err := dbValue.(*sql.DB).QueryRow(`SELECT display_password_secret, display_2fa_secret, source_url_secret FROM chatgpt_accounts WHERE id=?`, created.Account.ID).Scan(&passwordCipher, &totpCipher, &sourceCipher); err != nil {
+	var passwordCipher, totpCipher, sourceCipher, pickupCipher []byte
+	if err := dbValue.(*sql.DB).QueryRow(`SELECT display_password_secret, display_2fa_secret, source_url_secret, pickup_address_secret FROM chatgpt_accounts WHERE id=?`, created.Account.ID).Scan(&passwordCipher, &totpCipher, &sourceCipher, &pickupCipher); err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Contains(passwordCipher, []byte("LEAK_PASSWORD_SENTINEL")) || bytes.Contains(totpCipher, []byte("LEAK_TOTP_SENTINEL")) || bytes.Contains(sourceCipher, []byte("LEAK_SOURCE_SENTINEL")) {
-		t.Fatal("display credentials or source URL were not encrypted at rest")
+	if bytes.Contains(passwordCipher, []byte("LEAK_PASSWORD_SENTINEL")) || bytes.Contains(totpCipher, []byte("LEAK_TOTP_SENTINEL")) || bytes.Contains(sourceCipher, []byte("LEAK_SOURCE_SENTINEL")) || bytes.Contains(pickupCipher, []byte("LEAK_ADDRESS_SENTINEL")) {
+		t.Fatal("display credentials, source URL, or pickup address were not encrypted at rest")
 	}
 	list := getRaw(t, client, server.URL+"/api/admin/accounts")
 	listBody := readBody(t, list)
@@ -117,7 +119,8 @@ func TestAdminAccountCRUDSyncDegradeAndLeakRedaction(t *testing.T) {
 		"display_username":     "updated-account",
 		"display_password":     "UPDATED_PASSWORD_SENTINEL",
 		"display_2fa_secret":   "UPDATED_TOTP_SENTINEL",
-		"pickup_address":       "https://accounts.example.test/orders/UPDATED_SOURCE_SENTINEL",
+		"source_url":           "https://accounts.example.test/source/UPDATED_SOURCE_SENTINEL",
+		"pickup_address":       "pickup-UPDATED_ADDRESS_SENTINEL",
 		"account_expiry":       time.Now().UTC().Add(24 * time.Hour).Format(time.RFC3339Nano),
 		"max_concurrent_users": 3,
 		"status":               "available",
@@ -125,16 +128,16 @@ func TestAdminAccountCRUDSyncDegradeAndLeakRedaction(t *testing.T) {
 		"monitor_account_id":   "phase-one-123",
 	})
 	updateBody := readBody(t, update)
-	if update.StatusCode != http.StatusOK || !strings.Contains(updateBody, "updated-account") || !strings.Contains(updateBody, "UPDATED_SOURCE_SENTINEL") || !strings.Contains(updateBody, "pickup_address") {
+	if update.StatusCode != http.StatusOK || !strings.Contains(updateBody, "updated-account") || !strings.Contains(updateBody, "UPDATED_SOURCE_SENTINEL") || !strings.Contains(updateBody, "UPDATED_ADDRESS_SENTINEL") {
 		t.Fatalf("update status=%d body=%s", update.StatusCode, updateBody)
 	}
 	assertNoCredentialLeak(t, updateBody)
-	var updatedSourceCipher []byte
-	if err := dbValue.(*sql.DB).QueryRow(`SELECT source_url_secret FROM chatgpt_accounts WHERE id=?`, created.Account.ID).Scan(&updatedSourceCipher); err != nil {
+	var updatedSourceCipher, updatedPickupCipher []byte
+	if err := dbValue.(*sql.DB).QueryRow(`SELECT source_url_secret, pickup_address_secret FROM chatgpt_accounts WHERE id=?`, created.Account.ID).Scan(&updatedSourceCipher, &updatedPickupCipher); err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Contains(updatedSourceCipher, []byte("UPDATED_SOURCE_SENTINEL")) {
-		t.Fatal("updated source URL was not encrypted at rest")
+	if bytes.Contains(updatedSourceCipher, []byte("UPDATED_SOURCE_SENTINEL")) || bytes.Contains(updatedPickupCipher, []byte("UPDATED_ADDRESS_SENTINEL")) {
+		t.Fatal("updated source URL or pickup address was not encrypted at rest")
 	}
 	invalidSource := putJSON(t, client, server.URL+"/api/admin/accounts/"+itoa(created.Account.ID), csrf, map[string]any{
 		"display_username":     "updated-account",

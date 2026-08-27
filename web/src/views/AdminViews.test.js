@@ -7,7 +7,7 @@ import Cards from './Cards.vue'
 import Allocations from './Allocations.vue'
 
 const accounts = [
-  { id: 1, display_username: 'north@example.test', pickup_address: 'https://accounts.example.test/orders/42', source_url: 'https://accounts.example.test/orders/42', account_expiry: '2026-08-19T00:00:00Z', max_concurrent_users: 3, current_allocations: 1, monitor_status: 'alive', status: 'available' },
+  { id: 1, display_username: 'north@example.test', pickup_address: 'locker-A42', source_url: 'https://accounts.example.test/source/42', account_expiry: '2026-08-19T00:00:00Z', max_concurrent_users: 3, current_allocations: 1, monitor_status: 'alive', status: 'available' },
   { id: 2, display_username: 'full@example.test', account_expiry: '2026-08-05T00:00:00Z', max_concurrent_users: 2, current_allocations: 2, monitor_status: 'unknown_monitor', status: 'full' },
 ]
 const cards = [
@@ -55,7 +55,8 @@ describe('P2 admin views', () => {
     const fetchMock = vi.fn().mockResolvedValue(response({ accounts, warnings: ['phase_one_monitor_unavailable'] }))
     const wrapper = await render(Accounts, fetchMock)
     expect(wrapper.text()).toContain('north@example.test')
-    expect(wrapper.get('a.source-link').attributes('href')).toBe('https://accounts.example.test/orders/42')
+    expect(wrapper.get('a.source-link').attributes('href')).toBe('https://accounts.example.test/source/42')
+    expect(wrapper.text()).toContain('locker-A42')
     expect(wrapper.text()).toContain('一期监控暂时不可用')
     // 一期账号现在通过事件自动同步过来，手动拉取入口已下线。
     expect(wrapper.text()).not.toContain('从一期同步账号')
@@ -95,12 +96,14 @@ describe('P2 admin views', () => {
     expect(wrapper.find('[role="dialog"]').exists()).toBe(true)
     expect(wrapper.find('#edit-display-password').attributes('placeholder')).toBe('留空不修改')
     expect(wrapper.find('#edit-display-totp').attributes('placeholder')).toBe('留空不修改')
-    expect(wrapper.find('#edit-pickup-address').element.value).toBe('https://accounts.example.test/orders/42')
+		expect(wrapper.find('#edit-source-url').element.value).toBe('https://accounts.example.test/source/42')
+		expect(wrapper.find('#edit-pickup-address').element.value).toBe('locker-A42')
     expect(wrapper.text()).not.toContain('secret-password')
     await wrapper.find('#edit-display-username').setValue('edited@example.test')
     await wrapper.find('#edit-display-password').setValue('new-secret-password')
     await wrapper.find('#edit-display-totp').setValue('NEW-TOTP-SECRET')
-    await wrapper.find('#edit-pickup-address').setValue('https://accounts.example.test/orders/84')
+		await wrapper.find('#edit-source-url').setValue('https://accounts.example.test/source/84')
+		await wrapper.find('#edit-pickup-address').setValue('locker-A84')
     await wrapper.find('.modal-form').trigger('submit')
     await flushPromises()
     const updateCall = fetchMock.mock.calls.find(([url, init]) => String(url) === '/api/admin/accounts/1' && init?.method === 'PUT')
@@ -110,7 +113,8 @@ describe('P2 admin views', () => {
       display_username: 'edited@example.test',
       display_password: 'new-secret-password',
       display_2fa_secret: 'NEW-TOTP-SECRET',
-      pickup_address: 'https://accounts.example.test/orders/84',
+      source_url: 'https://accounts.example.test/source/84',
+      pickup_address: 'locker-A84',
       max_concurrent_users: 3,
       status: 'available',
       monitor_status: 'alive',

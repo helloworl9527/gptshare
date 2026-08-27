@@ -456,16 +456,12 @@ func createAccountHandler(service *accountsvc.Service) gin.HandlerFunc {
 		if !bindJSON(c, &request, 16*1024) {
 			return
 		}
-		pickupAddress := request.PickupAddress
-		if strings.TrimSpace(pickupAddress) == "" {
-			// Keep accepting the old field while callers migrate to pickup_address.
-			pickupAddress = request.SourceURL
-		}
 		result, err := service.Create(c.Request.Context(), accountsvc.CreateInput{
 			DisplayUsername:    request.DisplayUsername,
 			DisplayPassword:    request.DisplayPassword,
 			DisplayTOTPSecret:  request.DisplayTOTPSecret,
-			SourceURL:          pickupAddress,
+			SourceURL:          request.SourceURL,
+			PickupAddress:      request.PickupAddress,
 			MaxConcurrentUsers: request.MaxConcurrentUsers,
 			SyncMonitor:        true,
 			MonitorToken:       request.MonitorToken,
@@ -530,15 +526,12 @@ func updateAccountHandler(service *accountsvc.Service) gin.HandlerFunc {
 		if status == "pending_credentials" && strings.TrimSpace(request.DisplayPassword) != "" && strings.TrimSpace(request.DisplayTOTPSecret) != "" {
 			status = "available"
 		}
-		pickupAddress := request.SourceURL
-		if request.PickupAddress != nil {
-			pickupAddress = request.PickupAddress
-		}
 		account, err := service.Update(c.Request.Context(), id, accountsvc.UpdateInput{
 			DisplayUsername:    request.DisplayUsername,
 			DisplayPassword:    request.DisplayPassword,
 			DisplayTOTPSecret:  request.DisplayTOTPSecret,
-			SourceURL:          pickupAddress,
+			SourceURL:          request.SourceURL,
+			PickupAddress:      request.PickupAddress,
 			AccountExpiry:      expiry,
 			MaxConcurrentUsers: request.MaxConcurrentUsers,
 			Status:             status,
@@ -1141,8 +1134,10 @@ func serializeAccount(account models.Account) gin.H {
 		"status":               account.Status,
 	}
 	if account.SourceURL != "" {
-		body["pickup_address"] = account.SourceURL
 		body["source_url"] = account.SourceURL
+	}
+	if account.PickupAddress != "" {
+		body["pickup_address"] = account.PickupAddress
 	}
 	if account.MonitorAccountID != "" {
 		body["monitor_account_id"] = account.MonitorAccountID
@@ -1338,8 +1333,8 @@ func serializeUserQuery(result userquerysvc.QueryResult) gin.H {
 		},
 		"duration_ms": result.Elapsed.Milliseconds(),
 	}
-	if view.Account.SourceURL != "" {
-		body["account"].(gin.H)["pickup_address"] = view.Account.SourceURL
+	if view.Account.PickupAddress != "" {
+		body["account"].(gin.H)["pickup_address"] = view.Account.PickupAddress
 	}
 	if view.Allocation.GraceUntil != nil {
 		body["replacement_notice"] = gin.H{
@@ -1366,8 +1361,8 @@ func serializeUserQueryAccounts(views []repository.UserAllocationView) []gin.H {
 				"algorithm": "SHA1",
 			},
 		}
-		if view.Account.SourceURL != "" {
-			item["account"].(gin.H)["pickup_address"] = view.Account.SourceURL
+		if view.Account.PickupAddress != "" {
+			item["account"].(gin.H)["pickup_address"] = view.Account.PickupAddress
 		}
 		out = append(out, item)
 	}

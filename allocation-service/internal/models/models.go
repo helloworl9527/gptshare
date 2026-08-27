@@ -11,6 +11,7 @@ type Account struct {
 	MonitorAccountID   string
 	MonitorStatus      string
 	SourceURL          string
+	PickupAddress      string
 	Status             string
 	LastAllocatedAt    *time.Time
 }

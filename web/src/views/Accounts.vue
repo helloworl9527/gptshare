@@ -41,6 +41,7 @@ const editForm = reactive({
   display_username: '',
   display_password: '',
   display_2fa_secret: '',
+  source_url: '',
   pickup_address: '',
   account_expiry: '',
   max_concurrent_users: 3,
@@ -54,7 +55,8 @@ const visible = computed(() => {
   return accounts.value.filter((item) => !term
     || String(item.display_username).toLocaleLowerCase().includes(term)
     || String(item.monitor_account_id || '').toLocaleLowerCase().includes(term)
-    || String(item.source_url || '').toLocaleLowerCase().includes(term))
+    || String(item.source_url || '').toLocaleLowerCase().includes(term)
+    || String(item.pickup_address || '').toLocaleLowerCase().includes(term))
 })
 
 async function load() {
@@ -177,7 +179,8 @@ function openEdit(account) {
     display_username: account.display_username || '',
     display_password: '',
     display_2fa_secret: '',
-    pickup_address: account.pickup_address || account.source_url || '',
+    source_url: account.source_url || '',
+    pickup_address: account.pickup_address || '',
     account_expiry: toLocalDatetime(account.account_expiry),
     max_concurrent_users: account.max_concurrent_users || 1,
     status: account.status || 'available',
@@ -357,15 +360,18 @@ onBeforeUnmount(() => {
       <StatePanel v-else-if="visible.length === 0" title="暂无账号" message="一期新增账号后会自动同步到这里，补齐密码和 2FA 即可分配卡密。" />
       <div v-else class="table-wrap">
         <table>
-          <thead><tr><th>账号</th><th>取件地址</th><th>状态</th><th>容量</th><th>到期</th><th>一期状态</th><th>操作</th></tr></thead>
+          <thead><tr><th>账号</th><th>账号来源</th><th>取件地址</th><th>状态</th><th>容量</th><th>到期</th><th>一期状态</th><th>操作</th></tr></thead>
           <tbody>
             <tr v-for="account in visible" :key="account.id" :class="`row-${accountTone(account)}`">
               <td class="mono-cell">
                 {{ account.display_username }}
               </td>
               <td>
-                <a v-if="account.pickup_address || account.source_url" class="source-link" :href="account.pickup_address || account.source_url" target="_blank" rel="noopener noreferrer">打开取件地址</a>
+                <a v-if="account.source_url" class="source-link" :href="account.source_url" target="_blank" rel="noopener noreferrer">打开来源</a>
                 <span v-else class="muted-value">未填写</span>
+              </td>
+              <td class="mono-cell">
+                {{ account.pickup_address || '未填写' }}
               </td>
               <td><span class="status-badge" :class="`status-${account.status}`">{{ account.status }}</span></td>
               <td><meter min="0" :max="account.max_concurrent_users" :value="account.current_allocations" /> {{ account.current_allocations }}/{{ account.max_concurrent_users }}</td>
@@ -453,6 +459,8 @@ onBeforeUnmount(() => {
         <input id="edit-display-username" v-model="editForm.display_username" required readonly autocomplete="off">
         <label for="edit-display-password">密码</label>
         <input id="edit-display-password" v-model="editForm.display_password" type="password" autocomplete="new-password" placeholder="留空不修改">
+        <label for="edit-source-url">账号来源</label>
+        <input id="edit-source-url" v-model="editForm.source_url" type="url" maxlength="2048" autocomplete="off" placeholder="https://example.com/source（留空清除）">
         <label for="edit-pickup-address">取件地址</label>
         <input id="edit-pickup-address" v-model="editForm.pickup_address" maxlength="2048" autocomplete="off" placeholder="输入用户取件地址（留空清除）">
         <label for="edit-display-totp">替换 2FA Secret</label>

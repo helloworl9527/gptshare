@@ -55,6 +55,7 @@ type CreateInput struct {
 	DisplayPassword    string
 	DisplayTOTPSecret  string
 	SourceURL          string
+	PickupAddress      string
 	AccountExpiry      time.Time
 	MaxConcurrentUsers int
 	SyncMonitor        bool
@@ -67,6 +68,7 @@ type UpdateInput struct {
 	DisplayPassword    string
 	DisplayTOTPSecret  string
 	SourceURL          *string
+	PickupAddress      *string
 	AccountExpiry      time.Time
 	MaxConcurrentUsers int
 	Status             string
@@ -157,6 +159,7 @@ func (s *Service) Create(ctx context.Context, input CreateInput) (CreateResult, 
 		DisplayPassword:    input.DisplayPassword,
 		DisplayTOTPSecret:  input.DisplayTOTPSecret,
 		SourceURL:          sourceURL,
+		PickupAddress:      strings.TrimSpace(input.PickupAddress),
 		AccountExpiry:      result.AccountExpiry,
 		MaxConcurrentUsers: capacity,
 		Status:             "available",
@@ -302,6 +305,7 @@ func (s *Service) Update(ctx context.Context, id int64, input UpdateInput) (mode
 		DisplayPassword:    input.DisplayPassword,
 		DisplayTOTPSecret:  input.DisplayTOTPSecret,
 		SourceURL:          sourceURL,
+		PickupAddress:      normalizeOptionalText(input.PickupAddress),
 		AccountExpiry:      input.AccountExpiry,
 		MaxConcurrentUsers: input.MaxConcurrentUsers,
 		Status:             status,
@@ -511,6 +515,14 @@ func normalizeOptionalSourceURL(value *string) (*string, error) {
 		return nil, err
 	}
 	return &normalized, nil
+}
+
+func normalizeOptionalText(value *string) *string {
+	if value == nil {
+		return nil
+	}
+	normalized := strings.TrimSpace(*value)
+	return &normalized
 }
 
 func normalizeSourceURL(value string) (string, error) {
