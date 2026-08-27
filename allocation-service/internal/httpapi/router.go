@@ -346,7 +346,7 @@ func writeAllocatorError(c *gin.Context, err error) {
 type createAccountRequest struct {
 	DisplayUsername    string `json:"display_username" binding:"max=256"`
 	DisplayPassword    string `json:"display_password" binding:"required,max=2048"`
-	DisplayTOTPSecret  string `json:"display_2fa_secret" binding:"required,max=2048"`
+	DisplayTOTPSecret  string `json:"display_2fa_secret" binding:"max=2048"`
 	PickupAddress      string `json:"pickup_address" binding:"max=2048"`
 	SourceURL          string `json:"source_url" binding:"max=2048"`
 	AccountExpiry      string `json:"account_expiry" binding:"max=64"`

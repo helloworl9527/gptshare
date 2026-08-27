@@ -86,7 +86,7 @@ func (r *Repository) ApplyMonitorAccountEvent(ctx context.Context, event account
 	} else {
 		var credentialsComplete bool
 		var allocations, capacity int
-		if err := tx.QueryRowContext(ctx, `SELECT length(display_password_secret)>0 AND length(display_2fa_secret)>0,current_allocations,max_concurrent_users
+		if err := tx.QueryRowContext(ctx, `SELECT length(display_password_secret)>0 AND (length(display_2fa_secret)>0 OR length(pickup_address_secret)>0),current_allocations,max_concurrent_users
 			FROM chatgpt_accounts WHERE id=?`, accountID).Scan(&credentialsComplete, &allocations, &capacity); err != nil {
 			return accountsync.Result{}, err
 		}

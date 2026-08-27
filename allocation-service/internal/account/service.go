@@ -499,7 +499,7 @@ func (s *Service) importMonitor(ctx context.Context, input CreateInput) (monitor
 }
 
 func validateCreateInput(now time.Time, input CreateInput) error {
-	if input.DisplayPassword == "" || input.DisplayTOTPSecret == "" || strings.TrimSpace(input.MonitorToken) == "" || input.MaxConcurrentUsers < 0 || input.MaxConcurrentUsers > repository.MaxAccountCapacity {
+	if input.DisplayPassword == "" || (input.DisplayTOTPSecret == "" && strings.TrimSpace(input.PickupAddress) == "") || strings.TrimSpace(input.MonitorToken) == "" || input.MaxConcurrentUsers < 0 || input.MaxConcurrentUsers > repository.MaxAccountCapacity {
 		return ErrValidation
 	}
 	_ = now

@@ -29,6 +29,32 @@ func TestApplyMonitorAccountEventCreatesPendingAndMigratesBannedAccount(t *testi
 	if err := database.DB().QueryRow("SELECT status FROM chatgpt_accounts WHERE monitor_account_id='monitor-pending'").Scan(&pendingStatus); err != nil || pendingStatus != "pending_credentials" {
 		t.Fatalf("pending status=%q err=%v", pendingStatus, err)
 	}
+	var pendingID int64
+	if err := database.DB().QueryRow("SELECT id FROM chatgpt_accounts WHERE monitor_account_id='monitor-pending'").Scan(&pendingID); err != nil {
+		t.Fatal(err)
+	}
+	pickupAddress := "locker-pending"
+	if _, err := repo.UpdateAccount(ctx, pendingID, AccountUpdate{
+		DisplayUsername: "pending@example.test", DisplayPassword: "pending-password", PickupAddress: &pickupAddress,
+		AccountExpiry: now.Add(20 * 24 * time.Hour), MaxConcurrentUsers: 3, Status: "pending_credentials", MonitorStatus: "alive", MonitorAccountID: "monitor-pending",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	updatedPending, err := repo.ApplyMonitorAccountEvent(ctx, accountsync.Event{
+		EventID: "event-pending-updated", Version: 2, Type: accountsync.EventAccountUpdated, OccurredAt: now,
+		ProviderAccountID: "monitor-pending", Email: "pending@example.test", Plan: "plus",
+		SubscriptionExpiry: now.Add(20 * 24 * time.Hour), Status: "alive",
+	})
+	if err != nil || updatedPending.Disposition != "applied" {
+		t.Fatalf("updated pending event=%+v err=%v", updatedPending, err)
+	}
+	if err := database.DB().QueryRow("SELECT status FROM chatgpt_accounts WHERE id=?", pendingID).Scan(&pendingStatus); err != nil || pendingStatus != "available" {
+		t.Fatalf("pickup address should satisfy credentials status=%q err=%v", pendingStatus, err)
+	}
+	// Keep this fixture out of the later account-replacement scenario.
+	if _, err := database.DB().Exec("UPDATE chatgpt_accounts SET status='disabled' WHERE id=?", pendingID); err != nil {
+		t.Fatal(err)
+	}
 
 	oldID, err := repo.CreateAccount(ctx, AccountSeed{
 		DisplayUsername: "old@example.test", DisplayPassword: "old-password", DisplayTOTPSecret: "old-totp",

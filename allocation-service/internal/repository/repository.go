@@ -300,9 +300,13 @@ func (r *Repository) CreateAccount(ctx context.Context, seed AccountSeed) (int64
 	if err != nil {
 		return 0, err
 	}
-	totp, err := r.credentials.Seal(accountID, credential.CredentialTOTP, []byte(seed.DisplayTOTPSecret))
-	if err != nil {
-		return 0, err
+	totp := credential.Sealed{KeyID: r.credentials.ActiveKeyID(), Ciphertext: []byte{}}
+	if strings.TrimSpace(seed.DisplayTOTPSecret) != "" {
+		sealed, err := r.credentials.Seal(accountID, credential.CredentialTOTP, []byte(seed.DisplayTOTPSecret))
+		if err != nil {
+			return 0, err
+		}
+		totp = sealed
 	}
 	var sourceKeyID any
 	var sourceCiphertext any
@@ -1379,6 +1383,16 @@ func (r *Repository) UpdateAccount(ctx context.Context, accountID int64, update 
 			}
 		}
 	}
+	if _, err := tx.ExecContext(ctx, `UPDATE chatgpt_accounts
+		SET status=CASE
+			WHEN status IN ('pending_credentials','available','full') THEN
+				CASE WHEN length(display_password_secret)>0 AND (length(display_2fa_secret)>0 OR length(pickup_address_secret)>0)
+					THEN CASE WHEN current_allocations >= max_concurrent_users THEN 'full' ELSE 'available' END
+					ELSE 'pending_credentials' END
+			ELSE status
+		END, updated_at=? WHERE id=? AND archived_at IS NULL`, formatTime(now), accountID); err != nil {
+		return models.Account{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return models.Account{}, err
 	}
@@ -1695,21 +1709,28 @@ func (r *Repository) Credentials(ctx context.Context, accountID int64) (AccountC
 	}
 	var passwordKeyID, totpKeyID string
 	var passwordCiphertext, totpCiphertext []byte
-	if err := r.db.QueryRowContext(ctx, `SELECT display_password_key_id,display_password_secret,display_2fa_key_id,display_2fa_secret
+	var pickupCiphertext []byte
+	if err := r.db.QueryRowContext(ctx, `SELECT display_password_key_id,display_password_secret,display_2fa_key_id,display_2fa_secret,pickup_address_secret
 		FROM chatgpt_accounts WHERE id=? AND archived_at IS NULL`, accountID).
-		Scan(&passwordKeyID, &passwordCiphertext, &totpKeyID, &totpCiphertext); err != nil {
+		Scan(&passwordKeyID, &passwordCiphertext, &totpKeyID, &totpCiphertext, &pickupCiphertext); err != nil {
 		return AccountCredentials{}, err
 	}
-	if strings.TrimSpace(passwordKeyID) == "" || len(passwordCiphertext) == 0 || strings.TrimSpace(totpKeyID) == "" || len(totpCiphertext) == 0 {
+	if strings.TrimSpace(passwordKeyID) == "" || len(passwordCiphertext) == 0 || (strings.TrimSpace(totpKeyID) == "" && len(totpCiphertext) == 0 && len(pickupCiphertext) == 0) {
 		return AccountCredentials{}, ErrAccountCredentialsUnavailable
 	}
 	password, err := r.credentials.Open(accountID, credential.CredentialPassword, passwordKeyID, passwordCiphertext)
 	if err != nil {
 		return AccountCredentials{}, err
 	}
-	totpSecret, err := r.credentials.Open(accountID, credential.CredentialTOTP, totpKeyID, totpCiphertext)
-	if err != nil {
-		return AccountCredentials{}, err
+	var totpSecret []byte
+	if len(totpCiphertext) > 0 {
+		if strings.TrimSpace(totpKeyID) == "" {
+			return AccountCredentials{}, credential.ErrDecryptCredential
+		}
+		totpSecret, err = r.credentials.Open(accountID, credential.CredentialTOTP, totpKeyID, totpCiphertext)
+		if err != nil {
+			return AccountCredentials{}, err
+		}
 	}
 	return AccountCredentials{Password: string(password), TOTPSecret: string(totpSecret)}, nil
 }

@@ -449,8 +449,9 @@ func TestUpsertSyncedAccountPendingCredentialsAndDoesNotOverwriteCredentials(t *
 	if !created || first.Status != "pending_credentials" || first.MaxConcurrentUsers != 5 || first.DisplayUsername != "pulled@example.test" {
 		t.Fatalf("bad first pull account=%+v created=%v", first, created)
 	}
+	pickupAddress := "locker-42"
 	updated, err := repo.UpdateAccount(context.Background(), first.ID, AccountUpdate{
-		DisplayUsername: first.DisplayUsername, DisplayPassword: "filled-password", DisplayTOTPSecret: "JBSWY3DPEHPK3PXP",
+		DisplayUsername: first.DisplayUsername, DisplayPassword: "filled-password", PickupAddress: &pickupAddress,
 		AccountExpiry: first.AccountExpiry, MaxConcurrentUsers: first.MaxConcurrentUsers, Status: "available", MonitorStatus: "alive", MonitorAccountID: first.MonitorAccountID,
 	})
 	if err != nil {
@@ -474,8 +475,19 @@ func TestUpsertSyncedAccountPendingCredentialsAndDoesNotOverwriteCredentials(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	if creds.Password != "filled-password" || creds.TOTPSecret != "JBSWY3DPEHPK3PXP" {
+	if creds.Password != "filled-password" || creds.TOTPSecret != "" {
 		t.Fatalf("bad credentials after fill: %+v", creds)
+	}
+	updated, err = repo.UpdateAccount(context.Background(), first.ID, AccountUpdate{
+		DisplayUsername: first.DisplayUsername, DisplayTOTPSecret: "JBSWY3DPEHPK3PXP",
+		AccountExpiry: first.AccountExpiry, MaxConcurrentUsers: first.MaxConcurrentUsers, Status: "available", MonitorStatus: "alive", MonitorAccountID: first.MonitorAccountID,
+	})
+	if err != nil || updated.Status != "available" {
+		t.Fatalf("adding optional 2FA changed account status=%q err=%v", updated.Status, err)
+	}
+	creds, err = repo.Credentials(context.Background(), first.ID)
+	if err != nil || creds.TOTPSecret != "JBSWY3DPEHPK3PXP" {
+		t.Fatalf("2FA credential was not saved: %+v err=%v", creds, err)
 	}
 	second, created, err := repo.UpsertSyncedAccount(context.Background(), SyncedAccount{
 		MonitorAccountID: "phase-one-sync-1",
