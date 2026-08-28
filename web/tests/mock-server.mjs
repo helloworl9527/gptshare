@@ -249,6 +249,7 @@ const server = http.createServer(async (request, response) => {
   if (url.pathname === '/api/cards/query' && request.method === 'POST') {
     await readJSON(request)
     if (scenario === 'expired-card') return send(response, 404, { code: 'query_not_available' })
+    if (scenario === 'pickup-only') return send(response, 200, { result: { account: { display_username: 'pickup-only@example.test', password: 'pickup-only-password', pickup_address: 'https://pickup.example.test/order/42' }, totp: { secret: '' }, card: { valid_until: '2026-11-25T00:00:00Z' }, replacement_notice: { state: 'primary' } } })
     return send(response, 200, { result: { account: { display_username: 'public@example.test', password: 'public-test-password' }, totp: { secret: 'JBSWY3DPEHPK3PXP' }, card: { valid_until: '2026-08-23T00:00:00Z' }, replacement_notice: { state: 'primary' } } })
   }
   return send(response, 404, { code: 'not_found' })

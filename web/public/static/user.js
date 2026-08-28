@@ -145,7 +145,8 @@ document.querySelectorAll("[data-copy-target]").forEach((button) => {
 });
 
 async function renderResult(result) {
-  currentSecret = result.totp.secret;
+  currentSecret = result.totp?.secret || "";
+  generatedTOTPPeriod = null;
   validUntil = new Date(result.card.valid_until);
   document.querySelector("#account").textContent = result.account.display_username;
   document.querySelector("#password").textContent = result.account.password;
@@ -156,12 +157,20 @@ async function renderResult(result) {
   else pickup.removeAttribute("href");
   pickup.toggleAttribute("aria-disabled", !pickupAddress);
   document.querySelector("#replacement-notice").textContent = result.replacement_notice.state === "grace" ? "当前处于换号宽限期，请留意后续替换通知。" : "当前账号为主账号。";
-  await refreshDisplayedTOTP();
+  if (currentSecret) {
+    refreshButton.disabled = false;
+    await refreshDisplayedTOTP();
+  } else {
+    refreshButton.disabled = true;
+    document.querySelector("#totp-code").textContent = "未提供";
+    document.querySelector("#totp-timer").textContent = "请使用取件地址";
+  }
   setCopyStatus("");
   resultPanel.classList.add("visible");
 }
 
 async function refreshDisplayedTOTP() {
+  if (!currentSecret) return;
   const period = Math.floor(Date.now() / 1000 / 30);
   document.querySelector("#totp-code").textContent = await generateTOTP(currentSecret, period);
   generatedTOTPPeriod = period;
@@ -176,7 +185,9 @@ function updateCountdowns() {
   const now = Date.now();
   const nowSeconds = Math.floor(now / 1000);
   const currentPeriod = Math.floor(nowSeconds / 30);
-  if (currentSecret && generatedTOTPPeriod !== null && currentPeriod > generatedTOTPPeriod) {
+  if (!currentSecret) {
+    document.querySelector("#totp-timer").textContent = "请使用取件地址";
+  } else if (generatedTOTPPeriod !== null && currentPeriod > generatedTOTPPeriod) {
     document.querySelector("#totp-timer").textContent = "当前验证码已过期，请手动刷新";
   } else {
     const period = generatedTOTPPeriod ?? currentPeriod;

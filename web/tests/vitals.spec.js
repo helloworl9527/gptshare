@@ -183,3 +183,21 @@ test('public card flow identifies a previously saved expired card', async ({ pag
   await expect(page.locator('#result')).not.toHaveClass(/visible/)
   await expect(page.locator('#saved-cards-list')).toContainText('STUV-WXYZ-2345')
 })
+
+test('public card flow displays pickup-only credentials without requiring 2FA', async ({ page, request }) => {
+  const consoleErrors = []
+  page.on('console', (message) => { if (message.type() === 'error') consoleErrors.push(message.text()) })
+  await scenario(request, 'pickup-only', true)
+  await page.goto('/admin/user.html')
+  await page.getByLabel('卡密', { exact: true }).fill('22X9-Q5KQ-ED5R')
+  await page.getByRole('button', { name: '查询或兑换卡密' }).click()
+
+  await expect(page.locator('#result')).toHaveClass(/visible/)
+  await expect(page.locator('#account')).toHaveText('pickup-only@example.test')
+  await expect(page.locator('#password')).toHaveText('pickup-only-password')
+  await expect(page.locator('#pickup-address')).toHaveAttribute('href', 'https://pickup.example.test/order/42')
+  await expect(page.locator('#totp-code')).toHaveText('未提供')
+  await expect(page.locator('#totp-timer')).toHaveText('请使用取件地址')
+  await expect(page.getByRole('button', { name: '刷新验证码' })).toBeDisabled()
+  expect(consoleErrors).toEqual([])
+})
