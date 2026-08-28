@@ -196,8 +196,15 @@ test('public card flow displays pickup-only credentials without requiring 2FA', 
   await expect(page.locator('#account')).toHaveText('pickup-only@example.test')
   await expect(page.locator('#password')).toHaveText('pickup-only-password')
   await expect(page.locator('#pickup-address')).toHaveAttribute('href', 'https://pickup.example.test/order/42')
-  await expect(page.locator('#totp-code')).toHaveText('未提供')
-  await expect(page.locator('#totp-timer')).toHaveText('请使用取件地址')
-  await expect(page.getByRole('button', { name: '刷新验证码' })).toBeDisabled()
+  await expect(page.locator('#pickup-instructions')).toBeVisible()
+  await expect(page.locator('#pickup-instructions')).toHaveText('打开取件地址，输入以上账号和密码登录邮箱；GPT 账号和密码也相同。')
+  const pickupStyle = await page.locator('#pickup-address').evaluate((element) => {
+    const style = getComputedStyle(element)
+    return { color: style.color, decoration: style.textDecorationLine }
+  })
+  const accountColor = await page.locator('#account').evaluate((element) => getComputedStyle(element).color)
+  expect(pickupStyle).toEqual({ color: accountColor, decoration: 'none' })
+  await expect(page.locator('#totp-item')).toBeHidden()
+  await expect(page.locator('#refresh-totp')).toBeDisabled()
   expect(consoleErrors).toEqual([])
 })

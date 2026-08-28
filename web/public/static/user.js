@@ -156,8 +156,10 @@ async function renderResult(result) {
   if (pickupAddress) pickup.href = pickupAddress;
   else pickup.removeAttribute("href");
   pickup.toggleAttribute("aria-disabled", !pickupAddress);
+  document.querySelector("#pickup-instructions").hidden = !pickupAddress;
+  document.querySelector("#totp-item").hidden = Boolean(pickupAddress);
   document.querySelector("#replacement-notice").textContent = result.replacement_notice.state === "grace" ? "当前处于换号宽限期，请留意后续替换通知。" : "当前账号为主账号。";
-  if (currentSecret) {
+  if (!pickupAddress && currentSecret) {
     refreshButton.disabled = false;
     await refreshDisplayedTOTP();
   } else {
