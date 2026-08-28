@@ -244,6 +244,27 @@ tbody tr { border-left: 4px solid var(--green); }
 .generated-heading .section-index { margin: 0; }
 .generated-list { display: flex; flex-wrap: wrap; gap: 8px; }
 .generated-list code { border: 1px solid var(--line); background: #f7faf9; padding: 7px 9px; font: 700 12px var(--mono); }
+.card-lookup-result { margin-top: 20px; overflow: hidden; border: 1px solid var(--line); border-left: 4px solid var(--cyan); background: #f8fbfa; }
+.lookup-result-head { display: flex; align-items: center; justify-content: space-between; gap: 18px; border-bottom: 1px solid var(--line); background: #fff; padding: 18px 20px; }
+.lookup-result-head > div { display: grid; gap: 5px; min-width: 0; }
+.lookup-result-head > div > span { color: var(--muted); font: 700 10px var(--mono); letter-spacing: .12em; text-transform: uppercase; }
+.lookup-result-head > div > strong { font: 680 18px var(--display); }
+.lookup-detail-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 0; }
+.lookup-detail-grid > div { min-width: 0; border-bottom: 1px solid var(--line); padding: 20px; }
+.lookup-detail-grid > div:nth-child(odd) { border-right: 1px solid var(--line); }
+.lookup-detail-grid .lookup-account-detail { grid-column: 1 / -1; border-right: 0; }
+.lookup-detail-grid dt { color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+.lookup-detail-grid dd { margin: 9px 0 0; color: var(--ink); font-weight: 700; overflow-wrap: anywhere; }
+.lookup-management { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 18px 20px; }
+.lookup-management > div:first-child { max-width: 720px; }
+.lookup-management strong { font-size: 13px; }
+.lookup-management p { margin: 5px 0 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.lookup-action-buttons { display: flex; flex: 0 0 auto; gap: 8px; }
+.lookup-action-buttons button { min-height: 40px; border: 1px solid #cbd6d1; border-radius: 3px; background: #fff; padding: 0 16px; }
+.revoke-confirmation { display: grid; gap: 14px; margin-top: 18px; }
+.revoke-confirmation p { margin: 0; color: var(--muted); line-height: 1.7; }
+.revoke-confirmation .destructive-note { border-left: 3px solid var(--red); background: #fff2f2; color: #91252b; padding: 10px 12px; font-weight: 700; }
+.revoke-confirmation .action-row { justify-content: flex-end; }
 .history-note { margin-top: 18px; border-left: 4px solid var(--cyan); }
 .history-note p:last-child { color: var(--muted); line-height: 1.7; }
 .capacity-panel { margin-bottom: 18px; border-left: 4px solid var(--green); }
@@ -414,6 +435,12 @@ tbody tr { border-left: 4px solid var(--green); }
   .table-wrap table { min-width: 760px; }
   .capacity-form { grid-template-columns: 1fr; }
   .capacity-form > * { width: 100%; }
+  .lookup-detail-grid { grid-template-columns: 1fr; }
+  .lookup-detail-grid > div:nth-child(odd) { border-right: 0; }
+  .lookup-detail-grid .lookup-account-detail { grid-column: auto; }
+  .lookup-management { align-items: stretch; flex-direction: column; }
+  .lookup-action-buttons { width: 100%; }
+  .lookup-action-buttons button { flex: 1; }
   th, td { padding: 12px 10px; font-size: 12px; }
   .bucket-row, .timeline li { grid-template-columns: 1fr; }
   .domain-kpis { grid-template-columns: 1fr 1fr; }

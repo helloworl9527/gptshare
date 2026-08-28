@@ -338,6 +338,14 @@ describe('P2 admin views', () => {
         expires_at: '2026-08-28T01:00:00Z',
       } }))
       .mockResolvedValueOnce(response({ cards }))
+      .mockResolvedValueOnce(response({ card: {
+        id: 2,
+        code_suffix: 'EFGH',
+        status: 'revoked',
+        redeemed_at: '2026-07-24T01:00:00Z',
+        expires_at: '2026-08-28T01:00:00Z',
+      } }))
+      .mockResolvedValueOnce(response({ cards }))
     const wrapper = await render(Cards, fetchMock)
     await wrapper.get('#card-lookup-code').setValue('2345-6789-EFGH')
     await wrapper.get('form.controls').trigger('submit')
@@ -346,8 +354,10 @@ describe('P2 admin views', () => {
     expect(lookupCall).toBeTruthy()
     expect(JSON.parse(lookupCall[1].body)).toEqual({ code: '2345-6789-EFGH' })
     expect(wrapper.text()).toContain('assigned@example.test')
-    expect(wrapper.text()).toContain('redeemed')
+    expect(wrapper.text()).toContain('已兑换')
     expect(wrapper.text()).toContain('2026')
+    expect(wrapper.find('.lookup-detail-grid').exists()).toBe(true)
+    expect(wrapper.find('.lookup-management').exists()).toBe(true)
     const lookupSection = wrapper.get('section[aria-labelledby="card-lookup-title"]')
     await lookupSection.findAll('button').find((button) => button.text() === '延期').trigger('click')
     await wrapper.get('#extend-days').setValue(5)
@@ -357,6 +367,15 @@ describe('P2 admin views', () => {
     expect(extendCall).toBeTruthy()
     expect(JSON.parse(extendCall[1].body)).toEqual({ days: 5 })
     expect(wrapper.text()).toContain('卡密有效期已延期')
+
+    await lookupSection.findAll('button').find((button) => button.text() === '作废').trigger('click')
+    expect(wrapper.get('[role="dialog"]').text()).toContain('此操作不能撤销')
+    await wrapper.findAll('button').find((button) => button.text() === '确认作废').trigger('click')
+    await flushPromises()
+    const revokeCall = fetchMock.mock.calls.find(([url]) => String(url) === '/api/admin/cards/2/revoke')
+    expect(revokeCall).toBeTruthy()
+    expect(wrapper.text()).toContain('卡密已作废')
+    expect(wrapper.text()).toContain('暂无对应账号')
     wrapper.unmount()
   })
 

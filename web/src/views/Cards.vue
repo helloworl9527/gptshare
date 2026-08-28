@@ -21,6 +21,14 @@ const lookup = reactive({ code: '', result: null, error: '' })
 const visible = computed(() => cards.value)
 const maxExtendDays = computed(() => remainingExtensionDays(form.selected))
 
+function cardStatusLabel(card) {
+  return ({ unused: '未使用', redeemed: '已兑换', revoked: '已作废', expired: '已过期' })[card?.status] || card?.status || '未知'
+}
+
+function canRevoke(card) {
+  return Boolean(card && card.status !== 'revoked' && card.status !== 'expired')
+}
+
 function validDurationDays(value) {
   const days = Number(value)
   return Number.isInteger(days) && days >= 1 && days <= 90
@@ -38,6 +46,11 @@ function openExtend(card) {
   form.selected = card
   form.extend_days = Math.min(7, Math.max(1, remainingExtensionDays(card)))
   modal.value = 'extend'
+}
+
+function openRevoke(card) {
+  form.selected = card
+  modal.value = 'revoke'
 }
 
 async function load() {
@@ -118,11 +131,17 @@ async function exportBatch() {
   }
 }
 
-async function revoke(card) {
+async function revoke() {
+  if (!canRevoke(form.selected)) return
   busy.value = true
   notice.value = ''
   try {
-    await api.revokeCard(card.id)
+    const result = await api.revokeCard(form.selected.id)
+    if (lookup.result?.card?.id === form.selected.id && result.card) {
+      lookup.result.card = result.card
+      lookup.result.current_account = null
+    }
+    modal.value = ''
     notice.value = '卡密已作废，用户侧不可再查询对应账号。'
     await load()
   } catch (reason) {
@@ -234,29 +253,44 @@ onMounted(load)
       <p v-if="lookup.error" class="credential-alert" role="alert">
         {{ lookup.error }}
       </p>
-      <div v-if="lookup.result" class="credential-values" aria-live="polite">
-        <div class="credential-field">
-          <span class="credential-label">状态</span>
-          <strong>{{ lookup.result.card.status }}</strong>
-        </div>
-        <div class="credential-field">
-          <span class="credential-label">激活时间</span>
-          <strong>{{ lookup.result.card.redeemed_at ? formatDateTime(lookup.result.card.redeemed_at) : '尚未激活' }}</strong>
-        </div>
-        <div class="credential-field">
-          <span class="credential-label">过期时间</span>
-          <strong>{{ lookup.result.card.expires_at ? formatDateTime(lookup.result.card.expires_at) : '尚未生成' }}</strong>
-        </div>
-        <div class="credential-field">
-          <span class="credential-label">当前对应账号</span>
-          <strong class="mono-cell">{{ lookup.result.current_account?.display_username || '暂无对应账号' }}</strong>
-        </div>
-        <div class="credential-field">
-          <span class="credential-label">有效期操作</span>
-          <button type="button" :disabled="remainingExtensionDays(lookup.result.card) < 1" @click="openExtend(lookup.result.card)">
-            延期
-          </button>
-        </div>
+      <div v-if="lookup.result" class="card-lookup-result" aria-live="polite">
+        <header class="lookup-result-head">
+          <div>
+            <span>查询结果</span>
+            <strong>卡密尾号 {{ lookup.result.card.code_suffix }}</strong>
+          </div>
+          <span class="status-badge" :class="`status-${lookup.result.card.status}`">{{ cardStatusLabel(lookup.result.card) }}</span>
+        </header>
+        <dl class="lookup-detail-grid">
+          <div>
+            <dt>激活时间</dt>
+            <dd>{{ lookup.result.card.redeemed_at ? formatDateTime(lookup.result.card.redeemed_at) : '尚未激活' }}</dd>
+          </div>
+          <div>
+            <dt>过期时间</dt>
+            <dd>{{ lookup.result.card.expires_at ? formatDateTime(lookup.result.card.expires_at) : '尚未生成' }}</dd>
+          </div>
+          <div class="lookup-account-detail">
+            <dt>当前对应账号</dt>
+            <dd class="mono-cell">
+              {{ lookup.result.current_account?.display_username || '暂无对应账号' }}
+            </dd>
+          </div>
+        </dl>
+        <footer class="lookup-management">
+          <div>
+            <strong>卡密管理</strong>
+            <p>延期后总有效期不超过激活后的 90 天；作废后用户将立即无法查询，且释放当前账号分配。</p>
+          </div>
+          <div class="lookup-action-buttons">
+            <button type="button" :disabled="remainingExtensionDays(lookup.result.card) < 1" @click="openExtend(lookup.result.card)">
+              延期
+            </button>
+            <button class="danger-button" type="button" :disabled="!canRevoke(lookup.result.card)" @click="openRevoke(lookup.result.card)">
+              作废
+            </button>
+          </div>
+        </footer>
       </div>
     </section>
     <section class="panel table-panel" aria-labelledby="cards-title">
@@ -321,7 +355,7 @@ onMounted(load)
                 <button type="button" :disabled="remainingExtensionDays(card) < 1" :title="remainingExtensionDays(card) < 1 ? '该卡密已达到 90 天有效期上限' : ''" @click="openExtend(card)">
                   延期
                 </button>
-                <button class="danger-button" type="button" :disabled="card.status === 'revoked' || card.status === 'expired'" @click="revoke(card)">
+                <button class="danger-button" type="button" :disabled="!canRevoke(card)" @click="openRevoke(card)">
                   作废
                 </button>
               </td>
@@ -367,6 +401,22 @@ onMounted(load)
           确认延期
         </button>
       </form>
+    </FocusModal>
+    <FocusModal v-if="modal === 'revoke'" title="确认作废卡密" @close="modal = ''">
+      <div class="revoke-confirmation">
+        <p>即将作废尾号 <strong>{{ form.selected?.code_suffix }}</strong> 的卡密。作废后用户将立即无法继续查询，当前账号分配也会被释放。</p>
+        <p class="destructive-note">
+          此操作不能撤销。
+        </p>
+        <div class="action-row">
+          <button type="button" :disabled="busy" @click="modal = ''">
+            取消
+          </button>
+          <button class="danger-button" type="button" :disabled="busy" @click="revoke">
+            确认作废
+          </button>
+        </div>
+      </div>
     </FocusModal>
   </AdminShell>
 </template>

@@ -227,6 +227,16 @@ const server = http.createServer(async (request, response) => {
     cards.push(...generated.map((item) => ({ id: item.id, code_suffix: item.code_suffix, duration_days: item.duration_days, status: item.status, created_at: '2026-07-24T03:00:00Z', updated_at: '2026-07-24T03:00:00Z' })))
     return send(response, 201, { cards: generated })
   }
+  if (url.pathname === '/api/admin/cards/lookup' && request.method === 'POST') {
+    if (!protect(request, response)) return
+    const body = await readJSON(request)
+    if (String(body.code || '').toUpperCase() !== '2345-6789-EFGH') return send(response, 404, { code: 'card_not_found' })
+    const card = cards.find((item) => item.id === 2)
+    return send(response, 200, {
+      card,
+      current_account: card?.status === 'redeemed' ? { id: 1, display_username: 'north@example.test' } : null,
+    })
+  }
   if (url.pathname === '/api/admin/cards/export' && request.method === 'POST') { if (!protect(request, response)) return; await readJSON(request); return send(response, 200, { exported: true }) }
   const revoke = url.pathname.match(/^\/api\/admin\/cards\/(\d+)\/revoke$/)
   if (revoke && request.method === 'POST') { if (!protect(request, response)) return; const card = cards.find((item) => item.id === Number(revoke[1])); if (card) card.status = 'revoked'; return send(response, 200, { card }) }

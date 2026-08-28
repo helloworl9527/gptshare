@@ -125,6 +125,36 @@ test('monitor 401 explains the failed stage and next action', async ({ page }, t
   expect(consoleErrors).toEqual([])
 })
 
+test('admin card lookup supports extension and confirmed revocation', async ({ page }) => {
+  const consoleErrors = []
+  page.on('console', (message) => { if (message.type() === 'error') consoleErrors.push(message.text()) })
+  await login(page)
+  await page.getByRole('link', { name: '卡密', exact: true }).click()
+  await page.getByLabel('完整卡密').fill('2345-6789-EFGH')
+  await page.getByRole('button', { name: '查询', exact: true }).click()
+
+  const result = page.locator('.card-lookup-result')
+  await expect(result).toContainText('卡密尾号 EFGH')
+  await expect(result).toContainText('已兑换')
+  await expect(result).toContainText('north@example.test')
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+
+  await result.getByRole('button', { name: '延期', exact: true }).click()
+  await page.getByLabel('延期天数').fill('5')
+  await page.getByRole('dialog').getByRole('button', { name: '确认延期' }).click()
+  await expect(page.getByText('卡密有效期已延期。')).toBeVisible()
+
+  await result.getByRole('button', { name: '作废', exact: true }).click()
+  const dialog = page.getByRole('dialog')
+  await expect(dialog).toContainText('此操作不能撤销')
+  await dialog.getByRole('button', { name: '确认作废' }).click()
+  await expect(page.getByText('卡密已作废，用户侧不可再查询对应账号。')).toBeVisible()
+  await expect(result).toContainText('已作废')
+  await expect(result).toContainText('暂无对应账号')
+  await expect(result.getByRole('button', { name: '作废', exact: true })).toBeDisabled()
+  expect(consoleErrors).toEqual([])
+})
+
 test('public card flow persists redeemed card codes without account credentials', async ({ page }) => {
   const consoleErrors = []
   page.on('console', (message) => { if (message.type() === 'error') consoleErrors.push(message.text()) })
