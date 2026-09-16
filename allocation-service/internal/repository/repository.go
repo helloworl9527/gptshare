@@ -87,6 +87,16 @@ type CardSeed struct {
 	DurationDays  int
 }
 
+// CardExtensionResult describes the state produced by an administrative card
+// extension. Reactivating an expired card may create a new allocation, while
+// extending an unused or active card does not.
+type CardExtensionResult struct {
+	Card       models.Card
+	Allocation *models.Allocation
+	Account    *models.Account
+	Mode       string
+}
+
 type CardFilter struct {
 	Status       string
 	DurationDays int
@@ -608,47 +618,155 @@ func (r *Repository) RevokeCard(ctx context.Context, cardID int64) (models.Card,
 }
 
 func (r *Repository) ExtendCard(ctx context.Context, cardID int64, days int) (models.Card, error) {
+	result, err := r.ExtendCardWithMonitor(ctx, cardID, days, true)
+	return result.Card, err
+}
+
+// ExtendCardWithMonitor extends an unused/active card or starts a new service
+// period for an expired card. Expired-card reactivation, capacity release and
+// new allocation are deliberately kept in one transaction so a failed
+// reactivation cannot leave a card or account in a partial state.
+func (r *Repository) ExtendCardWithMonitor(ctx context.Context, cardID int64, days int, monitorAvailable bool) (CardExtensionResult, error) {
+	if days < 1 || days > 90 {
+		return CardExtensionResult{}, ErrCardDurationLimit
+	}
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
-		return models.Card{}, err
+		return CardExtensionResult{}, err
 	}
 	defer tx.Rollback()
 	now := r.now().UTC()
 	var status string
+	var durationDays int
 	var redeemedRaw, expiresRaw sql.NullString
-	if err := tx.QueryRowContext(ctx, "SELECT status,redeemed_at,expires_at FROM cards WHERE id=?", cardID).Scan(&status, &redeemedRaw, &expiresRaw); err != nil {
-		return models.Card{}, err
+	if err := tx.QueryRowContext(ctx, "SELECT status,duration_days,redeemed_at,expires_at FROM cards WHERE id=?", cardID).Scan(&status, &durationDays, &redeemedRaw, &expiresRaw); err != nil {
+		return CardExtensionResult{}, err
 	}
-	if status != "redeemed" || !redeemedRaw.Valid || !expiresRaw.Valid {
-		return models.Card{}, ErrCardStateConflict
+	if status == "revoked" {
+		return CardExtensionResult{}, ErrCardStateConflict
+	}
+	if status == "unused" {
+		if durationDays+days > 90 {
+			return CardExtensionResult{}, ErrCardDurationLimit
+		}
+		updated, err := tx.ExecContext(ctx, `UPDATE cards SET duration_days=duration_days+?,updated_at=? WHERE id=? AND status='unused'`, days, formatTime(now), cardID)
+		if err != nil {
+			return CardExtensionResult{}, err
+		}
+		if affected, _ := updated.RowsAffected(); affected != 1 {
+			return CardExtensionResult{}, ErrCardStateConflict
+		}
+		if err := tx.Commit(); err != nil {
+			return CardExtensionResult{}, err
+		}
+		card, err := r.CardByID(ctx, cardID)
+		return CardExtensionResult{Card: card, Mode: "unused"}, err
+	}
+	if status != "redeemed" && status != "expired" || !redeemedRaw.Valid || !expiresRaw.Valid {
+		return CardExtensionResult{}, ErrCardStateConflict
 	}
 	redeemedAt, err := parseTime(redeemedRaw.String)
 	if err != nil {
-		return models.Card{}, err
+		return CardExtensionResult{}, err
 	}
 	expiresAt, err := parseTime(expiresRaw.String)
 	if err != nil {
-		return models.Card{}, err
+		return CardExtensionResult{}, err
 	}
-	if !expiresAt.After(now) {
-		return models.Card{}, ErrCardStateConflict
+	if expiresAt.After(now) && status == "redeemed" {
+		extended := expiresAt.Add(time.Duration(days) * 24 * time.Hour)
+		if extended.After(redeemedAt.Add(90 * 24 * time.Hour)) {
+			return CardExtensionResult{}, ErrCardDurationLimit
+		}
+		newDurationDays := int(extended.Sub(redeemedAt) / (24 * time.Hour))
+		updated, err := tx.ExecContext(ctx, `UPDATE cards SET duration_days=?,expires_at=?,updated_at=? WHERE id=? AND status='redeemed'`, newDurationDays, formatTime(extended), formatTime(now), cardID)
+		if err != nil {
+			return CardExtensionResult{}, err
+		}
+		if affected, _ := updated.RowsAffected(); affected != 1 {
+			return CardExtensionResult{}, ErrCardStateConflict
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE allocations SET valid_until=?,updated_at=? WHERE card_id=? AND active=1 AND allocation_state IN ('primary','grace')`, formatTime(extended), formatTime(now), cardID); err != nil {
+			return CardExtensionResult{}, err
+		}
+		if err := tx.Commit(); err != nil {
+			return CardExtensionResult{}, err
+		}
+		card, err := r.CardByID(ctx, cardID)
+		return CardExtensionResult{Card: card, Mode: "active"}, err
 	}
-	extended := expiresAt.Add(time.Duration(days) * 24 * time.Hour)
-	if extended.After(redeemedAt.Add(90 * 24 * time.Hour)) {
-		return models.Card{}, ErrCardDurationLimit
+
+	// The card is expired (or has passed its expiry before the periodic sweep).
+	// Close any stale active allocation first, releasing its seat before
+	// selecting a replacement. Everything remains inside this transaction.
+	rows, err := tx.QueryContext(ctx, `SELECT account_id,count(*) FROM allocations WHERE card_id=? AND active=1 AND allocation_state IN ('primary','grace') GROUP BY account_id`, cardID)
+	if err != nil {
+		return CardExtensionResult{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE cards SET expires_at=?, updated_at=? WHERE id=?`, formatTime(extended), formatTime(now), cardID); err != nil {
-		return models.Card{}, err
+	releases := make(map[int64]int)
+	for rows.Next() {
+		var accountID int64
+		var count int
+		if err := rows.Scan(&accountID, &count); err != nil {
+			rows.Close()
+			return CardExtensionResult{}, err
+		}
+		releases[accountID] = count
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE allocations
-		SET valid_until=?, updated_at=?
-		WHERE card_id=? AND active=1 AND allocation_state IN ('primary','grace')`, formatTime(extended), formatTime(now), cardID); err != nil {
-		return models.Card{}, err
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return CardExtensionResult{}, err
+	}
+	rows.Close()
+	for accountID, count := range releases {
+		if err := releaseAccountCapacity(ctx, tx, accountID, count, now); err != nil {
+			return CardExtensionResult{}, err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE allocations SET allocation_state='expired',active=0,updated_at=? WHERE card_id=? AND active=1 AND allocation_state IN ('primary','grace')`, formatTime(now), cardID); err != nil {
+		return CardExtensionResult{}, err
+	}
+
+	newExpiresAt := now.Add(time.Duration(days) * 24 * time.Hour)
+	newAccountID, err := selectCandidateAccount(ctx, tx, now, newExpiresAt, monitorAvailable)
+	if err != nil {
+		return CardExtensionResult{}, err
+	}
+	if err := reserveAccountCapacity(ctx, tx, newAccountID, now); err != nil {
+		return CardExtensionResult{}, err
+	}
+	insert, err := tx.ExecContext(ctx, `INSERT INTO allocations (card_id,account_id,allocated_at,valid_until,allocation_state,active,created_at,updated_at) VALUES (?,?,?,?,'primary',1,?,?)`, cardID, newAccountID, formatTime(now), formatTime(newExpiresAt), formatTime(now), formatTime(now))
+	if err != nil {
+		return CardExtensionResult{}, err
+	}
+	allocationID, err := insert.LastInsertId()
+	if err != nil {
+		return CardExtensionResult{}, err
+	}
+	updated, err := tx.ExecContext(ctx, `UPDATE cards SET status='redeemed',duration_days=?,redeemed_at=?,expires_at=?,revoked_at=NULL,updated_at=? WHERE id=? AND status IN ('expired','redeemed')`, days, formatTime(now), formatTime(newExpiresAt), formatTime(now), cardID)
+	if err != nil {
+		return CardExtensionResult{}, err
+	}
+	if affected, _ := updated.RowsAffected(); affected != 1 {
+		return CardExtensionResult{}, ErrCardStateConflict
 	}
 	if err := tx.Commit(); err != nil {
-		return models.Card{}, err
+		return CardExtensionResult{}, err
 	}
-	return r.CardByID(ctx, cardID)
+	card, err := r.CardByID(ctx, cardID)
+	if err != nil {
+		return CardExtensionResult{}, err
+	}
+	account, err := r.Account(ctx, newAccountID)
+	if err != nil {
+		return CardExtensionResult{}, err
+	}
+	return CardExtensionResult{
+		Card:       card,
+		Allocation: &models.Allocation{ID: allocationID, CardID: cardID, AccountID: newAccountID, AllocatedAt: now, ValidUntil: newExpiresAt, AllocationState: "primary", Active: true},
+		Account:    &account,
+		Mode:       "reactivated",
+	}, nil
 }
 
 // ExpireDueCards 供管理端手动触发；后台扫描复用同一段逻辑（见 ProcessReplacements）。

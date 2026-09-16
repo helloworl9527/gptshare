@@ -64,6 +64,7 @@ function publicMessage(status, code) {
   if (status === 409 && code === 'account_replacement_unavailable') return '备用账号容量不足，无法安全下线；本次操作未产生任何变更。'
   if (status === 409 && code === 'account_allocated') return '该账号仍有分配，暂时无法下线。'
   if (status === 409 && code === 'card_state_conflict') return '当前卡密状态不允许执行该操作。'
+  if (status === 409 && code === 'no_account_capacity') return '当前无可用账号容量，卡密未发生变更，请稍后重试。'
   if (status === 422) return '请求参数未通过校验。'
   if (status >= 500) return '服务暂时不可用，请稍后重试。'
   return '请求未完成，请检查输入后重试。'

@@ -974,8 +974,9 @@ func TestCardStateTransitionsRevokeReleaseAndExtend(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := repo.ExtendCard(context.Background(), expiringID, 1); !errors.Is(err, ErrCardStateConflict) {
-		t.Fatalf("unused extension err=%v want=%v", err, ErrCardStateConflict)
+	unusedExtended, err := repo.ExtendCard(context.Background(), expiringID, 1)
+	if err != nil || unusedExtended.DurationDays != 8 {
+		t.Fatalf("unused extension card=%+v err=%v", unusedExtended, err)
 	}
 	repo.SetNow(func() time.Time { return now })
 	expiringAllocation, err := repo.RedeemCard(context.Background(), expiringID)
@@ -983,9 +984,6 @@ func TestCardStateTransitionsRevokeReleaseAndExtend(t *testing.T) {
 		t.Fatal(err)
 	}
 	repo.SetNow(func() time.Time { return now.Add(8 * 24 * time.Hour) })
-	if _, err := repo.ExtendCard(context.Background(), expiringID, 1); !errors.Is(err, ErrCardStateConflict) {
-		t.Fatalf("elapsed extension err=%v want=%v", err, ErrCardStateConflict)
-	}
 	expiredCount, err := repo.ExpireDueCards(context.Background(), now.Add(8*24*time.Hour))
 	if err != nil {
 		t.Fatal(err)
@@ -1000,8 +998,16 @@ func TestCardStateTransitionsRevokeReleaseAndExtend(t *testing.T) {
 	if expiredCard.Status != "expired" {
 		t.Fatalf("expired status=%s", expiredCard.Status)
 	}
-	if _, err := repo.ExtendCard(context.Background(), expiringID, 1); !errors.Is(err, ErrCardStateConflict) {
-		t.Fatalf("expired extension err=%v want=%v", err, ErrCardStateConflict)
+	reactivated, err := repo.ExtendCard(context.Background(), expiringID, 1)
+	if err != nil || reactivated.Status != "redeemed" || reactivated.DurationDays != 1 {
+		t.Fatalf("expired extension card=%+v err=%v", reactivated, err)
+	}
+	if reactivated.RedeemedAt == nil || !reactivated.RedeemedAt.Equal(now.Add(8*24*time.Hour)) || reactivated.ExpiresAt == nil || !reactivated.ExpiresAt.Equal(now.Add(9*24*time.Hour)) {
+		t.Fatalf("reactivated period redeemed=%v expires=%v", reactivated.RedeemedAt, reactivated.ExpiresAt)
+	}
+	var activeForCard int
+	if err := db.DB().QueryRow("SELECT count(*) FROM allocations WHERE card_id=? AND active=1 AND allocation_state='primary'", expiringID).Scan(&activeForCard); err != nil || activeForCard != 1 {
+		t.Fatalf("reactivated active primary=%d err=%v", activeForCard, err)
 	}
 	if err := db.DB().QueryRow("SELECT allocation_state,active FROM allocations WHERE id=?", expiringAllocation.ID).Scan(&allocationState, &allocationActive); err != nil {
 		t.Fatal(err)
@@ -1018,6 +1024,51 @@ func TestCardStateTransitionsRevokeReleaseAndExtend(t *testing.T) {
 	}
 	if _, err := repo.ExtendCard(context.Background(), ninetyID, 1); !errors.Is(err, ErrCardDurationLimit) {
 		t.Fatalf("90-day card extension err=%v want=%v", err, ErrCardDurationLimit)
+	}
+}
+
+func TestExpiredCardExtensionWithoutCapacityRollsBack(t *testing.T) {
+	db := openStore(t)
+	defer db.Close()
+	repo := New(db.DB(), testCredentialKeyring(t))
+	now := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	repo.SetNow(func() time.Time { return now })
+	accountID, err := repo.CreateAccount(context.Background(), AccountSeed{
+		DisplayUsername: "expires-before-reactivation", DisplayPassword: "secret-password", DisplayTOTPSecret: "secret-totp",
+		AccountExpiry: now.Add(24 * time.Hour), MaxConcurrentUsers: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cardID, err := repo.CreateCard(context.Background(), CardSeed{CodeHash: hashFor(203), CodeSuffix: suffixFor(203), DurationDays: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.RedeemCard(context.Background(), cardID); err != nil {
+		t.Fatal(err)
+	}
+	stamp := now.Add(48 * time.Hour)
+	repo.SetNow(func() time.Time { return stamp })
+	if count, err := repo.ExpireDueCards(context.Background(), stamp); err != nil || count != 1 {
+		t.Fatalf("expire count=%d err=%v", count, err)
+	}
+	before, err := repo.CardByID(context.Background(), cardID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.ExtendCardWithMonitor(context.Background(), cardID, 7, true); !errors.Is(err, ErrNoAccountCapacity) {
+		t.Fatalf("reactivate without capacity err=%v want=%v", err, ErrNoAccountCapacity)
+	}
+	after, err := repo.CardByID(context.Background(), cardID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Status != "expired" || after.DurationDays != before.DurationDays || !after.ExpiresAt.Equal(*before.ExpiresAt) {
+		t.Fatalf("failed reactivation changed card before=%+v after=%+v", before, after)
+	}
+	active, err := repo.ActiveAllocationCount(context.Background(), accountID)
+	if err != nil || active != 0 {
+		t.Fatalf("failed reactivation leaked capacity active=%d err=%v", active, err)
 	}
 }
 

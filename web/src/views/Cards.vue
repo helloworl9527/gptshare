@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { api } from '../api/client.js'
 import AdminShell from '../components/AdminShell.vue'
 import FocusModal from '../components/FocusModal.vue'
@@ -14,6 +14,8 @@ const notice = ref('')
 const modal = ref('')
 const busy = ref(false)
 const generated = ref([])
+const nowMs = ref(Date.now())
+let clockTimer
 const revealed = reactive({})
 const form = reactive({ quantity: 10, duration_days: 30, format: 'csv', extend_days: 7, selected: null })
 const lookup = reactive({ code: '', result: null, error: '' })
@@ -35,11 +37,47 @@ function validDurationDays(value) {
 }
 
 function remainingExtensionDays(card) {
-  if (!card || card.status !== 'redeemed' || !card.redeemed_at || !card.expires_at) return 0
+  if (!card || card.status === 'revoked') return 0
+  if (card.status === 'unused') return Math.max(0, 90 - Number(card.duration_days || 0))
+  if (card.status === 'expired') return 90
+  if (card.status !== 'redeemed' || !card.redeemed_at || !card.expires_at) return 0
   const redeemedAt = new Date(card.redeemed_at).getTime()
   const expiresAt = new Date(card.expires_at).getTime()
   if (!Number.isFinite(redeemedAt) || !Number.isFinite(expiresAt)) return 0
-  return Math.max(0, Math.floor((redeemedAt + 90 * 86400000 - expiresAt + 1000) / 86400000))
+  if (expiresAt <= nowMs.value) return 90
+  return Math.max(0, 90 - Number(card.duration_days || 0))
+}
+
+function remainingDays(card) {
+  if (!card || card.status === 'unused') return Number(card?.duration_days || 0)
+  if (card.status === 'expired') return 0
+  if (!card.expires_at) return 0
+  const expiresAt = new Date(card.expires_at).getTime()
+  if (!Number.isFinite(expiresAt)) return 0
+  return Math.max(0, Math.ceil((expiresAt - nowMs.value) / 86400000))
+}
+
+function remainingLabel(card) {
+  if (!card) return '—'
+  if (card.status === 'revoked') return '不可用（已作废）'
+  if (card.status === 'unused') return `激活后 ${Number(card.duration_days || 0)} 天`
+  const days = remainingDays(card)
+  return days > 0 ? `${days} 天` : '0 天（已过期）'
+}
+
+function canLookupExtend(card) {
+  return Boolean(card && card.status !== 'revoked' && remainingExtensionDays(card) > 0)
+}
+
+function cardNeedsReactivation(card) {
+  if (!card || card.status === 'expired') return true
+  if (card.status !== 'redeemed' || !card.expires_at) return false
+  const expiresAt = new Date(card.expires_at).getTime()
+  return Number.isFinite(expiresAt) && expiresAt <= nowMs.value
+}
+
+function canListExtend(card) {
+  return Boolean(card && card.status === 'redeemed' && remainingDays(card) > 0 && remainingExtensionDays(card) > 0)
 }
 
 function openExtend(card) {
@@ -180,6 +218,8 @@ async function extend() {
     const result = await api.extendCard(form.selected.id, form.extend_days)
     if (lookup.result?.card?.id === form.selected.id && result.card) {
       lookup.result.card = result.card
+      if (Object.hasOwn(result, 'current_account')) lookup.result.current_account = result.current_account
+      if (Object.hasOwn(result, 'allocation')) lookup.result.allocation = result.allocation
     }
     modal.value = ''
     notice.value = '卡密有效期已延期。'
@@ -191,7 +231,11 @@ async function extend() {
   }
 }
 
-onMounted(load)
+onMounted(() => {
+  load()
+  clockTimer = window.setInterval(() => { nowMs.value = Date.now() }, 60000)
+})
+onUnmounted(() => window.clearInterval(clockTimer))
 </script>
 
 <template>
@@ -270,6 +314,14 @@ onMounted(load)
             <dt>过期时间</dt>
             <dd>{{ lookup.result.card.expires_at ? formatDateTime(lookup.result.card.expires_at) : '尚未生成' }}</dd>
           </div>
+          <div>
+            <dt>当前周期总时长</dt>
+            <dd>{{ lookup.result.card.duration_days }} 天</dd>
+          </div>
+          <div>
+            <dt>当前剩余时长</dt>
+            <dd>{{ remainingLabel(lookup.result.card) }}</dd>
+          </div>
           <div class="lookup-account-detail">
             <dt>当前对应账号</dt>
             <dd class="mono-cell">
@@ -283,7 +335,7 @@ onMounted(load)
             <p>延期后总有效期不超过激活后的 90 天；作废后用户将立即无法查询，且释放当前账号分配。</p>
           </div>
           <div class="lookup-action-buttons">
-            <button type="button" :disabled="remainingExtensionDays(lookup.result.card) < 1" @click="openExtend(lookup.result.card)">
+            <button type="button" :disabled="!canLookupExtend(lookup.result.card)" @click="openExtend(lookup.result.card)">
               延期
             </button>
             <button class="danger-button" type="button" :disabled="!canRevoke(lookup.result.card)" @click="openRevoke(lookup.result.card)">
@@ -352,7 +404,7 @@ onMounted(load)
                 <button v-else type="button" :aria-label="`查看尾号 ${card.code_suffix} 的卡密明文`" @click="reveal(card)">
                   查看
                 </button>
-                <button type="button" :disabled="remainingExtensionDays(card) < 1" :title="remainingExtensionDays(card) < 1 ? '该卡密已达到 90 天有效期上限' : ''" @click="openExtend(card)">
+                <button type="button" :disabled="!canListExtend(card)" :title="!canListExtend(card) ? '请通过完整卡密查询后操作，或该卡密已达到当前周期上限' : ''" @click="openExtend(card)">
                   延期
                 </button>
                 <button class="danger-button" type="button" :disabled="!canRevoke(card)" @click="openRevoke(card)">
@@ -396,7 +448,9 @@ onMounted(load)
       <form class="modal-form" @submit.prevent="extend">
         <label for="extend-days">延期天数</label>
         <input id="extend-days" v-model.number="form.extend_days" type="number" min="1" :max="maxExtendDays" step="1" required>
-        <small class="field-hint">当前最多还可延期 {{ maxExtendDays }} 天，最终有效期不超过首次兑换后 90 天。</small>
+        <small v-if="cardNeedsReactivation(form.selected)" class="field-hint">该卡已过期；延期成功后将从现在开启新周期并立即分配账号，最多 90 天。</small>
+        <small v-else-if="form.selected?.status === 'unused'" class="field-hint">该卡尚未激活；延期只增加激活后的可用时长，最多 90 天。</small>
+        <small v-else class="field-hint">当前周期最多还可延期 {{ maxExtendDays }} 天，最终有效期不超过 90 天。</small>
         <button class="primary-action" type="submit" :disabled="busy || maxExtendDays < 1">
           确认延期
         </button>

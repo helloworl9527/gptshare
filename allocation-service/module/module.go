@@ -68,7 +68,7 @@ func Open(ctx context.Context, dbPath string, keys map[string][]byte, activeKeyI
 		store:        database,
 		repo:         repo,
 		accounts:     accountsvc.NewService(repo, monitor),
-		cards:        cardsvc.NewService(repo),
+		cards:        cardsvc.NewService(repo, monitor),
 		allocator:    allocatorsvc.NewService(repo, monitor),
 		userQuery:    userquerysvc.NewService(repo),
 		replacements: replacementsvc.NewService(repo, logger),

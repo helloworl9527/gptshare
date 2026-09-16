@@ -61,7 +61,7 @@ func main() {
 		os.Exit(1)
 	}
 	accounts := accountsvc.NewService(repo, monitor)
-	cards := cardsvc.NewService(repo)
+	cards := cardsvc.NewService(repo, monitor)
 	allocator := allocatorsvc.NewService(repo, monitor)
 	userQuery := userquerysvc.NewService(repo)
 	metrics := metricssvc.NewService(repo)
@@ -75,7 +75,7 @@ func main() {
 		os.Exit(1)
 	}
 	server := &http.Server{
-		Addr:              cfg.ListenAddr,
+		Addr: cfg.ListenAddr,
 		Handler: httpapi.NewRouter(database, authManager, httpapi.Config{
 			Origin: cfg.AppOrigin, Accounts: accounts, Cards: cards, Allocator: allocator, UserQuery: userQuery, Metrics: metrics,
 			AccountEventSink: repo, AccountEventAPIKey: cfg.AccountEventAPIKey,

@@ -318,7 +318,9 @@ func writeCardError(c *gin.Context, err error) {
 	case errors.Is(err, cardsvc.ErrValidation):
 		writeError(c, http.StatusUnprocessableEntity, "validation_failed", "request validation failed")
 	case errors.Is(err, cardsvc.ErrDurationLimit):
-		writeError(c, http.StatusUnprocessableEntity, "card_duration_limit_exceeded", "card validity cannot exceed 90 days from redemption")
+		writeError(c, http.StatusUnprocessableEntity, "card_duration_limit_exceeded", "card validity cannot exceed 90 days")
+	case errors.Is(err, cardsvc.ErrNoCapacity), errors.Is(err, repository.ErrNoAccountCapacity):
+		writeError(c, http.StatusConflict, "no_account_capacity", "no account capacity; card was not changed")
 	case errors.Is(err, cardsvc.ErrNotFound):
 		writeError(c, http.StatusNotFound, "not_found", "card not found")
 	case errors.Is(err, cardsvc.ErrConflict), errors.Is(err, repository.ErrCardStateConflict):
@@ -817,12 +819,20 @@ func extendCardHandler(service *cardsvc.Service) gin.HandlerFunc {
 		if !bindJSON(c, &request, 4096) {
 			return
 		}
-		card, err := service.Extend(c.Request.Context(), id, request.Days)
+		result, err := service.Extend(c.Request.Context(), id, request.Days)
 		if err != nil {
 			writeCardError(c, err)
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"card": serializeCard(card), "request_id": c.GetString("request_id")})
+		body := gin.H{"card": serializeCard(result.Card), "extension_mode": result.Mode, "request_id": c.GetString("request_id")}
+		if result.Account != nil && result.Allocation != nil {
+			body["current_account"] = gin.H{"id": result.Account.ID, "display_username": result.Account.DisplayUsername}
+			body["allocation"] = serializeAllocation(*result.Allocation)
+		}
+		if len(result.Warnings) > 0 {
+			body["warnings"] = result.Warnings
+		}
+		c.JSON(http.StatusOK, body)
 	}
 }
 

@@ -58,7 +58,8 @@ export async function request(path, options = {}) {
 }
 
 function publicMessage(status, code) {
-  if (code === 'card_duration_limit_exceeded') return '延期后总有效期不能超过首次兑换后的 30 天。'
+  if (code === 'card_duration_limit_exceeded') return '延期后当前周期总有效期不能超过 90 天。'
+  if (status === 409 && code === 'no_account_capacity') return '当前无可用账号容量，卡密未发生变更，请稍后重试。'
   if (code === 'provider_account_exists') return '账号已存在，无需重新导入'
   if (code === 'phase_one_contract_changed') return '一期返回的数据格式已变化，请检查一期服务版本。'
   if (code === 'phase_one_monitor_timeout') return '一期响应超时，请稍后重试。'

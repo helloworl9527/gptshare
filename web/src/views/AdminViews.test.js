@@ -287,15 +287,15 @@ describe('P2 admin views', () => {
       code_suffix: 'EXT5',
       duration_days: 5,
       status: 'redeemed',
-      redeemed_at: '2026-07-24T00:00:00Z',
-      expires_at: '2026-07-29T00:00:00Z',
+      redeemed_at: '2099-01-01T00:00:00Z',
+      expires_at: '2099-01-06T00:00:00Z',
     }]
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(response({ cards: extendable }))
       .mockResolvedValueOnce(response({ csrf_token: 'c'.repeat(43) }))
       .mockResolvedValueOnce(response({ cards: [{ id: 9, code: '2345-6789-ABCD', code_suffix: 'ABCD', duration_days: 31, status: 'unused' }] }, 201))
       .mockResolvedValueOnce(response({ cards: extendable }))
-      .mockResolvedValueOnce(response({ card: { ...extendable[0], expires_at: '2026-10-22T00:00:00Z' } }))
+      .mockResolvedValueOnce(response({ card: { ...extendable[0], expires_at: '2099-04-01T00:00:00Z' } }))
       .mockResolvedValueOnce(response({ cards: extendable }))
     const wrapper = await render(Cards, fetchMock)
 
@@ -376,6 +376,56 @@ describe('P2 admin views', () => {
     expect(revokeCall).toBeTruthy()
     expect(wrapper.text()).toContain('卡密已作废')
     expect(wrapper.text()).toContain('暂无对应账号')
+    wrapper.unmount()
+  })
+
+  it('shows duration for an expired lookup and refreshes the new period and account after extension', async () => {
+    const expired = {
+      id: 12,
+      code_suffix: 'OLD1',
+      duration_days: 30,
+      status: 'expired',
+      redeemed_at: '2026-01-01T00:00:00Z',
+      expires_at: '2026-01-31T00:00:00Z',
+    }
+    const reactivated = {
+      ...expired,
+      duration_days: 7,
+      status: 'redeemed',
+      redeemed_at: '2099-01-01T00:00:00Z',
+      expires_at: '2099-01-08T00:00:00Z',
+    }
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(response({ cards }))
+      .mockResolvedValueOnce(response({ csrf_token: 'c'.repeat(43) }))
+      .mockResolvedValueOnce(response({ card: expired }))
+      .mockResolvedValueOnce(response({
+        card: reactivated,
+        extension_mode: 'reactivated',
+        current_account: { id: 17, display_username: 'renewed@example.test' },
+        allocation: { id: 44, card_id: 12, account_id: 17, allocation_state: 'primary', active: true },
+      }))
+      .mockResolvedValueOnce(response({ cards }))
+    const wrapper = await render(Cards, fetchMock)
+    await wrapper.get('#card-lookup-code').setValue('2345-6789-ABCD')
+    await wrapper.get('form.controls').trigger('submit')
+    await flushPromises()
+
+    const lookupSection = wrapper.get('section[aria-labelledby="card-lookup-title"]')
+    expect(lookupSection.text()).toContain('当前周期总时长')
+    expect(lookupSection.text()).toContain('30 天')
+    expect(lookupSection.text()).toContain('0 天（已过期）')
+    const extendButton = lookupSection.findAll('button').find((button) => button.text() === '延期')
+    expect(extendButton.attributes('disabled')).toBeUndefined()
+    await extendButton.trigger('click')
+    expect(wrapper.get('[role="dialog"]').text()).toContain('从现在开启新周期并立即分配账号')
+    await wrapper.get('#extend-days').setValue(7)
+    await wrapper.get('.modal-form').trigger('submit')
+    await flushPromises()
+
+    expect(lookupSection.text()).toContain('7 天')
+    expect(lookupSection.text()).toContain('renewed@example.test')
+    expect(JSON.parse(fetchMock.mock.calls.find(([url]) => String(url) === '/api/admin/cards/12/extend')[1].body)).toEqual({ days: 7 })
     wrapper.unmount()
   })
 

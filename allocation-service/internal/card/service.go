@@ -28,6 +28,7 @@ var (
 	ErrConflict        = errors.New("card state conflict")
 	ErrCodeUnavailable = errors.New("card plaintext unavailable")
 	ErrDurationLimit   = errors.New("card duration limit exceeded")
+	ErrNoCapacity      = errors.New("no account capacity")
 )
 
 type Repository interface {
@@ -43,9 +44,18 @@ type Repository interface {
 	Audit(context.Context, string, string, int64, map[string]any) error
 }
 
+type ExtendedRepository interface {
+	ExtendCardWithMonitor(context.Context, int64, int, bool) (repository.CardExtensionResult, error)
+}
+
+type MonitorAvailability interface {
+	Available(context.Context) bool
+}
+
 type Service struct {
-	repo Repository
-	now  func() time.Time
+	repo    Repository
+	monitor MonitorAvailability
+	now     func() time.Time
 }
 
 type GeneratedCard struct {
@@ -66,6 +76,14 @@ type LookupResult struct {
 	Account    *models.Account
 }
 
+type ExtendResult struct {
+	Card       models.Card
+	Allocation *models.Allocation
+	Account    *models.Account
+	Mode       string
+	Warnings   []string
+}
+
 type ExportFormat string
 
 const (
@@ -73,8 +91,12 @@ const (
 	ExportTXT ExportFormat = "txt"
 )
 
-func NewService(repo Repository) *Service {
-	return &Service{repo: repo, now: func() time.Time { return time.Now().UTC() }}
+func NewService(repo Repository, monitor ...MonitorAvailability) *Service {
+	var availability MonitorAvailability
+	if len(monitor) > 0 {
+		availability = monitor[0]
+	}
+	return &Service{repo: repo, monitor: availability, now: func() time.Time { return time.Now().UTC() }}
 }
 
 func (s *Service) SetNow(now func() time.Time) {
@@ -166,22 +188,58 @@ func (s *Service) Revoke(ctx context.Context, id int64) (models.Card, error) {
 	return card, nil
 }
 
-func (s *Service) Extend(ctx context.Context, id int64, days int) (models.Card, error) {
+func (s *Service) Extend(ctx context.Context, id int64, days int) (ExtendResult, error) {
 	if id <= 0 || !validExtensionDuration(days) {
-		return models.Card{}, ErrValidation
+		return ExtendResult{}, ErrValidation
 	}
-	card, err := s.repo.ExtendCard(ctx, id, days)
+	before, err := s.repo.CardByID(ctx, id)
 	if errors.Is(err, sql.ErrNoRows) {
-		return models.Card{}, ErrNotFound
-	}
-	if errors.Is(err, repository.ErrCardDurationLimit) {
-		return models.Card{}, ErrDurationLimit
+		return ExtendResult{}, ErrNotFound
 	}
 	if err != nil {
-		return models.Card{}, err
+		return ExtendResult{}, err
 	}
-	_ = s.repo.Audit(ctx, "cards.extend", "card", id, map[string]any{"days": days})
-	return card, nil
+	monitorAvailable := s.monitor == nil || s.monitor.Available(ctx)
+	warnings := []string(nil)
+	var result ExtendResult
+	if extendedRepo, ok := s.repo.(ExtendedRepository); ok {
+		extended, err := extendedRepo.ExtendCardWithMonitor(ctx, id, days, monitorAvailable)
+		switch {
+		case errors.Is(err, repository.ErrNoAccountCapacity):
+			return ExtendResult{}, ErrNoCapacity
+		case errors.Is(err, sql.ErrNoRows):
+			return ExtendResult{}, ErrNotFound
+		case errors.Is(err, repository.ErrCardDurationLimit):
+			return ExtendResult{}, ErrDurationLimit
+		case err != nil:
+			return ExtendResult{}, err
+		}
+		result = ExtendResult{Card: extended.Card, Allocation: extended.Allocation, Account: extended.Account, Mode: extended.Mode, Warnings: warnings}
+	} else {
+		card, err := s.repo.ExtendCard(ctx, id, days)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ExtendResult{}, ErrNotFound
+		}
+		if errors.Is(err, repository.ErrCardDurationLimit) {
+			return ExtendResult{}, ErrDurationLimit
+		}
+		if errors.Is(err, repository.ErrNoAccountCapacity) {
+			return ExtendResult{}, ErrNoCapacity
+		}
+		if err != nil {
+			return ExtendResult{}, err
+		}
+		result = ExtendResult{Card: card, Mode: "active", Warnings: warnings}
+	}
+	if result.Mode == "reactivated" && !monitorAvailable {
+		result.Warnings = append(result.Warnings, "monitor_unavailable")
+	}
+	metadata := map[string]any{"days": days, "mode": result.Mode, "previous_status": before.Status, "previous_duration_days": before.DurationDays, "new_status": result.Card.Status, "new_duration_days": result.Card.DurationDays, "monitor_available": monitorAvailable}
+	if result.Account != nil {
+		metadata["account_id"] = result.Account.ID
+	}
+	_ = s.repo.Audit(ctx, "cards.extend", "card", id, metadata)
+	return result, nil
 }
 
 func (s *Service) ExpireDue(ctx context.Context) (int64, error) {

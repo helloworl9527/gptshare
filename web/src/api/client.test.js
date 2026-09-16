@@ -58,6 +58,14 @@ describe('API client', () => {
 		})
 	})
 
+	it('explains that a capacity failure leaves an expired card unchanged', async () => {
+		vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response({ code: 'no_account_capacity' }, 409)))
+		await expect(api.extendCard(12, 7)).rejects.toMatchObject({
+			code: 'no_account_capacity',
+			message: '当前无可用账号容量，卡密未发生变更，请稍后重试。',
+		})
+	})
+
   it('keeps the generic message for non-OAuth validation errors and exposes the request ID', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response({
       code: 'validation_failed',
