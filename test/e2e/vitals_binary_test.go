@@ -136,7 +136,7 @@ func TestVitalsBinaryUnifiedFlowAndCrashLoopMatrix(t *testing.T) {
 	public := &binaryClient{baseURL: baseURL, cookies: map[string]string{}, client: &http.Client{Timeout: 5 * time.Second}}
 	csrf := binaryLogin(t, admin)
 
-	for _, path := range []string{"/admin/", "/api/accounts", "/api/settings", "/api/admin/dashboard", "/api/admin/config/security-boundaries"} {
+	for _, path := range []string{"/admin/", "/api/accounts", "/api/settings", "/api/admin/dashboard", "/api/admin/dashboard/expired-cards", "/api/admin/config/security-boundaries"} {
 		response := admin.request(t, http.MethodGet, path, "", nil)
 		if response.status != http.StatusOK {
 			t.Fatalf("authenticated GET %s = %d body=%s", path, response.status, response.body)
@@ -145,6 +145,10 @@ func TestVitalsBinaryUnifiedFlowAndCrashLoopMatrix(t *testing.T) {
 	compat := public.request(t, http.MethodGet, "/api/v1/monitor/accounts", "", nil)
 	if compat.status != http.StatusNotFound {
 		t.Fatalf("default compatibility route=%d, want 404", compat.status)
+	}
+	anonymousExpiredCards := public.request(t, http.MethodGet, "/api/admin/dashboard/expired-cards", "", nil)
+	if anonymousExpiredCards.status != http.StatusUnauthorized {
+		t.Fatalf("expired card cleanup route must require admin authentication: status=%d", anonymousExpiredCards.status)
 	}
 
 	pull := admin.request(t, http.MethodPost, "/api/admin/accounts/pull-monitor", csrf, map[string]any{})

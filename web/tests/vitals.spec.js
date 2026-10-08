@@ -38,6 +38,23 @@ async function login(page) {
 
 test.beforeEach(async ({ request }) => { await scenario(request, 'default', true) })
 
+test('dashboard expired card cleanup lists historical accounts and current users', async ({ page }) => {
+  await login(page)
+  const panel = page.getByRole('region', { name: /已过期卡密及对应账号/ })
+  await expect(panel.getByText('**** WXYZ')).toBeVisible()
+  await expect(panel.getByText('north@example.test', { exact: true })).toBeVisible()
+  await expect(panel.getByText('retired@example.test', { exact: true })).toBeVisible()
+  await expect(panel.getByText('仍有 1 张有效卡密')).toBeVisible()
+  await expect(panel.getByText('已下线', { exact: true })).toBeVisible()
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+  await panel.getByLabel('查找').fill('retired@example.test')
+  await panel.getByRole('button', { name: '搜索', exact: true }).click()
+  await expect(panel.getByText('north@example.test', { exact: true })).toBeVisible()
+  await panel.getByLabel('查找').fill('missing@example.test')
+  await panel.getByRole('button', { name: '搜索', exact: true }).click()
+  await expect(panel.getByText('没有匹配的过期卡密，请调整查询条件。')).toBeVisible()
+})
+
 test('unified admin covers both domains, credential completion and reveal', async ({ page }, testInfo) => {
   const consoleErrors = []
   page.on('console', (message) => { if (message.type() === 'error') consoleErrors.push(message.text()) })

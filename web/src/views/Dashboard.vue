@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import AdminShell from '../components/AdminShell.vue'
 import StatePanel from '../components/StatePanel.vue'
+import ExpiredCardsPanel from '../components/ExpiredCardsPanel.vue'
 import { api } from '../api/client.js'
 import { summarizeAllocation, summarizeMonitor } from '../lib/vitals.js'
 
@@ -149,5 +150,6 @@ onMounted(load)
         </RouterLink>
       </section>
     </div>
+    <ExpiredCardsPanel v-if="!loading && !error" />
   </AdminShell>
 </template>

@@ -9,6 +9,7 @@ import (
 
 type Repository interface {
 	InventoryMetrics(context.Context, time.Time) (repository.InventoryMetrics, error)
+	ListExpiredCards(context.Context, time.Time, int, int, string) (repository.ExpiredCardPage, error)
 }
 
 type Service struct {
@@ -28,4 +29,8 @@ func (s *Service) SetNow(now func() time.Time) {
 
 func (s *Service) Dashboard(ctx context.Context) (repository.InventoryMetrics, error) {
 	return s.repo.InventoryMetrics(ctx, s.now().UTC())
+}
+
+func (s *Service) ExpiredCards(ctx context.Context, page, pageSize int, search string) (repository.ExpiredCardPage, error) {
+	return s.repo.ListExpiredCards(ctx, s.now().UTC(), page, pageSize, search)
 }

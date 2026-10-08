@@ -5,6 +5,7 @@
 artifacts
 data
 certs
+private
 node_modules
 **/node_modules
 web/test-results

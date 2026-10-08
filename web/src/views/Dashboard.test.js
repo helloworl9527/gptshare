@@ -24,6 +24,7 @@ function successResponses(fetchMock) {
     .mockResolvedValueOnce(response({ dashboard: { capacity: 7, available_capacity: 5, warning_level: 'attention', days_to_exhaust: 12, redeemed_last_7_days: 8, daily_redemption_rate: 1.14 } }))
     .mockResolvedValueOnce(response({ accounts: allocationAccounts }))
     .mockResolvedValueOnce(response({ cards }))
+    .mockResolvedValueOnce(response({ cards: [], total: 0, page: 1 }))
 }
 
 async function render(fetchMock) {
@@ -46,7 +47,7 @@ describe('Unified dashboard', () => {
   it('loads both domains from the single-origin API client and renders side-by-side vitals', async () => {
     const fetchMock = successResponses(vi.fn())
     const wrapper = await render(fetchMock)
-    expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual(['/api/accounts', '/api/admin/dashboard', '/api/admin/accounts', '/api/admin/cards'])
+    expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual(['/api/accounts', '/api/admin/dashboard', '/api/admin/accounts', '/api/admin/cards', '/api/admin/dashboard/expired-cards?page=1&page_size=20&search='])
     expect(wrapper.text()).toContain('账号健康')
     expect(wrapper.text()).toContain('业务库存')
     expect(wrapper.text()).toContain('待补全账号')
@@ -67,6 +68,7 @@ describe('Unified dashboard', () => {
       }))
       .mockResolvedValueOnce(response({ accounts: allocationAccounts }))
       .mockResolvedValueOnce(response({ cards }))
+      .mockResolvedValueOnce(response({ cards: [], total: 0, page: 1 }))
     const wrapper = await render(fetchMock)
     expect(wrapper.text()).toContain('另有 6 位受阻')
     expect(wrapper.text()).toContain('凭据未补全')

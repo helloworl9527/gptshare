@@ -185,6 +185,7 @@ func registerProtectedAdminRoutes(router *gin.Engine, cfg Config, boundary Admin
 	})
 	if cfg.Metrics != nil {
 		admin.GET("/dashboard", dashboardMetricsHandler(cfg.Metrics))
+		admin.GET("/dashboard/expired-cards", noStore(), expiredCardsHandler(cfg.Metrics))
 	}
 	if cfg.Accounts != nil {
 		admin.GET("/accounts", listAccountsHandler(cfg.Accounts))

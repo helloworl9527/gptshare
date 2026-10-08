@@ -129,6 +129,21 @@ const server = http.createServer(async (request, response) => {
   }
   if (url.pathname === '/api/admin/ping') { if (!protect(request, response)) return; return send(response, 200, { status: 'ok' }) }
   if (url.pathname === '/api/admin/dashboard' && request.method === 'GET') { if (!protect(request, response)) return; if (scenario === 'empty') return send(response, 200, { dashboard: dashboardPayload([], []) }); if (scenario === 'error') return send(response, 503, { code: 'temporary_unavailable' }); return send(response, 200, { dashboard: dashboardPayload() }) }
+  if (url.pathname === '/api/admin/dashboard/expired-cards' && request.method === 'GET') {
+    if (!protect(request, response)) return
+    const page = Number(url.searchParams.get('page') || 1)
+    const pageSize = Number(url.searchParams.get('page_size') || 20)
+    const search = (url.searchParams.get('search') || '').trim().toLowerCase()
+    const expired = scenario === 'empty' ? [] : [{
+      id: 50, code_suffix: 'WXYZ', expires_at: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
+      accounts: [
+        { id: 1, display_username: 'north@example.test', status: 'available', archived: false, last_allocated_at: '2026-07-20T12:00:00Z', active_card_count: 1 },
+        { id: 4, display_username: 'retired@example.test', status: 'disabled', archived: true, last_allocated_at: '2026-07-15T12:00:00Z', active_card_count: 0 },
+      ],
+    }]
+    const matched = expired.filter((card) => !search || card.code_suffix.toLowerCase().includes(search) || String(card.id) === search || card.accounts.some((account) => account.display_username.includes(search)))
+    return send(response, 200, { cards: matched.slice((page - 1) * pageSize, page * pageSize), total: matched.length, page, page_size: pageSize })
+  }
   if (url.pathname === '/api/admin/allocations' && request.method === 'GET') {
     if (!protect(request, response)) return
     if (scenario === 'empty') return send(response, 200, { allocations: [] })

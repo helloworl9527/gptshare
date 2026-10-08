@@ -221,6 +221,18 @@ meter { width: 100%; min-width: 72px; height: 9px; }
 .table-panel { padding: 0; overflow: hidden; }
 .table-panel > .section-head { padding: 28px 28px 0; }
 .table-wrap { width: 100%; overflow-x: auto; }
+.expired-cards-panel { margin-top: 28px; }
+.expired-cards-panel .section-head { flex-wrap: wrap; }
+.expired-cards-panel h2 small { color: var(--muted); font-size: 13px; font-weight: 400; }
+.expired-cleanup-note { margin: 18px 28px; color: var(--muted); font-size: 13px; line-height: 1.7; }
+.expired-cards-panel table { min-width: 620px; }
+.expired-cards-panel th:last-child { width: 55%; }
+.expired-card-id { display: block; margin-top: 6px; color: var(--muted); }
+.expired-account-list { display: grid; gap: 12px; list-style: none; margin: 0; padding: 0; }
+.expired-account-list li { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.expired-account-list small { color: var(--muted); }
+.expired-account-list .cleanup-active-warning { color: #735000; font-weight: 650; }
+.expired-pagination { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 12px; padding: 16px 28px; color: var(--muted); font-size: 13px; }
 table { width: 100%; border-collapse: collapse; table-layout: fixed; }
 thead { background: var(--canvas); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 th, td { min-width: 0; padding: 14px 16px; text-align: left; vertical-align: middle; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
