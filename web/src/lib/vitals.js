@@ -15,8 +15,23 @@ export function formatDate(value) {
   return new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(value))
 }
 
-export function accountTone(account) {
+export function accountAvailability(account, now = Date.now()) {
+  const slots = Math.max(0, Number(account.max_concurrent_users || 0) - Number(account.current_allocations || 0))
+  const expiry = account.account_expiry ? new Date(account.account_expiry).getTime() : NaN
+  let reason = ''
+  if (account.archived_at || account.status === 'disabled') reason = '已下线'
+  else if (account.monitor_status === 'dead_banned' || account.status === 'banned') reason = '账号已封禁'
+  else if (account.monitor_status === 'dead_normal' || account.status === 'expired' || (Number.isFinite(expiry) && expiry <= now)) reason = '订阅已过期'
+  else if (!Number.isFinite(expiry)) reason = '订阅到期时间未知'
+  else if (account.status === 'pending_credentials') reason = '凭据未补全'
+  else if (account.status === 'full' || slots === 0) reason = '已满'
+  else if (account.status !== 'available') reason = '账号暂不可分配'
+  return { slots, available: reason ? 0 : slots, reason }
+}
+
+export function accountTone(account, now = Date.now()) {
   if (account.monitor_status === 'dead_banned') return 'red'
+  if (accountAvailability(account, now).reason === '订阅已过期') return 'retired'
   if (account.status === 'pending_credentials') return 'amber'
   if (account.status === 'full' || account.current_allocations >= account.max_concurrent_users) return 'amber'
   if (account.status === 'disabled' || account.monitor_status === 'dead_normal') return 'retired'

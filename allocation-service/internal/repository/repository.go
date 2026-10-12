@@ -895,6 +895,15 @@ func reconcileAllocationCounts(ctx context.Context, tx *sql.Tx, nowFunc func() t
 // 容量上调或历史漂移会让账号永久停在 'full'：既选不中（selectCandidateAccount 只认 'available'），
 // 又仍被库存看板计成空余容量，于是出现"有容量却兑不了"。每轮扫描纠正一次，双向都纠。
 func reconcileAccountAvailability(ctx context.Context, tx *sql.Tx, now time.Time) (int, int, error) {
+	// 账号订阅到期后立即退出“可用”状态；仍有活跃分配时保留账号和凭据，
+	// 让换号宽限期完成后再由 retireOfflineAccounts 归档，避免把现有用户直接甩下线。
+	if _, err := tx.ExecContext(ctx, `UPDATE chatgpt_accounts
+		SET status='expired', updated_at=?
+		WHERE archived_at IS NULL
+		  AND datetime(account_expiry) <= datetime(?)
+		  AND status NOT IN ('disabled','banned','expired')`, formatTime(now), formatTime(now)); err != nil {
+		return 0, 0, err
+	}
 	restored, err := tx.ExecContext(ctx, `UPDATE chatgpt_accounts
 		SET status='available', updated_at=?
 		WHERE status='full'
@@ -963,7 +972,11 @@ func (r *Repository) ProcessReplacements(ctx context.Context, now time.Time) (Re
 	if err != nil {
 		return ReplacementRun{}, err
 	}
-	run.GraceExpired = expiredGrace
+	expiredAccountGrace, err := closeExpiredGraceAllocations(ctx, tx, stamp)
+	if err != nil {
+		return ReplacementRun{}, err
+	}
+	run.GraceExpired = expiredGrace + expiredAccountGrace
 	if err := closeBannedGraceAllocations(ctx, tx, stamp); err != nil {
 		return ReplacementRun{}, err
 	}
@@ -979,6 +992,8 @@ func (r *Repository) ProcessReplacements(ctx context.Context, now time.Time) (Re
 		  AND (
 		    acct.monitor_status='dead_banned'
 		    OR acct.status='banned'
+		    OR acct.monitor_status='dead_normal'
+		    OR acct.status='expired'
 		    OR datetime(acct.account_expiry) <= datetime(?, '+24 hours')
 		  )
 		ORDER BY CASE WHEN acct.monitor_status='dead_banned' THEN 0 ELSE 1 END, datetime(acct.account_expiry) ASC, a.id ASC`,
@@ -1003,7 +1018,16 @@ func (r *Repository) ProcessReplacements(ctx context.Context, now time.Time) (Re
 		if monitorStatus == "dead_banned" || accountStatus == "banned" {
 			item.reason = "banned"
 		} else {
-			item.reason = "account_expiring"
+			accountExpiry, parseErr := parseTime(accountExpiryRaw)
+			if parseErr != nil {
+				rows.Close()
+				return ReplacementRun{}, parseErr
+			}
+			if monitorStatus == "dead_normal" || accountStatus == "expired" || !accountExpiry.After(stamp) {
+				item.reason = ReplacementReasonExpired
+			} else {
+				item.reason = "account_expiring"
+			}
 		}
 		due = append(due, item)
 	}
@@ -1610,13 +1634,15 @@ func (r *Repository) UpdateAccountMonitorStatus(ctx context.Context, accountID i
 		SET monitor_account_id=?, monitor_status=?,
 		    status=CASE
 		        WHEN ?='dead_banned' THEN 'banned'
+		        WHEN status IN ('disabled','banned') THEN status
 		        WHEN ?='dead_normal' THEN 'expired'
+		        WHEN datetime(account_expiry)<=datetime(?) THEN 'expired'
 		        ELSE status
 		    END,
 		    updated_at=?
 		WHERE id=? AND archived_at IS NULL`,
 		nullable(monitorAccountID), defaultString(monitorStatus, "unknown_monitor"),
-		defaultString(monitorStatus, "unknown_monitor"), defaultString(monitorStatus, "unknown_monitor"), formatTime(now), accountID)
+		defaultString(monitorStatus, "unknown_monitor"), defaultString(monitorStatus, "unknown_monitor"), formatTime(now), formatTime(now), accountID)
 	if err != nil {
 		return models.Account{}, err
 	}
@@ -2233,6 +2259,25 @@ func closeBannedGraceAllocations(ctx context.Context, tx *sql.Tx, now time.Time)
 	return closeGraceAllocations(ctx, tx, now, "banned",
 		`WHERE active=1 AND allocation_state='grace' AND account_id IN (
 			SELECT id FROM chatgpt_accounts WHERE monitor_status='dead_banned' OR status='banned')`)
+}
+
+// closeExpiredGraceAllocations 关闭已过期账号上的宽限分配。旧账号已经没有
+// 可用订阅，继续保留宽限只会延迟归档，并让账号看起来仍在承载用户。
+func closeExpiredGraceAllocations(ctx context.Context, tx *sql.Tx, now time.Time) (int, error) {
+	var count int
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM allocations
+		WHERE active=1 AND allocation_state='grace' AND account_id IN (
+			SELECT id FROM chatgpt_accounts
+			WHERE archived_at IS NULL AND `+expiredAccountClause+` AND NOT `+bannedAccountClause+`)`, formatTime(now)).Scan(&count); err != nil {
+		return 0, err
+	}
+	if err := closeGraceAllocations(ctx, tx, now, ReplacementReasonExpired,
+		`WHERE active=1 AND allocation_state='grace' AND account_id IN (
+			SELECT id FROM chatgpt_accounts
+			WHERE archived_at IS NULL AND `+expiredAccountClause+` AND NOT `+bannedAccountClause+`)`, formatTime(now)); err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 func closeGraceAllocations(ctx context.Context, tx *sql.Tx, now time.Time, reason, where string, args ...any) error {

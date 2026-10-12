@@ -26,6 +26,9 @@ form.addEventListener("submit", async (event) => {
   event.preventDefault();
   queryButton.disabled = true;
   errorBox.classList.remove("visible");
+  resultPanel.classList.remove("visible");
+  currentSecret = "";
+  validUntil = null;
   const payload = { code: codeInput.value.trim() };
   if (captchaId) {
     payload.captcha_id = captchaId;
@@ -33,11 +36,15 @@ form.addEventListener("submit", async (event) => {
   }
   try {
     const redeem = await redeemCard(payload.code);
+    if (!redeem.ok && errorBody(redeem).code === "no_account_capacity") {
+      captchaId = 0;
+      captchaBox.classList.remove("visible");
+      answerInput.value = "";
+      showError("暂无可分配账号，兑换未完成，卡密未消耗。请联系管理员补充有效账号后重试。");
+      return;
+    }
     let body = await queryCard(payload);
     let apiError = errorBody(body);
-    if (!redeem.ok && !body.ok) {
-      apiError = errorBody(body);
-    }
     if (body.ok) {
       captchaId = 0;
       captchaBox.classList.remove("visible");

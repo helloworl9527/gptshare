@@ -1,5 +1,28 @@
 import { describe, expect, it } from 'vitest'
-import { monitorCheckIssue, summarizeMonitor } from './vitals.js'
+import { accountAvailability, accountTone, monitorCheckIssue, summarizeMonitor } from './vitals.js'
+
+describe('accountAvailability', () => {
+  const now = Date.parse('2026-10-12T06:30:00Z')
+  const account = { status: 'available', monitor_status: 'alive', max_concurrent_users: 5, current_allocations: 1, account_expiry: '2026-10-09T18:51:20Z' }
+
+  it('does not treat expired subscription seats as redeemable even when status is available and monitoring says alive', () => {
+    expect(accountAvailability(account, now)).toEqual({ slots: 4, available: 0, reason: '订阅已过期' })
+    expect(accountTone(account, now)).toBe('retired')
+  })
+
+  it('treats the exact subscription expiry as expired', () => {
+    expect(accountAvailability({ ...account, account_expiry: new Date(now).toISOString() }, now).available).toBe(0)
+  })
+
+  it('counts only available seats on an unexpired subscription', () => {
+    const future = { ...account, account_expiry: '2026-11-01T00:00:00Z' }
+    expect(accountAvailability(future, now)).toEqual({ slots: 4, available: 4, reason: '' })
+    for (const status of ['full', 'disabled', 'pending_credentials', 'unknown_monitor', 'expired', 'banned']) {
+      expect(accountAvailability({ ...future, status }, now).available).toBe(0)
+    }
+    expect(accountAvailability({ ...future, account_expiry: null }, now).available).toBe(0)
+  })
+})
 
 describe('monitorCheckIssue', () => {
   it.each(['refresh', 'device'])('explains %s credential refresh rejection with a concrete response', (type) => {

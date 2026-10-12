@@ -4,7 +4,7 @@ import { api } from '../api/client.js'
 import AdminShell from '../components/AdminShell.vue'
 import FocusModal from '../components/FocusModal.vue'
 import StatePanel from '../components/StatePanel.vue'
-import { accountTone, formatDateTime } from '../lib/vitals.js'
+import { accountAvailability, accountTone, formatDateTime } from '../lib/vitals.js'
 import { generateTOTP, secondsUntilNextPeriod } from '../lib/totp.js'
 
 const accounts = ref([])
@@ -35,6 +35,8 @@ const credentials = reactive({
 let credentialTimer
 let credentialGeneration = 0
 let lastTOTPCounter = -1
+const nowMs = ref(Date.now())
+let availabilityTimer
 const settings = ref({ default_account_capacity: 3 })
 const defaultCapacity = ref(3)
 const editForm = reactive({
@@ -284,10 +286,12 @@ function handleSessionExpired() {
 
 onMounted(() => {
   window.addEventListener('session-expired', handleSessionExpired)
+  availabilityTimer = window.setInterval(() => { nowMs.value = Date.now() }, 1000)
   void load()
 })
 
 onBeforeUnmount(() => {
+  window.clearInterval(availabilityTimer)
   window.removeEventListener('session-expired', handleSessionExpired)
   clearRevealedCredentials()
 })
@@ -362,7 +366,7 @@ onBeforeUnmount(() => {
         <table>
           <thead><tr><th>账号</th><th>账号来源</th><th>取件地址</th><th>状态</th><th>容量</th><th>到期</th><th>一期状态</th><th>操作</th></tr></thead>
           <tbody>
-            <tr v-for="account in visible" :key="account.id" :class="`row-${accountTone(account)}`">
+            <tr v-for="account in visible" :key="account.id" :class="`row-${accountTone(account, nowMs)}`">
               <td class="mono-cell">
                 {{ account.display_username }}
               </td>
@@ -373,8 +377,13 @@ onBeforeUnmount(() => {
               <td class="mono-cell">
                 {{ account.pickup_address || '未填写' }}
               </td>
-              <td><span class="status-badge" :class="`status-${account.status}`">{{ account.status }}</span></td>
-              <td><meter min="0" :max="account.max_concurrent_users" :value="account.current_allocations" /> {{ account.current_allocations }}/{{ account.max_concurrent_users }}</td>
+              <td>
+                <span class="status-badge" :class="`status-${accountAvailability(account, nowMs).reason === '订阅已过期' ? 'expired' : account.status}`">{{ accountAvailability(account, nowMs).reason === '订阅已过期' ? '订阅已过期' : account.status }}</span>
+              </td>
+              <td>
+                <meter min="0" :max="account.max_concurrent_users" :value="account.current_allocations" /> {{ account.current_allocations }}/{{ account.max_concurrent_users }}
+                <small class="muted-value">可兑换 {{ accountAvailability(account, nowMs).available }} 位<template v-if="accountAvailability(account, nowMs).slots > 0 && accountAvailability(account, nowMs).reason"> · {{ accountAvailability(account, nowMs).reason }}，空位不可兑换</template></small>
+              </td>
               <td>{{ formatDateTime(account.account_expiry) }}</td>
               <td class="mono-cell">
                 {{ account.monitor_status }}

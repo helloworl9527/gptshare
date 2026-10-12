@@ -212,6 +212,30 @@ test('public card flow persists redeemed card codes without account credentials'
   expect(consoleErrors).toEqual([])
 })
 
+test('public card flow explains unavailable inventory without consuming a code or triggering query captcha', async ({ page, request }) => {
+  await page.goto('/admin/user.html')
+  await page.getByLabel('卡密', { exact: true }).fill('2345-6789-ABCD')
+  await page.getByRole('button', { name: '查询或兑换卡密' }).click()
+  await expect(page.locator('#result')).toHaveClass(/visible/)
+  await scenario(request, 'no-account-capacity', true)
+  const queryRequests = []
+  page.on('request', (request) => { if (request.url().includes('/api/cards/query')) queryRequests.push(request.url()) })
+  await page.getByLabel('卡密', { exact: true }).fill('EFGH-JKMN-PQRS')
+  for (let attempt = 0; attempt < 4; attempt++) {
+    await page.getByRole('button', { name: '查询或兑换卡密' }).click()
+    await expect(page.locator('#error')).toHaveText('暂无可分配账号，兑换未完成，卡密未消耗。请联系管理员补充有效账号后重试。')
+    await expect(page.locator('#query-button')).toBeEnabled()
+  }
+  await expect(page.locator('#result')).not.toHaveClass(/visible/)
+  await expect(page.locator('#captcha-box')).not.toHaveClass(/visible/)
+  expect(queryRequests).toEqual([])
+  const saved = await page.evaluate(() => localStorage.getItem('vitals.redeemed-cards.v1'))
+  expect(saved).not.toContain('EFGH-JKMN-PQRS')
+  await scenario(request, 'default', true)
+  await page.getByRole('button', { name: '查询或兑换卡密' }).click()
+  await expect(page.locator('#result')).toHaveClass(/visible/)
+})
+
 test('public card flow identifies a previously saved expired card', async ({ page, request }) => {
   await scenario(request, 'expired-card', true)
   await page.addInitScript(() => {

@@ -51,6 +51,16 @@ describe('P2 admin views', () => {
     clearClientState()
   })
 
+  it('labels expired subscription seats as unavailable even with stale available status', async () => {
+    const expired = { ...accounts[0], account_expiry: '2000-01-01T00:00:00Z', max_concurrent_users: 5, current_allocations: 1 }
+    const wrapper = await render(Accounts, vi.fn().mockResolvedValue(response({ accounts: [expired] })))
+    expect(wrapper.text()).toContain('订阅已过期')
+    expect(wrapper.text()).toContain('可兑换 0 位')
+    expect(wrapper.text()).toContain('空位不可兑换')
+    expect(wrapper.get('tbody tr').classes()).toContain('row-retired')
+    wrapper.unmount()
+  })
+
   it('renders account table without the retired phase-one pull action', async () => {
     const fetchMock = vi.fn().mockResolvedValue(response({ accounts, warnings: ['phase_one_monitor_unavailable'] }))
     const wrapper = await render(Accounts, fetchMock)
