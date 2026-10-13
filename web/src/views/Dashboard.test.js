@@ -19,12 +19,13 @@ function response(body, status = 200) {
 }
 
 function successResponses(fetchMock) {
-  return fetchMock
-    .mockResolvedValueOnce(response({ accounts: monitorAccounts }))
-    .mockResolvedValueOnce(response({ dashboard: { capacity: 7, available_capacity: 5, warning_level: 'attention', days_to_exhaust: 12, redeemed_last_7_days: 8, daily_redemption_rate: 1.14 } }))
-    .mockResolvedValueOnce(response({ accounts: allocationAccounts }))
-    .mockResolvedValueOnce(response({ cards }))
-    .mockResolvedValueOnce(response({ cards: [], total: 0, page: 1 }))
+  return fetchMock.mockImplementation(async (url) => response({
+    '/api/accounts': { accounts: monitorAccounts },
+    '/api/admin/dashboard': { dashboard: { capacity: 7, available_capacity: 5, warning_level: 'attention', days_to_exhaust: 12, redeemed_last_7_days: 8, daily_redemption_rate: 1.14 } },
+    '/api/admin/accounts': { accounts: allocationAccounts },
+    '/api/admin/cards': { cards },
+    '/api/admin/dashboard/password-change-due': { accounts: [] },
+  }[url]))
 }
 
 async function render(fetchMock) {
@@ -44,11 +45,11 @@ async function render(fetchMock) {
 }
 
 describe('Unified dashboard', () => {
-  it('loads both domains from the single-origin API client and shows only the available capacity', async () => {
+  it('keeps the compact capacity overview and independently loads password reminders', async () => {
     const fetchMock = successResponses(vi.fn())
     const wrapper = await render(fetchMock)
-    expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual(['/api/accounts', '/api/admin/dashboard', '/api/admin/accounts', '/api/admin/cards'])
-    // 账号健康与业务库存两块面板已隐藏，仅保留当前可用容量。
+    expect(fetchMock.mock.calls.map(([url]) => String(url)).sort()).toEqual(['/api/accounts', '/api/admin/dashboard', '/api/admin/accounts', '/api/admin/cards', '/api/admin/dashboard/password-change-due'].sort())
+    // 账号健康、业务库存和过期卡密面板保持隐藏。
     expect(wrapper.text()).not.toContain('账号健康')
     expect(wrapper.text()).not.toContain('业务库存')
     expect(wrapper.text()).not.toContain('待补全账号')
@@ -56,33 +57,49 @@ describe('Unified dashboard', () => {
     expect(wrapper.findAll('.domain-panel')).toHaveLength(1)
     const capacity = wrapper.find('.domain-kpi strong')
     expect(capacity.text()).toBe('5')
+    expect(wrapper.text()).toContain('暂无待更改密码账号')
+    expect(wrapper.text()).not.toContain('近 3 天已过期卡密及对应账号')
+    wrapper.unmount()
   })
 
   it('highlights the capacity card when nothing is allocatable', async () => {
-    const fetchMock = vi.fn()
-      .mockResolvedValueOnce(response({ accounts: monitorAccounts }))
-      .mockResolvedValueOnce(response({ dashboard: { capacity: 28, available_capacity: 0, warning_level: 'exhausted' } }))
-      .mockResolvedValueOnce(response({ accounts: allocationAccounts }))
-      .mockResolvedValueOnce(response({ cards }))
-      .mockResolvedValueOnce(response({ cards: [], total: 0, page: 1 }))
+    const fetchMock = vi.fn().mockImplementation(async (url) => response(url === '/api/admin/dashboard'
+      ? { dashboard: { capacity: 28, available_capacity: 0, warning_level: 'exhausted' } }
+      : { accounts: [], cards: [] }))
     const wrapper = await render(fetchMock)
     expect(wrapper.find('.domain-kpi').classes()).toContain('tone-red')
     expect(wrapper.find('.domain-kpi strong').text()).toBe('0')
     // 藏起来的受阻容量归因不再渲染。
     expect(wrapper.find('.blocked-breakdown').exists()).toBe(false)
+    wrapper.unmount()
   })
 
   it('shows a recovery status after a failed aggregate request succeeds', async () => {
-    const fetchMock = vi.fn()
-      .mockResolvedValueOnce(response({}, 503))
-      .mockResolvedValueOnce(response({ dashboard: {} }))
-      .mockResolvedValueOnce(response({ accounts: [] }))
-      .mockResolvedValueOnce(response({ cards: [] }))
+    const fetchMock = vi.fn().mockImplementation(async (url) => response({ accounts: [], cards: [] }, url === '/api/accounts' ? 503 : 200))
     const wrapper = await render(fetchMock)
     expect(wrapper.text()).toContain('运营体征读取中断')
     successResponses(fetchMock)
     await wrapper.find('.error-panel button').trigger('click')
     await flushPromises()
     expect(wrapper.text()).toContain('连接已恢复')
+    wrapper.unmount()
+  })
+
+  it('isolates password API failure from capacity and refreshes both from the overview button', async () => {
+    const fetchMock = vi.fn().mockImplementation(async (url) => response(
+      url === '/api/admin/dashboard' ? { dashboard: { available_capacity: 4 } } : { accounts: [], cards: [] },
+      url === '/api/admin/dashboard/password-change-due' ? 503 : 200,
+    ))
+    const wrapper = await render(fetchMock)
+    expect(wrapper.text()).toContain('密码清单读取失败')
+    expect(wrapper.text()).not.toContain('运营体征读取中断')
+    expect(wrapper.find('.domain-kpi strong').text()).toBe('4')
+    successResponses(fetchMock)
+    await wrapper.find('.overview-refresh').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('暂无待更改密码账号')
+    expect(wrapper.find('.domain-kpi strong').text()).toBe('5')
+    expect(fetchMock.mock.calls.filter(([url]) => url === '/api/admin/dashboard/password-change-due')).toHaveLength(2)
+    wrapper.unmount()
   })
 })

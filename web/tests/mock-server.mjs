@@ -5,6 +5,7 @@ let scenario = 'default'
 let accounts = []
 let accountCredentials = new Map()
 let cards = []
+let passwordDue = []
 let defaultAccountCapacity = 3
 const monitorAccounts = [
   { id: 101, label: 'North Star', provider_account_id: 'acct-north', email: 'north@example.test', plan: 'plus', auth_expiry: '2026-08-19T00:00:00Z', current_expiry: '2026-08-19T00:00:00Z', last_authorized_at: '2026-07-20T00:00:00Z', last_alive_at: '2026-07-24T00:00:00Z', last_check_state: 'ok', status: 'alive', near_expiry: false, credential: { type: 'session_token', configured: true }, polling_paused: false },
@@ -16,6 +17,11 @@ const monitorSettings = { poll_interval: 3600, near_expiry_days: 3, channels: { 
 
 function resetData() {
   defaultAccountCapacity = 3
+  passwordDue = [{
+    id: 1, display_username: 'north@example.test', days_account_remains: 8,
+    expired_card_count: 2, days_expired_card_expired_ago: 1,
+    account_expiry: '2026-10-21T12:00:00Z', last_expired_card_expires_at: '2026-10-12T12:00:00Z',
+  }]
   accounts = [
     { id: 1, display_username: 'north@example.test', account_expiry: '2026-08-19T00:00:00Z', max_concurrent_users: 3, current_allocations: 1, monitor_status: 'alive', status: 'available', monitor_account_id: 'mon-north' },
     { id: 2, display_username: 'amber-allocation@example.test', account_expiry: '2026-07-28T00:00:00Z', max_concurrent_users: 2, current_allocations: 2, monitor_status: 'unknown_monitor', status: 'full' },
@@ -129,6 +135,22 @@ const server = http.createServer(async (request, response) => {
   }
   if (url.pathname === '/api/admin/ping') { if (!protect(request, response)) return; return send(response, 200, { status: 'ok' }) }
   if (url.pathname === '/api/admin/dashboard' && request.method === 'GET') { if (!protect(request, response)) return; if (scenario === 'empty') return send(response, 200, { dashboard: dashboardPayload([], []) }); if (scenario === 'error') return send(response, 503, { code: 'temporary_unavailable' }); return send(response, 200, { dashboard: dashboardPayload() }) }
+  if (url.pathname === '/api/admin/dashboard/password-change-due' && request.method === 'GET') {
+    if (!protect(request, response)) return
+    if (scenario === 'password-error') return send(response, 503, { code: 'temporary_unavailable' })
+    const due = scenario === 'empty' ? [] : passwordDue
+    return send(response, 200, { accounts: due, total: due.length })
+  }
+  const passwordClear = url.pathname.match(/^\/api\/admin\/dashboard\/password-change-due\/(\d+)\/clear$/)
+  if (passwordClear && request.method === 'POST') {
+    if (!protect(request, response)) return
+    if (request.headers['x-csrf-token'] !== csrf) return send(response, 403, { code: 'csrf_invalid' })
+    await readJSON(request)
+    if (scenario === 'password-mark-error') return send(response, 503, { code: 'temporary_unavailable' })
+    const id = Number(passwordClear[1])
+    passwordDue = passwordDue.filter((item) => item.id !== id)
+    return send(response, 200, { id, cleared: true })
+  }
   if (url.pathname === '/api/admin/dashboard/expired-cards' && request.method === 'GET') {
     if (!protect(request, response)) return
     const page = Number(url.searchParams.get('page') || 1)

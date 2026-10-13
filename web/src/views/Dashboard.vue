@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import AdminShell from '../components/AdminShell.vue'
 import StatePanel from '../components/StatePanel.vue'
 import ExpiredCardsPanel from '../components/ExpiredCardsPanel.vue'
+import PasswordChangeDuePanel from '../components/PasswordChangeDuePanel.vue'
 import { api } from '../api/client.js'
 import { summarizeAllocation, summarizeMonitor } from '../lib/vitals.js'
 
@@ -13,8 +14,9 @@ const inventory = ref({})
 const loading = ref(true)
 const error = ref('')
 const recovered = ref(false)
+const passwordPanel = ref(null)
 
-// 仪表盘精简开关：默认只展示"当前可用容量"。
+// 保留精简容量概览；密码处理提醒独立展示，不受这些开关影响。
 // 把 showMonitorDomain / showAllocationDetail / showExpiredCards 改回 true
 // 即可恢复"账号健康"、"业务库存"完整面板与近 3 天过期卡密列表。
 const showMonitorDomain = false
@@ -69,6 +71,10 @@ async function load() {
 }
 
 onMounted(load)
+
+async function refreshAll() {
+  await Promise.all([load(), passwordPanel.value?.reload()])
+}
 </script>
 
 <template>
@@ -79,9 +85,9 @@ onMounted(load)
           OPERATIONS VITALS · LIVE
         </p>
         <h1>运营总览</h1>
-        <p>当前可用容量概览。</p>
+        <p>当前可用容量与待更改密码提醒。</p>
       </div>
-      <button class="refresh-button overview-refresh" type="button" :disabled="loading" @click="load">
+      <button class="refresh-button overview-refresh" type="button" :disabled="loading" @click="refreshAll">
         刷新数据
       </button>
     </section>
@@ -172,5 +178,6 @@ onMounted(load)
       </section>
     </div>
     <ExpiredCardsPanel v-if="showExpiredCards && !loading && !error" />
+    <PasswordChangeDuePanel ref="passwordPanel" />
   </AdminShell>
 </template>

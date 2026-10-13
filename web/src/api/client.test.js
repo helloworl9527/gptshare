@@ -6,6 +6,26 @@ function response(body, status = 200, headers = {}) {
 }
 
 describe('API client', () => {
+  it('loads password reminders and marks them with cookie authentication and CSRF', async () => {
+    clearClientState()
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(response({ accounts: [], total: 0 }))
+      .mockResolvedValueOnce(response({ csrf_token: 'password-test-csrf' }))
+      .mockResolvedValueOnce(response({ id: 12, cleared: true }))
+    vi.stubGlobal('fetch', fetchMock)
+    await api.passwordChangeDue()
+    await api.clearPasswordChange('12/extra')
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/admin/dashboard/password-change-due')
+    expect(fetchMock.mock.calls[0][1].method).toBe('GET')
+    const [url, init] = fetchMock.mock.calls[2]
+    expect(url).toBe('/api/admin/dashboard/password-change-due/12%2Fextra/clear')
+    expect(init.method).toBe('POST')
+    expect(init.credentials).toBe('include')
+    expect(init.headers.get('X-CSRF-Token')).toBe('password-test-csrf')
+    expect(init.body).toBe('{}')
+    clearClientState()
+  })
+
   it('uses in-memory CSRF and cookie credentials without browser token storage', async () => {
     const storage = vi.spyOn(Storage.prototype, 'setItem')
     const fetchMock = vi.fn()

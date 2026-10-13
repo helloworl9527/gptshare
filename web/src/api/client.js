@@ -104,6 +104,8 @@ export const api = {
   clearChannelSecret: (channel) => request(`/api/settings/channels/${encodeURIComponent(channel)}/secret`, { method: 'DELETE' }),
 	securityBoundaries: () => request('/api/admin/config/security-boundaries'),
 	allocationDashboard: () => request('/api/admin/dashboard'),
+	passwordChangeDue: () => request('/api/admin/dashboard/password-change-due'),
+	clearPasswordChange: (id) => request(`/api/admin/dashboard/password-change-due/${encodeURIComponent(id)}/clear`, { method: 'POST', body: {} }),
 	expiredCards: (query = {}) => request(`/api/admin/dashboard/expired-cards?${new URLSearchParams(query)}`),
 	allocations: () => request('/api/admin/allocations'),
 	allocationAccounts: () => request('/api/admin/accounts'),
