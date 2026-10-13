@@ -10,6 +10,9 @@ import (
 type Repository interface {
 	InventoryMetrics(context.Context, time.Time) (repository.InventoryMetrics, error)
 	ListExpiredCards(context.Context, time.Time, int, int, string) (repository.ExpiredCardPage, error)
+	ListPasswordChangeDue(context.Context, time.Time) ([]repository.PasswordChangeDueAccount, error)
+	MarkPasswordChangeCleared(context.Context, int64, time.Time) error
+	Audit(context.Context, string, string, int64, map[string]any) error
 }
 
 type Service struct {
@@ -33,4 +36,16 @@ func (s *Service) Dashboard(ctx context.Context) (repository.InventoryMetrics, e
 
 func (s *Service) ExpiredCards(ctx context.Context, page, pageSize int, search string) (repository.ExpiredCardPage, error) {
 	return s.repo.ListExpiredCards(ctx, s.now().UTC(), page, pageSize, search)
+}
+
+func (s *Service) PasswordChangeDue(ctx context.Context) ([]repository.PasswordChangeDueAccount, error) {
+	return s.repo.ListPasswordChangeDue(ctx, s.now().UTC())
+}
+
+func (s *Service) MarkPasswordChangeCleared(ctx context.Context, accountID int64) error {
+	if err := s.repo.MarkPasswordChangeCleared(ctx, accountID, s.now().UTC()); err != nil {
+		return err
+	}
+	_ = s.repo.Audit(ctx, "accounts.password_change.cleared", "account", accountID, nil)
+	return nil
 }

@@ -110,6 +110,42 @@ func TestLoadPublicOriginRequiresExplicitOptIn(t *testing.T) {
 	}
 }
 
+func TestLoadRefreshSchedulingDefaultsAndBounds(t *testing.T) {
+	env := validEnv()
+	cfg, err := Load(mapLookup(env))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.RefreshScanEvery != time.Hour || cfg.RefreshLead != 24*time.Hour || cfg.RefreshMaxLatency != 5*time.Minute {
+		t.Fatalf("defaults = %s/%s/%s, want 1h/24h/5m", cfg.RefreshScanEvery, cfg.RefreshLead, cfg.RefreshMaxLatency)
+	}
+
+	env["VITALS_MONITOR_REFRESH_SCAN_EVERY"] = "15m"
+	env["VITALS_MONITOR_REFRESH_LEAD"] = "48h"
+	env["VITALS_MONITOR_REFRESH_MAX_LATENCY"] = "10m"
+	cfg, err = Load(mapLookup(env))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.RefreshScanEvery != 15*time.Minute || cfg.RefreshLead != 48*time.Hour || cfg.RefreshMaxLatency != 10*time.Minute {
+		t.Fatalf("overrides = %s/%s/%s", cfg.RefreshScanEvery, cfg.RefreshLead, cfg.RefreshMaxLatency)
+	}
+
+	for key, invalid := range map[string]string{
+		"VITALS_MONITOR_REFRESH_SCAN_EVERY":  "30s",
+		"VITALS_MONITOR_REFRESH_LEAD":        "30s",
+		"VITALS_MONITOR_REFRESH_MAX_LATENCY": "25h",
+	} {
+		env["VITALS_MONITOR_REFRESH_SCAN_EVERY"] = "1h"
+		env["VITALS_MONITOR_REFRESH_LEAD"] = "24h"
+		env["VITALS_MONITOR_REFRESH_MAX_LATENCY"] = "5m"
+		env[key] = invalid
+		if _, err := Load(mapLookup(env)); err == nil {
+			t.Fatalf("expected %s=%q to be rejected", key, invalid)
+		}
+	}
+}
+
 func TestLoadCompatHTTPRequiresCompleteTemporaryException(t *testing.T) {
 	env := validEnv()
 	env["VITALS_MONITOR_COMPAT_HTTP_ENABLED"] = "true"

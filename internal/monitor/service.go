@@ -97,8 +97,26 @@ func New(db *sql.DB, client Client, cipher Cipher, cfg Config) (*Service, error)
 	if cfg.ManualWait == 0 {
 		cfg.ManualWait = defaults.ManualWait
 	}
+	if cfg.RefreshScanEvery == 0 {
+		cfg.RefreshScanEvery = defaults.RefreshScanEvery
+	}
+	if cfg.RefreshLead == 0 {
+		cfg.RefreshLead = defaults.RefreshLead
+	}
+	if cfg.RefreshMaxLatency == 0 {
+		cfg.RefreshMaxLatency = defaults.RefreshMaxLatency
+	}
 	if cfg.Workers != 3 || cfg.RequestTimeout > 15*time.Second || cfg.MaxRetries > 2 || cfg.MinInterval < 15*time.Minute || cfg.DefaultInterval < cfg.MinInterval || cfg.ManualWait <= 0 || cfg.ManualWait > 20*time.Second {
 		return nil, errors.New("monitor configuration violates resource limits")
+	}
+	if cfg.RefreshScanEvery < time.Minute || cfg.RefreshScanEvery > 24*time.Hour {
+		return nil, errors.New("refresh scan interval violates resource limits")
+	}
+	if cfg.RefreshLead < time.Minute || cfg.RefreshLead > 30*24*time.Hour {
+		return nil, errors.New("refresh lead violates resource limits")
+	}
+	if cfg.RefreshMaxLatency <= 0 || cfg.RefreshMaxLatency > 30*time.Minute {
+		return nil, errors.New("refresh latency budget violates resource limits")
 	}
 	service := &Service{db: db, client: client, cipher: cipher, cfg: cfg, now: time.Now, active: make(map[int64]string), baseCtx: context.Background()}
 	service.sleep = sleepContext
@@ -360,57 +378,12 @@ func (s *Service) pollCredentialSnapshot(ctx context.Context, record accountReco
 		}
 	}
 	access := credentials.Access
-	if credentialNeedsRefresh(credentials, now.Add(s.cfg.RefreshBefore)) {
-		var tokens chatgpt.TokenSet
-		var exchangeErr error
-		for attempt := 0; attempt <= s.cfg.MaxRetries; attempt++ {
-			requestCtx, cancel := context.WithTimeout(ctx, s.cfg.RequestTimeout)
-			switch {
-			case credentials.Refresh != "":
-				tokens, exchangeErr = s.client.ExchangeCredential(requestCtx, chatgpt.CredentialRefresh, credentials.Refresh)
-			case credentials.Session != "":
-				tokens, exchangeErr = s.client.ExchangeCredential(requestCtx, chatgpt.CredentialSession, credentials.Session)
-			default:
-				cancel()
-				return pollResult{typed: authorizationRequired("oauth_refresh_token_missing"), endpoint: "oauth_token", code: "oauth_refresh_token_missing", generation: record.Generation}
-			}
-			cancel()
-			if exchangeErr == nil {
-				break
-			}
-			outcome := normalizeOAuthRefreshFailure(errorPollResult("oauth_token", exchangeErr))
-			if outcome.typed == nil || !outcome.typed.Retryable || attempt == s.cfg.MaxRetries || s.retryPause(ctx, outcome.typed, attempt) != nil {
-				if isAuthorizationFailure(outcome.typed) {
-					outcome.reloadCredential = true
-					outcome.generation = record.Generation
-				}
-				return outcome
-			}
-		}
-		credentials.Access = tokens.AccessToken
-		if tokens.RefreshToken != "" {
-			credentials.Refresh = tokens.RefreshToken
-		}
-		if tokens.IDToken != "" {
-			credentials.IDToken = tokens.IDToken
-		}
-		credentials.AccessExpiresAt = tokens.AccessExpiresAt
-		if credentials.AccessExpiresAt == nil {
-			if expiry, ok := chatgpt.AccessTokenExpiry(tokens.AccessToken); ok {
-				credentials.AccessExpiresAt = &expiry
-			}
-		}
-		if credentials.OAuthSource == "" && credentials.Refresh != "" {
-			credentials.OAuthSource = "refresh"
-		}
-		access = tokens.AccessToken
-		persisted, err := s.persistCredentialsCAS(ctx, record, credentials)
-		if err != nil {
-			return internalPollError("credential_persist")
-		}
-		if !persisted {
-			return pollResult{reloadCredential: true, code: "credential_changed_during_poll", generation: record.Generation}
-		}
+	refreshed, newAccess, refreshOutcome := s.refreshCredentialIfApproachingExpiry(ctx, record, credentials, now.Add(s.cfg.RefreshBefore))
+	if refreshOutcome.typed != nil || refreshOutcome.skipped || refreshOutcome.reloadCredential {
+		return refreshOutcome
+	}
+	if refreshed {
+		access = newAccess
 		record.Generation++
 	}
 	var status chatgpt.StatusResult
@@ -433,6 +406,68 @@ func (s *Service) pollCredentialSnapshot(ctx context.Context, record accountReco
 	}
 	credentials.Access, credentials.Refresh, credentials.Session = "", "", ""
 	return pollResult{status: &status, endpoint: "accounts_check", code: status.EvidenceCode, generation: record.Generation}
+}
+
+// refreshCredentialIfApproachingExpiry renews the access token when it expires
+// at or before threshold, then persists the rotated credential set. It returns
+// the new access token when a refresh occurred.
+//
+// Kept separate from the liveness poll so the dedicated refresh scheduler can
+// reuse the same exchange/retry/persist path without duplicating logic.
+func (s *Service) refreshCredentialIfApproachingExpiry(ctx context.Context, record accountRecord, credentials credentialPayload, threshold time.Time) (bool, string, pollResult) {
+	if !credentialNeedsRefresh(credentials, threshold) {
+		return false, "", pollResult{}
+	}
+	var tokens chatgpt.TokenSet
+	var exchangeErr error
+	for attempt := 0; attempt <= s.cfg.MaxRetries; attempt++ {
+		requestCtx, cancel := context.WithTimeout(ctx, s.cfg.RequestTimeout)
+		switch {
+		case credentials.Refresh != "":
+			tokens, exchangeErr = s.client.ExchangeCredential(requestCtx, chatgpt.CredentialRefresh, credentials.Refresh)
+		case credentials.Session != "":
+			tokens, exchangeErr = s.client.ExchangeCredential(requestCtx, chatgpt.CredentialSession, credentials.Session)
+		default:
+			cancel()
+			return false, "", pollResult{typed: authorizationRequired("oauth_refresh_token_missing"), endpoint: "oauth_token", code: "oauth_refresh_token_missing", generation: record.Generation}
+		}
+		cancel()
+		if exchangeErr == nil {
+			break
+		}
+		outcome := normalizeOAuthRefreshFailure(errorPollResult("oauth_token", exchangeErr))
+		if outcome.typed == nil || !outcome.typed.Retryable || attempt == s.cfg.MaxRetries || s.retryPause(ctx, outcome.typed, attempt) != nil {
+			if isAuthorizationFailure(outcome.typed) {
+				outcome.reloadCredential = true
+				outcome.generation = record.Generation
+			}
+			return false, "", outcome
+		}
+	}
+	credentials.Access = tokens.AccessToken
+	if tokens.RefreshToken != "" {
+		credentials.Refresh = tokens.RefreshToken
+	}
+	if tokens.IDToken != "" {
+		credentials.IDToken = tokens.IDToken
+	}
+	credentials.AccessExpiresAt = tokens.AccessExpiresAt
+	if credentials.AccessExpiresAt == nil {
+		if expiry, ok := chatgpt.AccessTokenExpiry(tokens.AccessToken); ok {
+			credentials.AccessExpiresAt = &expiry
+		}
+	}
+	if credentials.OAuthSource == "" && credentials.Refresh != "" {
+		credentials.OAuthSource = "refresh"
+	}
+	persisted, err := s.persistCredentialsCAS(ctx, record, credentials)
+	if err != nil {
+		return false, "", internalPollError("credential_persist")
+	}
+	if !persisted {
+		return false, "", pollResult{reloadCredential: true, code: "credential_changed_during_poll", generation: record.Generation}
+	}
+	return true, tokens.AccessToken, pollResult{}
 }
 
 func legacyOAuthSource(tokenType string) string {

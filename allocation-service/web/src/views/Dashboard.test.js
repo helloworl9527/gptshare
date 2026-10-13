@@ -25,6 +25,10 @@ const dashboard = {
   warning_label: '紧急',
 }
 
+const passwordDue = [
+  { id: 9, display_username: 'due@example.test', days_account_remains: 12, expired_card_count: 2, days_expired_card_expired_ago: 3, account_expiry: '2026-08-20T00:00:00Z', status: 'available', monitor_status: 'alive' },
+]
+
 function response(body, status = 200) {
   return { ok: status >= 200 && status < 300, status, headers: new Headers(), json: async () => body }
 }
@@ -32,7 +36,8 @@ function response(body, status = 200) {
 async function render(fetchMock = vi.fn()
   .mockResolvedValueOnce(response({ dashboard }))
   .mockResolvedValueOnce(response({ accounts }))
-  .mockResolvedValueOnce(response({ cards }))) {
+  .mockResolvedValueOnce(response({ cards }))
+  .mockResolvedValueOnce(response({ accounts: passwordDue }))) {
   vi.stubGlobal('fetch', fetchMock)
   const placeholder = { template: '<div />' }
   const router = createRouter({
@@ -55,11 +60,27 @@ async function render(fetchMock = vi.fn()
 describe('Dashboard', () => {
   it('computes allocator KPIs from admin accounts and cards', async () => {
     const { wrapper, fetchMock } = await render()
-    expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual(['/api/admin/dashboard', '/api/admin/accounts', '/api/admin/cards'])
+    expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([
+      '/api/admin/dashboard',
+      '/api/admin/accounts',
+      '/api/admin/cards',
+      '/api/admin/dashboard/password-change-due',
+    ])
     const kpis = wrapper.findAll('.kpi-card strong').map((node) => node.text())
     expect(kpis).toEqual(['紧急', '2', '1.0', '3'])
     expect(wrapper.text()).toContain('账号池时间分布')
     expect(wrapper.text()).toContain('**** EFGH')
+  })
+
+  it('renders the password-change panel and clears an item', async () => {
+    const { wrapper } = await render()
+    expect(wrapper.text()).toContain('待更改密码')
+    expect(wrapper.text()).toContain('due@example.test')
+    const clearMock = vi.fn().mockResolvedValueOnce(response({ id: 9, cleared: true }))
+    vi.stubGlobal('fetch', clearMock)
+    await wrapper.find('.password-row .nav-action').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('due@example.test')
   })
 
   it('shows loading, error, and recovery states', async () => {
@@ -67,9 +88,11 @@ describe('Dashboard', () => {
       .mockRejectedValueOnce(new Error('offline'))
       .mockResolvedValueOnce(response({ accounts: [] }))
       .mockResolvedValueOnce(response({ cards: [] }))
+      .mockResolvedValueOnce(response({ accounts: [] }))
       .mockResolvedValueOnce(response({ dashboard }))
       .mockResolvedValueOnce(response({ accounts }))
       .mockResolvedValueOnce(response({ cards }))
+      .mockResolvedValueOnce(response({ accounts: passwordDue }))
     const { wrapper } = await render(fetchMock)
     expect(wrapper.text()).toContain('后台读取中断')
     await wrapper.find('.error-panel button').trigger('click')

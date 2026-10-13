@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/crypto/bcrypt"
 )
@@ -23,12 +24,12 @@ type Config struct {
 	ListenAddr                   string
 	DBPath                       string
 	MigrationsDir                string
-	CredentialMasterKeys        map[string][]byte
-	CredentialActiveKeyID       string
-	JWTSigningKey               []byte
-	RateLimitKey                []byte
-	AllocationServiceAPIKey     string
-	AllocationAccountEventURL   string
+	CredentialMasterKeys         map[string][]byte
+	CredentialActiveKeyID        string
+	JWTSigningKey                []byte
+	RateLimitKey                 []byte
+	AllocationServiceAPIKey      string
+	AllocationAccountEventURL    string
 	AllocationAccountEventAPIKey string
 	AdminUser                    string
 	AdminPasswordHash            string
@@ -37,6 +38,9 @@ type Config struct {
 	TrustLoopbackProxy           bool
 	DevTLSCert                   string
 	DevTLSKey                    string
+	RefreshScanEvery             time.Duration
+	RefreshLead                  time.Duration
+	RefreshMaxLatency            time.Duration
 }
 
 func Load() (Config, error) {
@@ -77,6 +81,19 @@ func load(lookup func(string) (string, bool)) (Config, error) {
 	}
 	appOrigin := get("APP_ORIGIN", "https://"+listenAddr)
 
+	refreshScanEvery, err := parseDurationBound(get, "VITALS_MONITOR_REFRESH_SCAN_EVERY", time.Hour, time.Minute, 24*time.Hour)
+	if err != nil {
+		return Config{}, err
+	}
+	refreshLead, err := parseDurationBound(get, "VITALS_MONITOR_REFRESH_LEAD", 24*time.Hour, time.Minute, 30*24*time.Hour)
+	if err != nil {
+		return Config{}, err
+	}
+	refreshMaxLatency, err := parseDurationBound(get, "VITALS_MONITOR_REFRESH_MAX_LATENCY", 5*time.Minute, time.Second, 30*time.Minute)
+	if err != nil {
+		return Config{}, err
+	}
+
 	cfg := Config{
 		Environment:                  get("APP_ENV", "development"),
 		ListenAddr:                   listenAddr,
@@ -96,11 +113,22 @@ func load(lookup func(string) (string, bool)) (Config, error) {
 		TrustLoopbackProxy:           trustProxy,
 		DevTLSCert:                   get("DEV_TLS_CERT", ""),
 		DevTLSKey:                    get("DEV_TLS_KEY", ""),
+		RefreshScanEvery:             refreshScanEvery,
+		RefreshLead:                  refreshLead,
+		RefreshMaxLatency:            refreshMaxLatency,
 	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+func parseDurationBound(get func(string, string) string, name string, fallback, min, max time.Duration) (time.Duration, error) {
+	parsed, err := time.ParseDuration(get(name, fallback.String()))
+	if err != nil || parsed < min || parsed > max {
+		return 0, fmt.Errorf("%s must be a duration between %s and %s", name, min, max)
+	}
+	return parsed, nil
 }
 
 func (c Config) Validate() error {

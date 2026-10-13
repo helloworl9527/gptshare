@@ -8,10 +8,14 @@ import { cardTone, daysUntil, formatDate, summarize } from '../lib/vitals.js'
 
 const accounts = ref([])
 const cards = ref([])
+const passwordDue = ref([])
 const dashboard = ref(null)
 const loading = ref(true)
 const error = ref('')
 const recovered = ref(false)
+const clearing = ref(null)
+
+const passwordDueCount = computed(() => passwordDue.value.length)
 
 const summary = computed(() => summarize(accounts.value, cards.value))
 const metrics = computed(() => dashboard.value || {
@@ -50,16 +54,31 @@ async function load() {
   loading.value = true
   error.value = ''
   try {
-    const [dashboardResult, accountResult, cardResult] = await Promise.all([api.dashboard(), api.accounts(), api.cards()])
+    const [dashboardResult, accountResult, cardResult, passwordResult] = await Promise.all([
+      api.dashboard(), api.accounts(), api.cards(), api.passwordChangeDue(),
+    ])
     dashboard.value = dashboardResult.dashboard || null
     accounts.value = accountResult.accounts || []
     cards.value = cardResult.cards || []
+    passwordDue.value = passwordResult.accounts || []
     recovered.value = hadError
     if (hadError) setTimeout(() => { recovered.value = false }, 2800)
   } catch (reason) {
     error.value = reason.message || '后台数据暂时无法读取。'
   } finally {
     loading.value = false
+  }
+}
+
+async function clearPasswordChange(account) {
+  clearing.value = account.id
+  try {
+    await api.clearPasswordChange(account.id)
+    passwordDue.value = passwordDue.value.filter((item) => item.id !== account.id)
+  } catch (reason) {
+    error.value = reason.message || '标记失败，请重试。'
+  } finally {
+    clearing.value = null
   }
 }
 
@@ -102,6 +121,30 @@ onMounted(load)
     <StatePanel v-else-if="error" type="error" title="后台读取中断" :message="error" action="重新连接" @action="load" />
     <template v-else>
       <VitalsPanel :items="kpis" />
+      <section v-if="passwordDueCount > 0" class="panel password-panel" aria-label="待更改密码">
+        <div class="section-head compact">
+          <div>
+            <p class="section-index">
+              00 / PASSWORD CHANGE
+            </p>
+            <h2>待更改密码 · {{ passwordDueCount }} 个帐户</h2>
+            <p class="panel-subtitle">
+              乘客订阅已过期、但 GPT 订阅仍剩余超过 3 天的帐户，建议立即修改密码。
+            </p>
+          </div>
+        </div>
+        <ul class="password-list">
+          <li v-for="item in passwordDue" :key="item.id" class="password-row">
+            <div class="password-meta">
+              <strong>{{ item.display_username }}</strong>
+              <span>GPT 剩余 {{ item.days_account_remains }} 天 · 过期卡 {{ item.expired_card_count }} 张（已过期 {{ item.days_expired_card_expired_ago }} 天）</span>
+            </div>
+            <button type="button" class="nav-action" :disabled="clearing === item.id" @click="clearPasswordChange(item)">
+              {{ clearing === item.id ? '处理中…' : '已改密码' }}
+            </button>
+          </li>
+        </ul>
+      </section>
       <section class="dashboard-grid" aria-label="库存分析">
         <article class="panel health-panel">
           <div class="section-head compact">

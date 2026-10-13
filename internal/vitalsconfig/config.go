@@ -42,6 +42,9 @@ type Config struct {
 	AppOrigin                    string
 	TrustLoopbackProxy           bool
 	CompatHTTP                   CompatHTTPConfig
+	RefreshScanEvery             time.Duration
+	RefreshLead                  time.Duration
+	RefreshMaxLatency            time.Duration
 }
 
 type CompatHTTPConfig struct {
@@ -132,6 +135,18 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	refreshScanEvery, err := parseBoundedDuration(get, "VITALS_MONITOR_REFRESH_SCAN_EVERY", time.Hour, time.Minute, 24*time.Hour)
+	if err != nil {
+		return Config{}, err
+	}
+	refreshLead, err := parseBoundedDuration(get, "VITALS_MONITOR_REFRESH_LEAD", 24*time.Hour, time.Minute, 30*24*time.Hour)
+	if err != nil {
+		return Config{}, err
+	}
+	refreshMaxLatency, err := parseBoundedDuration(get, "VITALS_MONITOR_REFRESH_MAX_LATENCY", 5*time.Minute, time.Second, 30*time.Minute)
+	if err != nil {
+		return Config{}, err
+	}
 	cfg := Config{
 		ListenAddr:                   listenAddr,
 		MonitorDBPath:                get("MONITOR_DB_PATH", filepath.Join("data", "monitor.db")),
@@ -150,6 +165,9 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 		AppOrigin:                    appOrigin,
 		TrustLoopbackProxy:           trustProxy,
 		CompatHTTP:                   compat,
+		RefreshScanEvery:             refreshScanEvery,
+		RefreshLead:                  refreshLead,
+		RefreshMaxLatency:            refreshMaxLatency,
 	}
 	if cfg.MonitorDBPath == "" || cfg.AllocationDBPath == "" || cfg.MonitorMigrationsDir == "" {
 		return Config{}, errors.New("both database paths and the monitor migrations directory are required")
@@ -184,6 +202,14 @@ func loadCompatHTTP(get func(string, string) string) (CompatHTTPConfig, error) {
 		return CompatHTTPConfig{}, errors.New("compatibility HTTP expiry must be a future RFC3339 timestamp")
 	}
 	return result, nil
+}
+
+func parseBoundedDuration(get func(string, string) string, name string, fallback, min, max time.Duration) (time.Duration, error) {
+	parsed, err := time.ParseDuration(get(name, fallback.String()))
+	if err != nil || parsed < min || parsed > max {
+		return 0, fmt.Errorf("%s must be a duration between %s and %s", name, min, max)
+	}
+	return parsed, nil
 }
 
 func parseKeyring(name, value string, encoding *base64.Encoding) (map[string][]byte, error) {

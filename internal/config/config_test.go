@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLoadValidConfiguration(t *testing.T) {
@@ -24,6 +25,30 @@ func TestLoadValidConfiguration(t *testing.T) {
 	}
 	if cfg.AllocationServiceAPIKey == "" {
 		t.Fatal("allocation API key not loaded")
+	}
+}
+
+func TestLoadRefreshSchedulingLegacyDefaultsAndBounds(t *testing.T) {
+	values := validValues()
+	cfg, err := load(func(name string) (string, bool) { value, ok := values[name]; return value, ok })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.RefreshScanEvery != time.Hour || cfg.RefreshLead != 24*time.Hour || cfg.RefreshMaxLatency != 5*time.Minute {
+		t.Fatalf("defaults = %s/%s/%s, want 1h/24h/5m", cfg.RefreshScanEvery, cfg.RefreshLead, cfg.RefreshMaxLatency)
+	}
+	values["VITALS_MONITOR_REFRESH_SCAN_EVERY"] = "20m"
+	values["VITALS_MONITOR_REFRESH_LEAD"] = "36h"
+	cfg, err = load(func(name string) (string, bool) { value, ok := values[name]; return value, ok })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.RefreshScanEvery != 20*time.Minute || cfg.RefreshLead != 36*time.Hour {
+		t.Fatalf("overrides = %s/%s", cfg.RefreshScanEvery, cfg.RefreshLead)
+	}
+	values["VITALS_MONITOR_REFRESH_SCAN_EVERY"] = "not-a-duration"
+	if _, err := load(func(name string) (string, bool) { value, ok := values[name]; return value, ok }); err == nil {
+		t.Fatal("expected invalid refresh duration to be rejected")
 	}
 }
 
@@ -56,7 +81,9 @@ func TestRejectsMissingReusedAndMalformedKeys(t *testing.T) {
 		{"short allocation API key", func(v map[string]string) { v["ALLOCATION_SERVICE_API_KEY"] = "short" }},
 		{"reused allocation API key", func(v map[string]string) { v["ALLOCATION_SERVICE_API_KEY"] = string([]byte(strings.Repeat("c", 32))) }},
 		{"missing account event URL", func(v map[string]string) { delete(v, "ALLOCATION_ACCOUNT_EVENT_URL") }},
-		{"insecure remote account event URL", func(v map[string]string) { v["ALLOCATION_ACCOUNT_EVENT_URL"] = "http://allocation.example/api/internal/v1/monitor-account-events" }},
+		{"insecure remote account event URL", func(v map[string]string) {
+			v["ALLOCATION_ACCOUNT_EVENT_URL"] = "http://allocation.example/api/internal/v1/monitor-account-events"
+		}},
 		{"short account event API key", func(v map[string]string) { v["ALLOCATION_ACCOUNT_EVENT_API_KEY"] = "short" }},
 		{"reused account event API key", func(v map[string]string) { v["ALLOCATION_ACCOUNT_EVENT_API_KEY"] = strings.Repeat("z", 32) }},
 		{"malformed password hash", func(v map[string]string) { v["ADMIN_PASSWORD_HASH"] = "plaintext" }},
@@ -83,20 +110,20 @@ func validValues() map[string]string {
 		return base64.StdEncoding.EncodeToString([]byte(strings.Repeat(string(fill), 32)))
 	}
 	return map[string]string{
-		"APP_ENV":                    "development",
-		"PORT":                       "8080",
-		"DB_PATH":                    "data/test.db",
-		"MIGRATIONS_DIR":             "migrations",
-		"CREDENTIAL_MASTER_KEYS":     "active:" + key('a') + ",old:" + key('b'),
-		"CREDENTIAL_ACTIVE_KEY_ID":   "active",
-		"JWT_SIGNING_KEY":            key('c'),
-		"RATE_LIMIT_KEY":             key('d'),
-		"ALLOCATION_SERVICE_API_KEY": strings.Repeat("z", 32),
-		"ALLOCATION_ACCOUNT_EVENT_URL": "http://127.0.0.1:9090/api/internal/v1/monitor-account-events",
+		"APP_ENV":                          "development",
+		"PORT":                             "8080",
+		"DB_PATH":                          "data/test.db",
+		"MIGRATIONS_DIR":                   "migrations",
+		"CREDENTIAL_MASTER_KEYS":           "active:" + key('a') + ",old:" + key('b'),
+		"CREDENTIAL_ACTIVE_KEY_ID":         "active",
+		"JWT_SIGNING_KEY":                  key('c'),
+		"RATE_LIMIT_KEY":                   key('d'),
+		"ALLOCATION_SERVICE_API_KEY":       strings.Repeat("z", 32),
+		"ALLOCATION_ACCOUNT_EVENT_URL":     "http://127.0.0.1:9090/api/internal/v1/monitor-account-events",
 		"ALLOCATION_ACCOUNT_EVENT_API_KEY": strings.Repeat("e", 32),
-		"ADMIN_USER":                 "admin",
-		"ADMIN_PASSWORD_HASH":        "$2b$12$01234567890123456789012345678901234567890123456789012",
-		"ADMIN_TOTP_SECRET":          base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString([]byte(strings.Repeat("e", 20))),
-		"APP_ORIGIN":                 "https://127.0.0.1:8080",
+		"ADMIN_USER":                       "admin",
+		"ADMIN_PASSWORD_HASH":              "$2b$12$01234567890123456789012345678901234567890123456789012",
+		"ADMIN_TOTP_SECRET":                base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString([]byte(strings.Repeat("e", 20))),
+		"APP_ORIGIN":                       "https://127.0.0.1:8080",
 	}
 }

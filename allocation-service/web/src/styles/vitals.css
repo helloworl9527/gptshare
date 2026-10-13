@@ -164,6 +164,15 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 /* Allocation admin */
 .dashboard-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; margin-top: 28px; }
 .panel { min-width: 0; border: 1px solid var(--line); border-radius: 3px; background: #fff; padding: clamp(20px, 3vw, 32px); }
+.password-panel { margin: 28px 0 0; border-left: 4px solid var(--amber); }
+.panel-subtitle { margin: 8px 0 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.password-list { display: grid; gap: 10px; margin: 18px 0 0; padding: 0; list-style: none; }
+.password-row { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; background: #f7faf9; padding: 12px 14px; }
+.password-meta { display: grid; gap: 4px; min-width: 0; }
+.password-meta strong { font: 700 13px var(--mono); overflow-wrap: anywhere; }
+.password-meta span { color: var(--muted); font-size: 12px; }
+.password-row .nav-action { flex: none; cursor: pointer; }
+.password-row .nav-action:disabled { opacity: .6; cursor: progress; }
 .compact { margin-bottom: 16px; }
 .compact-action { min-height: 44px; padding: 0 18px; }
 .bucket-list { display: grid; gap: 18px; }

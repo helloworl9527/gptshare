@@ -14,6 +14,13 @@ const loading = ref(true)
 const error = ref('')
 const recovered = ref(false)
 
+// 仪表盘精简开关：默认只展示"当前可用容量"。
+// 把 showMonitorDomain / showAllocationDetail / showExpiredCards 改回 true
+// 即可恢复"账号健康"、"业务库存"完整面板与近 3 天过期卡密列表。
+const showMonitorDomain = false
+const showAllocationDetail = false
+const showExpiredCards = false
+
 const monitor = computed(() => summarizeMonitor(monitorAccounts.value))
 const allocation = computed(() => summarizeAllocation(allocationAccounts.value, cards.value))
 const pendingCredentials = computed(() => allocationAccounts.value.filter((item) => item.status === 'pending_credentials').length)
@@ -72,7 +79,7 @@ onMounted(load)
           OPERATIONS VITALS · LIVE
         </p>
         <h1>运营总览</h1>
-        <p>账号健康与业务库存的统一体征视图。</p>
+        <p>当前可用容量概览。</p>
       </div>
       <button class="refresh-button overview-refresh" type="button" :disabled="loading" @click="load">
         刷新数据
@@ -87,7 +94,7 @@ onMounted(load)
     </div>
     <StatePanel v-else-if="error" type="error" title="运营体征读取中断" :message="error" action="重新连接" @action="load" />
     <div v-else class="domain-grid">
-      <section class="domain-panel" aria-labelledby="monitor-domain-title">
+      <section v-if="showMonitorDomain" class="domain-panel" aria-labelledby="monitor-domain-title">
         <header class="domain-head">
           <h2 id="monitor-domain-title">
             账号健康
@@ -112,7 +119,21 @@ onMounted(load)
         </RouterLink>
       </section>
 
-      <section class="domain-panel" aria-labelledby="allocation-domain-title">
+      <section class="domain-panel" aria-labelledby="capacity-domain-title">
+        <header class="domain-head">
+          <h2 id="capacity-domain-title">
+            当前可用容量
+          </h2><span class="eyebrow">CAPACITY</span>
+        </header>
+        <div class="domain-kpis">
+          <article class="domain-kpi" :class="{ 'tone-red': available === 0 }">
+            <span>可用容量</span><strong>{{ available }}</strong>
+            <small>兑换真能选中的并发位</small>
+          </article>
+        </div>
+      </section>
+
+      <section v-if="showAllocationDetail" class="domain-panel" aria-labelledby="allocation-domain-title">
         <header class="domain-head">
           <h2 id="allocation-domain-title">
             业务库存
@@ -150,6 +171,6 @@ onMounted(load)
         </RouterLink>
       </section>
     </div>
-    <ExpiredCardsPanel v-if="!loading && !error" />
+    <ExpiredCardsPanel v-if="showExpiredCards && !loading && !error" />
   </AdminShell>
 </template>

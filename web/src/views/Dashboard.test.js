@@ -44,42 +44,32 @@ async function render(fetchMock) {
 }
 
 describe('Unified dashboard', () => {
-  it('loads both domains from the single-origin API client and renders side-by-side vitals', async () => {
+  it('loads both domains from the single-origin API client and shows only the available capacity', async () => {
     const fetchMock = successResponses(vi.fn())
     const wrapper = await render(fetchMock)
-    expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual(['/api/accounts', '/api/admin/dashboard', '/api/admin/accounts', '/api/admin/cards', '/api/admin/dashboard/expired-cards?page=1&page_size=20&search='])
-    expect(wrapper.text()).toContain('账号健康')
-    expect(wrapper.text()).toContain('业务库存')
-    expect(wrapper.text()).toContain('待补全账号')
-    expect(wrapper.findAll('.domain-panel')).toHaveLength(2)
+    expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual(['/api/accounts', '/api/admin/dashboard', '/api/admin/accounts', '/api/admin/cards'])
+    // 账号健康与业务库存两块面板已隐藏，仅保留当前可用容量。
+    expect(wrapper.text()).not.toContain('账号健康')
+    expect(wrapper.text()).not.toContain('业务库存')
+    expect(wrapper.text()).not.toContain('待补全账号')
+    expect(wrapper.text()).toContain('当前可用容量')
+    expect(wrapper.findAll('.domain-panel')).toHaveLength(1)
+    const capacity = wrapper.find('.domain-kpi strong')
+    expect(capacity.text()).toBe('5')
   })
 
-  it('reports blocked capacity so a dashboard number can never promise seats redemption cannot allocate', async () => {
+  it('highlights the capacity card when nothing is allocatable', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(response({ accounts: monitorAccounts }))
-      .mockResolvedValueOnce(response({
-        dashboard: {
-          capacity: 28, available_capacity: 0, blocked_capacity: 6, warning_level: 'exhausted', days_to_exhaust: 0,
-          blocked_breakdown: [
-            { reason: 'pending_credentials', accounts: 1, free_slots: 4 },
-            { reason: 'full', accounts: 1, free_slots: 2 },
-          ],
-        },
-      }))
+      .mockResolvedValueOnce(response({ dashboard: { capacity: 28, available_capacity: 0, warning_level: 'exhausted' } }))
       .mockResolvedValueOnce(response({ accounts: allocationAccounts }))
       .mockResolvedValueOnce(response({ cards }))
       .mockResolvedValueOnce(response({ cards: [], total: 0, page: 1 }))
     const wrapper = await render(fetchMock)
-    expect(wrapper.text()).toContain('另有 6 位受阻')
-    expect(wrapper.text()).toContain('凭据未补全')
-    expect(wrapper.text()).toContain('状态漂移（已纠偏中）')
-    expect(wrapper.findAll('.blocked-breakdown li')).toHaveLength(2)
-  })
-
-  it('hides the blocked breakdown when every free seat is allocatable', async () => {
-    const wrapper = await render(successResponses(vi.fn()))
+    expect(wrapper.find('.domain-kpi').classes()).toContain('tone-red')
+    expect(wrapper.find('.domain-kpi strong').text()).toBe('0')
+    // 藏起来的受阻容量归因不再渲染。
     expect(wrapper.find('.blocked-breakdown').exists()).toBe(false)
-    expect(wrapper.text()).not.toContain('位受阻')
   })
 
   it('shows a recovery status after a failed aggregate request succeeds', async () => {

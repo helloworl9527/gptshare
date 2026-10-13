@@ -31,15 +31,18 @@ type Cipher interface {
 }
 
 type Config struct {
-	Workers         int
-	RequestTimeout  time.Duration
-	MaxRetries      int
-	MinInterval     time.Duration
-	DefaultInterval time.Duration
-	NearExpiryDays  int
-	RefreshBefore   time.Duration
-	ParserVersion   string
-	ManualWait      time.Duration
+	Workers           int
+	RequestTimeout    time.Duration
+	MaxRetries        int
+	MinInterval       time.Duration
+	DefaultInterval   time.Duration
+	NearExpiryDays    int
+	RefreshBefore     time.Duration
+	ParserVersion     string
+	ManualWait        time.Duration
+	RefreshScanEvery  time.Duration
+	RefreshLead       time.Duration
+	RefreshMaxLatency time.Duration
 }
 
 func DefaultConfig() Config {
@@ -47,6 +50,7 @@ func DefaultConfig() Config {
 		Workers: 3, RequestTimeout: 15 * time.Second, MaxRetries: 2,
 		MinInterval: 15 * time.Minute, DefaultInterval: time.Hour,
 		NearExpiryDays: 3, RefreshBefore: 5 * time.Minute, ParserVersion: "status-v1", ManualWait: 20 * time.Second,
+		RefreshScanEvery: time.Hour, RefreshLead: 24 * time.Hour, RefreshMaxLatency: 5 * time.Minute,
 	}
 }
 

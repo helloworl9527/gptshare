@@ -76,7 +76,11 @@ func main() {
 		logger.Error("account service initialization failed", "error_code", "account_config_invalid")
 		os.Exit(1)
 	}
-	monitorService, err := monitor.New(database.DB(), chatgptClient, keyring, monitor.DefaultConfig())
+	monitorCfg := monitor.DefaultConfig()
+	monitorCfg.RefreshScanEvery = cfg.RefreshScanEvery
+	monitorCfg.RefreshLead = cfg.RefreshLead
+	monitorCfg.RefreshMaxLatency = cfg.RefreshMaxLatency
+	monitorService, err := monitor.New(database.DB(), chatgptClient, keyring, monitorCfg)
 	if err != nil {
 		logger.Error("monitor initialization failed", "error_code", "monitor_config_invalid")
 		os.Exit(1)

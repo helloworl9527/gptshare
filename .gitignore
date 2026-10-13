@@ -65,6 +65,12 @@ yarn-error.log*
 *.log
 *.pid
 
+# ── Local acceptance / build scratch (dev secrets, self-signed certs, DBs, binaries) ──
+.accept/
+.gocache/
+.gotmp/
+**/.npm-cache/
+
 # ── Dev-only local acceptance tooling (not part of product; embeds local dev creds) ──
 cmd/vitals-dev-seed/
 scripts/vitals-dev-run.sh

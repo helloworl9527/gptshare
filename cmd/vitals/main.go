@@ -77,7 +77,11 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return errors.New("monitor_account_initialization_failed")
 	}
-	monitorService, err := monitor.New(monitorStore.DB(), chatgptClient, monitorKeyring, monitor.DefaultConfig())
+	monitorCfg := monitor.DefaultConfig()
+	monitorCfg.RefreshScanEvery = cfg.RefreshScanEvery
+	monitorCfg.RefreshLead = cfg.RefreshLead
+	monitorCfg.RefreshMaxLatency = cfg.RefreshMaxLatency
+	monitorService, err := monitor.New(monitorStore.DB(), chatgptClient, monitorKeyring, monitorCfg)
 	if err != nil {
 		return errors.New("monitor_initialization_failed")
 	}
@@ -120,6 +124,11 @@ func run(logger *slog.Logger) error {
 		return monitorService.RunScheduler(taskCtx, logger)
 	})); err != nil {
 		return errors.New("monitor_poller_registration_failed")
+	}
+	if err := runner.GoManaged(ctx, "refresh", "monitor", injectPanic("refresh", func(taskCtx context.Context) error {
+		return monitorService.RunRefreshScheduler(taskCtx, logger)
+	})); err != nil {
+		return errors.New("monitor_refresh_registration_failed")
 	}
 	if err := runner.GoManaged(ctx, "outbox", "monitor", injectPanic("outbox", outbox.Run)); err != nil {
 		return errors.New("monitor_outbox_registration_failed")
