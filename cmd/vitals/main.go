@@ -110,6 +110,16 @@ func run(logger *slog.Logger) error {
 		return errors.New("allocation_database_initialization_failed")
 	}
 	defer allocationModule.Close()
+	if cfg.UserCenter.Enabled {
+		if err := allocationModule.EnableUserCenter(allocationmodule.UserCenterConfig{
+			TicketKey:     cfg.UserCenter.BindTicketKey,
+			InternalToken: cfg.UserCenter.InternalToken,
+			DetailOrigin:  cfg.UserCenter.DetailOrigin,
+		}); err != nil {
+			return errors.New("user_center_initialization_failed")
+		}
+	}
+	logger.Info("user center binding configured", "enabled", cfg.UserCenter.Enabled)
 	allocationOutbox, err := allocationsync.NewConsumer(monitorStore.DB(), allocationModule, logger)
 	if err != nil {
 		return errors.New("allocation_account_outbox_initialization_failed")
@@ -153,6 +163,12 @@ func run(logger *slog.Logger) error {
 		return allocationModule.RunFacadeSync(taskCtx, time.Hour)
 	})); err != nil {
 		return errors.New("allocation_facade_sync_registration_failed")
+	}
+
+	if err := runner.GoManaged(ctx, "bind-nonce-cleanup", "allocation", injectPanic("bind-nonce-cleanup", func(taskCtx context.Context) error {
+		return allocationModule.RunBindNonceCleanup(taskCtx, 10*time.Minute)
+	})); err != nil {
+		return errors.New("allocation_bind_nonce_cleanup_registration_failed")
 	}
 
 	app := vitalsapp.New(monitorStore, allocationModule, runner, allocationModule, logger)

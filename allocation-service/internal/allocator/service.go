@@ -2,7 +2,9 @@ package allocator
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"time"
 
@@ -16,10 +18,12 @@ var (
 	ErrNotFound    = errors.New("card not found")
 	ErrUnavailable = errors.New("card is not redeemable")
 	ErrNoCapacity  = errors.New("no account capacity")
+	// ErrBindingReplayed 表示绑定票据的 nonce 已被消耗过。
+	ErrBindingReplayed = errors.New("bind ticket replayed")
 )
 
 type Repository interface {
-	RedeemCode(context.Context, []byte, bool) (repository.RedeemResult, error)
+	RedeemCodeWithBinding(context.Context, []byte, bool, *repository.RedemptionBinding) (repository.RedeemResult, error)
 	ListActiveAllocations(context.Context) ([]repository.AdminAllocationView, error)
 	ListReplacementHistory(context.Context, int) ([]repository.ReplacementHistoryEntry, error)
 	Audit(context.Context, string, string, int64, map[string]any) error
@@ -59,7 +63,20 @@ func (s *Service) SetNow(now func() time.Time) {
 	}
 }
 
+// Binding 是公开兑换请求上已通过签名与时效校验的绑定票据。
+type Binding struct {
+	UserUID string
+	Nonce   string
+	Exp     int64
+}
+
 func (s *Service) Redeem(ctx context.Context, code string) (RedeemResult, error) {
+	return s.RedeemWithBinding(ctx, code, nil)
+}
+
+// RedeemWithBinding 在 binding 非空时把 nonce 与兑换事件写进扣码的同一事务；
+// 卡密已兑换、只返回原结果时不写事件、不消耗 nonce。
+func (s *Service) RedeemWithBinding(ctx context.Context, code string, binding *Binding) (RedeemResult, error) {
 	started := s.now()
 	if !cardsvc.ValidCode(code) {
 		return RedeemResult{}, ErrInvalidCode
@@ -69,8 +86,20 @@ func (s *Service) Redeem(ctx context.Context, code string) (RedeemResult, error)
 	if !monitorAvailable {
 		warnings = append(warnings, "monitor_unavailable")
 	}
-	result, err := s.repo.RedeemCode(ctx, cardsvc.HashCode(code), monitorAvailable)
+	var redemptionBinding *repository.RedemptionBinding
+	if binding != nil {
+		sum := sha256.Sum256([]byte(code))
+		redemptionBinding = &repository.RedemptionBinding{
+			UserUID:     binding.UserUID,
+			Nonce:       binding.Nonce,
+			NonceExp:    binding.Exp,
+			CodeHashHex: hex.EncodeToString(sum[:]),
+		}
+	}
+	result, err := s.repo.RedeemCodeWithBinding(ctx, cardsvc.HashCode(code), monitorAvailable, redemptionBinding)
 	switch {
+	case errors.Is(err, repository.ErrBindNonceReused):
+		return RedeemResult{}, ErrBindingReplayed
 	case errors.Is(err, sql.ErrNoRows):
 		return RedeemResult{}, ErrNotFound
 	case errors.Is(err, repository.ErrCardStateConflict):
