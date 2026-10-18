@@ -1245,6 +1245,9 @@ func (r *Repository) redeemCard(ctx context.Context, where string, arg any, moni
 	if err := insertRedemptionEvent(ctx, tx, binding, RedemptionKindNew, cardID, durationDays, cardExpiresAt, now); err != nil {
 		return RedeemResult{}, err
 	}
+	if err := r.backfillCardCode(ctx, tx, binding, cardID, now); err != nil {
+		return RedeemResult{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return RedeemResult{}, err
 	}

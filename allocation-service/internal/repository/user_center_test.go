@@ -283,3 +283,29 @@ func TestParseCardEntitlementRef(t *testing.T) {
 		}
 	}
 }
+
+func TestBoundRedeemBackfillsLegacyCardCode(t *testing.T) {
+	f := newUserCenterFixture(t)
+	legacyID := f.card(t, "UCLL-MMNN-PPQQ")
+	anonymousLegacyID := f.card(t, "UCRR-SSTT-UUVV")
+	if _, err := f.db.Exec(`UPDATE cards SET encrypted_code_key_id=NULL, encrypted_code=NULL WHERE id IN (?,?)`, legacyID, anonymousLegacyID); err != nil {
+		t.Fatal(err)
+	}
+	binding := testBinding("nonce-legacy-000000001")
+	binding.CodePlaintext = "UCLL-MMNN-PPQQ"
+	if _, err := f.repo.RedeemCodeWithBinding(context.Background(), cardHashForCode("UCLL-MMNN-PPQQ"), true, binding); err != nil {
+		t.Fatal(err)
+	}
+	code, err := f.repo.BoundCardCode(context.Background(), legacyID)
+	if err != nil || code != "UCLL-MMNN-PPQQ" {
+		t.Fatalf("legacy bound card code=%q err=%v", code, err)
+	}
+	// 匿名兑换不补存
+	if _, err := f.repo.RedeemCode(context.Background(), cardHashForCode("UCRR-SSTT-UUVV"), true); err != nil {
+		t.Fatal(err)
+	}
+	var stored int
+	if err := f.db.QueryRow(`SELECT count(*) FROM cards WHERE id=? AND encrypted_code IS NOT NULL`, anonymousLegacyID).Scan(&stored); err != nil || stored != 0 {
+		t.Fatalf("anonymous legacy card must stay unarchived, stored=%d err=%v", stored, err)
+	}
+}

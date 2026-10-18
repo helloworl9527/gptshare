@@ -93,7 +93,8 @@ func (s *Service) RedeemWithBinding(ctx context.Context, code string, binding *B
 			UserUID:     binding.UserUID,
 			Nonce:       binding.Nonce,
 			NonceExp:    binding.Exp,
-			CodeHashHex: hex.EncodeToString(sum[:]),
+			CodeHashHex:   hex.EncodeToString(sum[:]),
+			CodePlaintext: code,
 		}
 	}
 	result, err := s.repo.RedeemCodeWithBinding(ctx, cardsvc.HashCode(code), monitorAvailable, redemptionBinding)

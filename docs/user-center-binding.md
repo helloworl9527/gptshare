@@ -132,11 +132,11 @@
    内部接口 404，匿名兑换不受影响；已有事件保留，重新开启后继续可用。
 2. **回到旧镜像但保留数据**：旧二进制看到 schema 18 会拒绝启动（"newer than binary schema"）。先停服务、备份当前库，再执行
    ```sql
-   DROP TABLE redemption_events;
-   DROP TABLE used_bind_nonces;
    DELETE FROM schema_migrations WHERE version = 18;
    ```
-   然后启动旧镜像。升级之后发生的兑换（卡、分配）都保留，只丢绑定事件。
+   然后启动旧镜像。**不要删** `redemption_events` / `used_bind_nonces`：旧版本不读它们；再次升级时迁移 18 用
+   `IF NOT EXISTS` 原样接上，事件 id 继续往上长。要是删了表，事件 id 会从 1 重新开始，用户中心按 `after` 游标拉取会永久漏掉新事件，
+   nonce 也会失去防重放记录。
 3. **整体恢复备份**：用 `allocation.db.pre-migrate-*.bak`（或第 2 步的手动备份）恢复。注意这会丢掉升级之后的全部兑换记录，
    只在库损坏时使用。
 

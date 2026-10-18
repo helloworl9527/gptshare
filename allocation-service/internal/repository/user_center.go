@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"allocation-service/internal/credential"
 )
 
 // ErrBindNonceReused 表示绑定票据的 nonce 已在之前的扣码事务里用过（重放）。
@@ -35,6 +37,8 @@ type RedemptionBinding struct {
 	NonceExp int64
 	// CodeHashHex 是 sha256(规范化后的卡密) 的十六进制，与卡表里带域前缀的 code_hash 不同。
 	CodeHashHex string
+	// CodePlaintext 是规范化后的卡密：老批次卡没有加密存档时，在扣码事务里补存，绑定后才能出详情链接。
+	CodePlaintext string
 }
 
 type RedemptionEvent struct {
@@ -114,6 +118,29 @@ func insertRedemptionEvent(ctx context.Context, tx *sql.Tx, binding *RedemptionB
 		(event_uid,kind,code_hash,entitlement_ref,user_uid,succeeded_at,detail)
 		VALUES (?,?,?,?,?,?,?)`,
 		eventUID, kind, binding.CodeHashHex, CardEntitlementRef(cardID), binding.UserUID, now.UTC().Format("2006-01-02T15:04:05Z"), string(detail))
+	return err
+}
+
+// backfillCardCode 给没有加密存档的老批次卡补存卡密（这张卡已由卡密哈希命中，明文可信）。
+// 只在带绑定票据的兑换里做：用户中心的「详情链接」要靠存档取卡密。没有密钥环时跳过，不影响兑换。
+func (r *Repository) backfillCardCode(ctx context.Context, tx *sql.Tx, binding *RedemptionBinding, cardID int64, now time.Time) error {
+	if binding == nil || binding.CodePlaintext == "" || r.credentials == nil {
+		return nil
+	}
+	const missing = `(encrypted_code_key_id IS NULL OR encrypted_code IS NULL OR length(encrypted_code)=0)`
+	var needed bool
+	if err := tx.QueryRowContext(ctx, `SELECT `+missing+` FROM cards WHERE id=?`, cardID).Scan(&needed); err != nil {
+		return err
+	}
+	if !needed {
+		return nil
+	}
+	sealed, err := r.credentials.SealWithAAD(credential.CardAAD(cardID), []byte(binding.CodePlaintext))
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `UPDATE cards SET encrypted_code_key_id=?, encrypted_code=?, updated_at=? WHERE id=? AND `+missing,
+		sealed.KeyID, sealed.Ciphertext, formatTime(now), cardID)
 	return err
 }
 
