@@ -4,6 +4,7 @@ import (
 	"crypto/subtle"
 	"encoding/base32"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -45,6 +46,19 @@ type Config struct {
 	RefreshScanEvery             time.Duration
 	RefreshLead                  time.Duration
 	RefreshMaxLatency            time.Duration
+	UserCenter                   UserCenterConfig
+}
+
+// UserCenterConfig 是统一用户中心绑定的配置。两个密钥都留空 = 功能关闭（匿名兑换不受影响）；
+// 只配一个、或任一不是独立生成的强随机值，都拒绝启动。
+type UserCenterConfig struct {
+	Enabled bool
+	// BindTicketKey 是 X-Bind-Ticket 的 HMAC-SHA256 密钥（32 字节）。
+	BindTicketKey []byte
+	// InternalToken 是 /internal/uc/ 接口 X-UC-Token 的共享密钥（64 位十六进制原文）。
+	InternalToken string
+	// DetailOrigin 是 detail-link 返回的公开兑换页 origin，例如 https://gpt.baochai.cc。
+	DetailOrigin string
 }
 
 type CompatHTTPConfig struct {
@@ -147,6 +161,10 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	userCenter, err := loadUserCenter(get, compat.APIKey, monitorKeys, allocationKeys, jwtKey, rateKey, totpSecret)
+	if err != nil {
+		return Config{}, err
+	}
 	cfg := Config{
 		ListenAddr:                   listenAddr,
 		MonitorDBPath:                get("MONITOR_DB_PATH", filepath.Join("data", "monitor.db")),
@@ -168,6 +186,7 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 		RefreshScanEvery:             refreshScanEvery,
 		RefreshLead:                  refreshLead,
 		RefreshMaxLatency:            refreshMaxLatency,
+		UserCenter:                   userCenter,
 	}
 	if cfg.MonitorDBPath == "" || cfg.AllocationDBPath == "" || cfg.MonitorMigrationsDir == "" {
 		return Config{}, errors.New("both database paths and the monitor migrations directory are required")
@@ -202,6 +221,103 @@ func loadCompatHTTP(get func(string, string) string) (CompatHTTPConfig, error) {
 		return CompatHTTPConfig{}, errors.New("compatibility HTTP expiry must be a future RFC3339 timestamp")
 	}
 	return result, nil
+}
+
+func loadUserCenter(get func(string, string) string, compatAPIKey string, monitor, allocation map[string][]byte, authKeys ...[]byte) (UserCenterConfig, error) {
+	ticketHex := get("UC_BIND_TICKET_KEY", "")
+	tokenHex := get("UC_INTERNAL_TOKEN", "")
+	originValue := get("UC_DETAIL_ORIGIN", "")
+	if ticketHex == "" && tokenHex == "" {
+		if originValue != "" {
+			return UserCenterConfig{}, errors.New("UC_DETAIL_ORIGIN requires UC_BIND_TICKET_KEY and UC_INTERNAL_TOKEN")
+		}
+		return UserCenterConfig{}, nil
+	}
+	if ticketHex == "" || tokenHex == "" {
+		return UserCenterConfig{}, errors.New("UC_BIND_TICKET_KEY and UC_INTERNAL_TOKEN must be configured together")
+	}
+	ticketKey, err := decodeUserCenterSecret("UC_BIND_TICKET_KEY", ticketHex)
+	if err != nil {
+		return UserCenterConfig{}, err
+	}
+	tokenKey, err := decodeUserCenterSecret("UC_INTERNAL_TOKEN", tokenHex)
+	if err != nil {
+		return UserCenterConfig{}, err
+	}
+	materials := make([][]byte, 0, len(monitor)+len(allocation)+len(authKeys))
+	for _, key := range monitor {
+		materials = append(materials, key)
+	}
+	for _, key := range allocation {
+		materials = append(materials, key)
+	}
+	materials = append(materials, authKeys...)
+	if compatAPIKey != "" {
+		materials = append(materials, []byte(compatAPIKey))
+	}
+	if subtle.ConstantTimeCompare(ticketKey, tokenKey) == 1 {
+		return UserCenterConfig{}, errors.New("UC_BIND_TICKET_KEY and UC_INTERNAL_TOKEN must be independently generated and distinct")
+	}
+	for _, candidate := range [][]byte{ticketKey, tokenKey, []byte(ticketHex), []byte(tokenHex)} {
+		for _, material := range materials {
+			if secretOverlaps(candidate, material) {
+				return UserCenterConfig{}, errors.New("user center secrets must not reuse monitor, allocation, or unified auth key material")
+			}
+		}
+	}
+	if err := validateDetailOrigin(originValue); err != nil {
+		return UserCenterConfig{}, err
+	}
+	return UserCenterConfig{Enabled: true, BindTicketKey: ticketKey, InternalToken: tokenHex, DetailOrigin: originValue}, nil
+}
+
+// decodeUserCenterSecret 要求 64 位十六进制（32 字节随机，openssl rand -hex 32），
+// 并拒绝示例值和明显的弱值（全同字节、短周期重复等）。
+func decodeUserCenterSecret(name, value string) ([]byte, error) {
+	decoded, err := hex.DecodeString(value)
+	if err != nil || len(decoded) != minimumSecretBytes || isExample(value) || isExample(string(decoded)) || weakSecret(decoded) {
+		return nil, fmt.Errorf("%s must be 64 hex characters of independently generated random bytes (openssl rand -hex 32)", name)
+	}
+	return decoded, nil
+}
+
+// weakSecret 拒绝不同字节值过少的材料。32 个真随机字节的不同值个数几乎总在 25 以上，
+// 低于 16 说明是重复模式（如 0123…ef 循环、全 0、同一字符重复）。
+func weakSecret(value []byte) bool {
+	seen := make(map[byte]struct{}, len(value))
+	for _, b := range value {
+		seen[b] = struct{}{}
+	}
+	return len(seen) < 16
+}
+
+func secretOverlaps(left, right []byte) bool {
+	if len(left) == 0 || len(right) == 0 {
+		return false
+	}
+	if len(left) == len(right) && subtle.ConstantTimeCompare(left, right) == 1 {
+		return true
+	}
+	// 同一份随机串换个编码填进别的变量也算复用：比较两边的十六进制 / base64 表示。
+	for _, encoded := range []string{hex.EncodeToString(right), base64.StdEncoding.EncodeToString(right), base64.RawURLEncoding.EncodeToString(right)} {
+		if strings.EqualFold(string(left), encoded) {
+			return true
+		}
+	}
+	for _, encoded := range []string{hex.EncodeToString(left), base64.StdEncoding.EncodeToString(left), base64.RawURLEncoding.EncodeToString(left)} {
+		if strings.EqualFold(string(right), encoded) {
+			return true
+		}
+	}
+	return false
+}
+
+func validateDetailOrigin(value string) error {
+	origin, err := url.Parse(value)
+	if value == "" || err != nil || origin.Scheme != "https" || origin.Host == "" || origin.Path != "" || origin.RawQuery != "" || origin.Fragment != "" || origin.User != nil {
+		return errors.New("UC_DETAIL_ORIGIN must be the public HTTPS origin of the redeem page (for example https://gpt.example.com) when the user center binding is enabled")
+	}
+	return nil
 }
 
 func parseBoundedDuration(get func(string, string) string, name string, fallback, min, max time.Duration) (time.Duration, error) {

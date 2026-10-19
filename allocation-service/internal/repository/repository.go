@@ -944,12 +944,19 @@ func (r *Repository) Audit(ctx context.Context, action, targetType string, targe
 }
 
 func (r *Repository) RedeemCard(ctx context.Context, cardID int64) (models.Allocation, error) {
-	result, err := r.redeemCard(ctx, "id=?", cardID, true)
+	result, err := r.redeemCard(ctx, "id=?", cardID, true, nil)
 	return result.Allocation, err
 }
 
 func (r *Repository) RedeemCode(ctx context.Context, codeHash []byte, monitorAvailable bool) (RedeemResult, error) {
-	result, err := r.redeemCard(ctx, "code_hash=?", codeHash, monitorAvailable)
+	return r.RedeemCodeWithBinding(ctx, codeHash, monitorAvailable, nil)
+}
+
+// RedeemCodeWithBinding 与 RedeemCode 相同；binding 非空时，在扣码的同一事务里
+// 插入票据 nonce（防重放）并写入兑换事件。卡密已兑换、只是返回原结果时，
+// 事务已回滚，不写事件也不消耗 nonce。
+func (r *Repository) RedeemCodeWithBinding(ctx context.Context, codeHash []byte, monitorAvailable bool, binding *RedemptionBinding) (RedeemResult, error) {
+	result, err := r.redeemCard(ctx, "code_hash=?", codeHash, monitorAvailable, binding)
 	if errors.Is(err, ErrCardStateConflict) {
 		return r.existingRedeemByCodeHash(ctx, codeHash)
 	}
@@ -1183,7 +1190,7 @@ func blockedCapacityBreakdown(ctx context.Context, db *sql.DB, stamp time.Time) 
 	return buckets, total, nil
 }
 
-func (r *Repository) redeemCard(ctx context.Context, where string, arg any, monitorAvailable bool) (RedeemResult, error) {
+func (r *Repository) redeemCard(ctx context.Context, where string, arg any, monitorAvailable bool, binding *RedemptionBinding) (RedeemResult, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return RedeemResult{}, err
@@ -1198,6 +1205,9 @@ func (r *Repository) redeemCard(ctx context.Context, where string, arg any, moni
 	}
 	if status != "unused" {
 		return RedeemResult{}, ErrCardStateConflict
+	}
+	if err := consumeBindNonce(ctx, tx, binding); err != nil {
+		return RedeemResult{}, err
 	}
 	cardExpiresAt, err := cardTimeAfterDays(now, durationDays)
 	if err != nil {
@@ -1236,6 +1246,12 @@ func (r *Repository) redeemCard(ctx context.Context, where string, arg any, moni
 		return RedeemResult{}, err
 	} else if affected, _ := updated.RowsAffected(); affected != 1 {
 		return RedeemResult{}, ErrCardStateConflict
+	}
+	if err := insertRedemptionEvent(ctx, tx, binding, RedemptionKindNew, cardID, durationDays, cardExpiresAt, now); err != nil {
+		return RedeemResult{}, err
+	}
+	if err := r.backfillCardCode(ctx, tx, binding, cardID, now); err != nil {
+		return RedeemResult{}, err
 	}
 	if err := tx.Commit(); err != nil {
 		return RedeemResult{}, err

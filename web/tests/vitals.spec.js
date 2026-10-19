@@ -279,3 +279,30 @@ test('public card flow displays pickup-only credentials without requiring 2FA', 
   await expect(page.locator('#refresh-totp')).toBeDisabled()
   expect(consoleErrors).toEqual([])
 })
+
+test('public card page enters from #code= fragment, strips it immediately and only queries', async ({ page }) => {
+  const consoleErrors = []
+  page.on('console', (message) => { if (message.type() === 'error') consoleErrors.push(message.text()) })
+  const apiRequests = []
+  page.on('request', (request) => {
+    if (request.url().includes('/api/')) apiRequests.push({ url: request.url(), path: new URL(request.url()).pathname })
+  })
+  await page.goto('/admin/user.html#code=2345-6789-abcd')
+  await expect(page.getByText('public@example.test')).toBeVisible()
+  await expect(page.getByLabel('卡密', { exact: true })).toHaveValue('2345-6789-ABCD')
+  const location = await page.evaluate(() => ({ hash: window.location.hash, href: window.location.href }))
+  expect(location.hash).toBe('')
+  expect(location.href).not.toContain('2345')
+  expect(apiRequests.map((item) => item.path)).toEqual(['/api/cards/query'])
+  for (const item of apiRequests) expect(item.url).not.toMatch(/2345|6789|ABCD/i)
+  expect(consoleErrors).toEqual([])
+})
+
+test('public card page rejects a malformed #code= fragment without calling the API', async ({ page }) => {
+  const apiRequests = []
+  page.on('request', (request) => { if (request.url().includes('/api/')) apiRequests.push(request.url()) })
+  await page.goto('/admin/user.html#code=not-a-code')
+  await expect(page.locator('#error')).toHaveText('链接中的卡密无效，请手动输入。')
+  expect(await page.evaluate(() => window.location.hash)).toBe('')
+  expect(apiRequests).toEqual([])
+})

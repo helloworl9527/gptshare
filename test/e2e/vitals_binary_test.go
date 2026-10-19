@@ -146,6 +146,9 @@ func TestVitalsBinaryUnifiedFlowAndCrashLoopMatrix(t *testing.T) {
 	if compat.status != http.StatusNotFound {
 		t.Fatalf("default compatibility route=%d, want 404", compat.status)
 	}
+	if internal := public.request(t, http.MethodGet, "/internal/uc/events", "", nil); internal.status != http.StatusNotFound {
+		t.Fatalf("user center internal route without configuration=%d, want 404", internal.status)
+	}
 	anonymousExpiredCards := public.request(t, http.MethodGet, "/api/admin/dashboard/expired-cards", "", nil)
 	if anonymousExpiredCards.status != http.StatusUnauthorized {
 		t.Fatalf("expired card cleanup route must require admin authentication: status=%d", anonymousExpiredCards.status)
@@ -354,7 +357,7 @@ func TestVitalsBinaryUnifiedFlowAndCrashLoopMatrix(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for index, task := range []string{"poller", "outbox", "replacement", "facade-sync"} {
+	for index, task := range []string{"poller", "outbox", "replacement", "facade-sync", "bind-nonce-cleanup"} {
 		process = startVitalsBinary(t, binaryPath, env, task)
 		waitForBackgroundDegraded(t, process, baseURL, 5*time.Second)
 		if err := process.command.Process.Signal(syscall.Signal(0)); err != nil {

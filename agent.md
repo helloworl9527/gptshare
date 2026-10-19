@@ -77,6 +77,7 @@ GOOS=windows GOARCH=amd64 go build -o dist/windows/vitals-migrate.exe ./cmd/vita
 | `ADMIN_USER` / `ADMIN_PASSWORD_HASH` / `ADMIN_TOTP_SECRET` | 统一登录（bcrypt cost≥12；TOTP 无填充 base32） |
 | `JWT_SIGNING_KEY` / `RATE_LIMIT_KEY` | 会话签名 / 限流（各自独立 base64 32B，**不得与数据密钥复用**） |
 | `VITALS_MONITOR_COMPAT_HTTP_ENABLED` | 默认 `false`；保持关闭 |
+| `UC_BIND_TICKET_KEY` / `UC_INTERNAL_TOKEN` / `UC_DETAIL_ORIGIN` | 统一用户中心绑定（可选，三项同时留空=关闭）。两个密钥各自 `openssl rand -hex 32`，不得与任何其他密钥复用；详见 `docs/user-center-binding.md` |
 
 独立部署还需配置一期的 `ALLOCATION_ACCOUNT_EVENT_URL` 和双方相同的
 `ALLOCATION_ACCOUNT_EVENT_API_KEY`。事件地址必须使用 HTTPS；仅 `localhost` 或
@@ -97,7 +98,7 @@ openssl rand -base64 32 | tr '+/' '-_' | tr -d '='   # raw-url base64（allocati
 ./vitals-migrate      # 校验密钥 → 迁移 monitor → 迁移 allocation
 ./vitals              # 启动服务
 ```
-当前版本要求 monitor schema 7 和 allocation schema 10。升级时必须先完成
+当前版本要求 monitor schema 11 和 allocation schema 18。升级时必须先完成
 两库备份，再运行迁移 runner；任一迁移失败都不要启动服务。
 迁移失败即停机，从对应库的迁移前备份恢复。
 

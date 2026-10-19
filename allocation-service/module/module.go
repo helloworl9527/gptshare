@@ -16,6 +16,7 @@ import (
 	replacementsvc "allocation-service/internal/replacement"
 	"allocation-service/internal/repository"
 	"allocation-service/internal/store"
+	"allocation-service/internal/usercenter"
 	userquerysvc "allocation-service/internal/userquery"
 	"allocation-service/monitorfacade"
 	"github.com/gin-gonic/gin"
@@ -30,7 +31,15 @@ type Module struct {
 	userQuery    *userquerysvc.Service
 	replacements *replacementsvc.Service
 	metrics      *metricssvc.Service
+	userCenter   *usercenter.Service
 	logger       *slog.Logger
+}
+
+// UserCenterConfig 开启统一用户中心绑定（票据 + 本机内部接口）。
+type UserCenterConfig struct {
+	TicketKey     []byte
+	InternalToken string
+	DetailOrigin  string
 }
 
 // Migrate applies only the allocation schema ledger and closes the database.
@@ -95,8 +104,48 @@ func (m *Module) ApplyMonitorAccountEvent(ctx context.Context, event accountsync
 	return m.repo.ApplyMonitorAccountEvent(ctx, event)
 }
 
+// EnableUserCenter 必须在 RegisterPublicRoutes 之前调用；不调用则票据功能与内部接口保持关闭。
+func (m *Module) EnableUserCenter(cfg UserCenterConfig) error {
+	service, err := usercenter.NewService(m.repo, usercenter.Config{
+		TicketKey:     cfg.TicketKey,
+		InternalToken: cfg.InternalToken,
+		DetailOrigin:  cfg.DetailOrigin,
+	})
+	if err != nil {
+		return errors.New("user center configuration rejected")
+	}
+	m.userCenter = service
+	return nil
+}
+
 func (m *Module) RegisterPublicRoutes(router *gin.Engine) {
-	httpapi.RegisterPublicAPIRoutes(router, httpapi.Config{Cards: m.cards, Allocator: m.allocator, UserQuery: m.userQuery})
+	httpapi.RegisterPublicAPIRoutes(router, httpapi.Config{Cards: m.cards, Allocator: m.allocator, UserQuery: m.userQuery, UserCenter: m.userCenter})
+	httpapi.RegisterUserCenterInternalRoutes(router, m.userCenter)
+}
+
+// RunBindNonceCleanup 定期清理过期的绑定票据 nonce；由后台监督器托管。
+// 票据功能关闭时同样运行，保证关闭后遗留的 nonce 也会被清掉。
+func (m *Module) RunBindNonceCleanup(ctx context.Context, interval time.Duration) error {
+	if interval <= 0 {
+		interval = 10 * time.Minute
+	}
+	purge := func() {
+		cutoff := usercenter.NonceCleanupCutoff(time.Now().UTC())
+		if _, err := m.repo.PurgeExpiredBindNonces(ctx, cutoff); err != nil && ctx.Err() == nil {
+			m.logger.Error("bind nonce cleanup failed", "module", "allocation", "task", "bind-nonce-cleanup", "error_code", "bind_nonce_cleanup_failed")
+		}
+	}
+	purge()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			purge()
+		}
+	}
 }
 
 func (m *Module) RegisterAdminRoutes(router *gin.Engine, boundary AdminBoundary) error {

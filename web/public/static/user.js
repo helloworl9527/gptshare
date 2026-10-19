@@ -143,8 +143,32 @@ codeInput.addEventListener("input", () => {
   codeInput.value = compact.replace(/(.{4})(?=.)/g, "$1-");
 });
 
-form.addEventListener("submit", async (event) => {
+form.addEventListener("submit", (event) => {
   event.preventDefault();
+  lookupCard({ redeem: true });
+});
+
+window.addEventListener("hashchange", enterFromFragment);
+
+// 用户中心「查看详情」以 #code=XXXX 进入：卡密只放在 URL 片段里，读出后立即清掉片段，
+// 任何时候都不写进路径或查询参数。自动进入只查询、不兑换，避免被构造的链接悄悄消耗卡密。
+function enterFromFragment() {
+  const fragment = window.location.hash.replace(/^#/, "");
+  if (!fragment) return;
+  const params = new URLSearchParams(fragment);
+  const rawCode = params.get("code");
+  if (rawCode === null) return;
+  window.history.replaceState(window.history.state, "", window.location.pathname + window.location.search);
+  const code = normalizeCardCode(rawCode);
+  if (code.length !== 14) {
+    showError("链接中的卡密无效，请手动输入。");
+    return;
+  }
+  codeInput.value = code;
+  lookupCard({ redeem: false });
+}
+
+async function lookupCard({ redeem: shouldRedeem }) {
   queryButton.disabled = true;
   errorBox.classList.remove("visible");
   resultPanel.classList.remove("visible");
@@ -156,7 +180,7 @@ form.addEventListener("submit", async (event) => {
     payload.captcha_answer = answerInput.value.trim();
   }
   try {
-    const redeem = await redeemCard(payload.code);
+    const redeem = shouldRedeem ? await redeemCard(payload.code) : { ok: false };
     if (!redeem.ok && errorBody(redeem).code === "no_account_capacity") {
       captchaId = 0;
       captchaBox.classList.remove("visible");
@@ -197,7 +221,7 @@ form.addEventListener("submit", async (event) => {
   } finally {
     queryButton.disabled = false;
   }
-});
+}
 
 savedCardsList.addEventListener("click", (event) => {
   const button = event.target.closest("button[data-saved-code]");
@@ -453,3 +477,5 @@ function base32Decode(value) {
   }
   return new Uint8Array(bytes);
 }
+
+enterFromFragment();

@@ -28,6 +28,7 @@ import (
 	metricssvc "allocation-service/internal/metrics"
 	"allocation-service/internal/models"
 	"allocation-service/internal/repository"
+	"allocation-service/internal/usercenter"
 	userquerysvc "allocation-service/internal/userquery"
 	"allocation-service/monitorfacade"
 	"github.com/gin-gonic/gin"
@@ -68,6 +69,8 @@ type Config struct {
 	Metrics            *metricssvc.Service
 	AccountEventSink   accountsync.Sink
 	AccountEventAPIKey string
+	// UserCenter 为 nil 时绑定票据功能关闭：匿名兑换照常，带 X-Bind-Ticket 的兑换被拒绝。
+	UserCenter *usercenter.Service
 }
 
 type AdminBoundary struct {
@@ -147,7 +150,7 @@ func RegisterPublicAPIRoutes(router *gin.Engine, cfg Config) {
 		router.POST("/api/redeem-different", cardActionHandler(cfg.Cards, "different", false, cfg.Origin))
 	}
 	if cfg.Allocator != nil {
-		router.POST("/api/redeem", redeemCardHandler(cfg.Allocator))
+		router.POST("/api/redeem", redeemCardHandler(cfg.Allocator, cfg.UserCenter))
 	}
 	if cfg.UserQuery != nil {
 		router.POST("/api/cards/query", userQueryHandler(cfg.UserQuery))
@@ -870,13 +873,22 @@ func userCardStatusHandler(service *cardsvc.Service) gin.HandlerFunc {
 	}
 }
 
-func redeemCardHandler(service *allocatorsvc.Service) gin.HandlerFunc {
+func redeemCardHandler(service *allocatorsvc.Service, userCenter *usercenter.Service) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var request redeemCardRequest
 		if !bindJSON(c, &request, 4096) {
 			return
 		}
-		result, err := service.Redeem(c.Request.Context(), strings.ToUpper(request.Code))
+		binding, ok := bindTicketFromRequest(c, userCenter)
+		if !ok {
+			writeTicketInvalid(c)
+			return
+		}
+		result, err := service.RedeemWithBinding(c.Request.Context(), strings.ToUpper(request.Code), binding)
+		if errors.Is(err, allocatorsvc.ErrBindingReplayed) {
+			writeTicketInvalid(c)
+			return
+		}
 		if err != nil {
 			writeAllocatorError(c, err)
 			return
