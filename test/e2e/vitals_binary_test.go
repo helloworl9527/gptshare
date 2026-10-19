@@ -354,7 +354,7 @@ func TestVitalsBinaryUnifiedFlowAndCrashLoopMatrix(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for index, task := range []string{"poller", "outbox", "replacement", "facade-sync"} {
+	for index, task := range []string{"poller", "outbox", "replacement", "facade-sync", "expired-account-cleanup"} {
 		process = startVitalsBinary(t, binaryPath, env, task)
 		waitForBackgroundDegraded(t, process, baseURL, 5*time.Second)
 		if err := process.command.Process.Signal(syscall.Signal(0)); err != nil {

@@ -14,6 +14,7 @@ import (
 	allocationmodule "allocation-service/module"
 	"allocation-service/platform/supervisor"
 	"chatgpt-monitor/internal/account"
+	"chatgpt-monitor/internal/accountcleanup"
 	"chatgpt-monitor/internal/allocationsync"
 	"chatgpt-monitor/internal/auth"
 	"chatgpt-monitor/internal/chatgpt"
@@ -114,6 +115,10 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return errors.New("allocation_account_outbox_initialization_failed")
 	}
+	cleanup, err := accountcleanup.New(monitorStore.DB(), allocationModule, logger)
+	if err != nil {
+		return errors.New("account_cleanup_initialization_failed")
+	}
 
 	runner := supervisor.New(logger, supervisor.Config{PanicThreshold: 3})
 	replacementInterval, err := testReplacementInterval()
@@ -141,6 +146,9 @@ func run(logger *slog.Logger) error {
 		return taskCtx.Err()
 	})); err != nil {
 		return errors.New("allocation_replacement_registration_failed")
+	}
+	if err := runner.GoManaged(ctx, "expired-account-cleanup", "monitor", injectPanic("expired-account-cleanup", cleanup.Run)); err != nil {
+		return errors.New("account_cleanup_registration_failed")
 	}
 	if err := runner.GoManaged(ctx, "facade-sync", "allocation", injectPanic("facade-sync", func(taskCtx context.Context) error {
 		stagger := time.NewTimer(5 * time.Minute)

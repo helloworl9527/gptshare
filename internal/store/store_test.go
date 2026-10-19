@@ -433,7 +433,7 @@ func rowCounts(t *testing.T, db *sql.DB, tables ...string) map[string]int {
 
 func assertRequiredSchema(t *testing.T, db *sql.DB) {
 	t.Helper()
-	for _, table := range []string{"accounts", "authorization_epochs", "status_change_log", "poll_runs", "alert_events", "allocation_account_outbox", "device_auth_sessions", "oauth_auth_sessions", "settings", "settings_audit", "admin_login_attempts", "admin_sessions", "schema_migrations"} {
+	for _, table := range []string{"accounts", "authorization_epochs", "status_change_log", "poll_runs", "alert_events", "allocation_account_outbox", "device_auth_sessions", "oauth_auth_sessions", "settings", "settings_audit", "admin_login_attempts", "admin_sessions", "schema_migrations", "maintenance_jobs", "account_cleanup_log"} {
 		if !tableExists(t, db, table) {
 			t.Errorf("missing table %s", table)
 		}

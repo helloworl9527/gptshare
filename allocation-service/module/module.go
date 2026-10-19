@@ -95,6 +95,10 @@ func (m *Module) ApplyMonitorAccountEvent(ctx context.Context, event accountsync
 	return m.repo.ApplyMonitorAccountEvent(ctx, event)
 }
 
+func (m *Module) PrepareExpiredAccountCleanup(ctx context.Context, providerID string, now time.Time) (bool, error) {
+	return m.repo.PrepareExpiredAccountCleanup(ctx, providerID, now)
+}
+
 func (m *Module) RegisterPublicRoutes(router *gin.Engine) {
 	httpapi.RegisterPublicAPIRoutes(router, httpapi.Config{Cards: m.cards, Allocator: m.allocator, UserQuery: m.userQuery})
 }
