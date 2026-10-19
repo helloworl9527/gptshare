@@ -25,7 +25,7 @@ var (
 	ErrAccountCredentialsUnavailable = errors.New("account credentials unavailable")
 	ErrCapacityTooSmall              = errors.New("max concurrent users is below current allocations")
 	ErrCardStateConflict             = errors.New("card state does not allow this operation")
-	ErrCardDurationLimit             = errors.New("card duration cannot exceed 90 days from redemption")
+	ErrCardDurationLimit             = errors.New("card duration exceeds representable range")
 	ErrNoAccountCapacity             = errors.New("no account capacity")
 	ErrCaptchaRequired               = errors.New("captcha required")
 	ErrCaptchaInvalid                = errors.New("captcha invalid")
@@ -592,7 +592,7 @@ func (r *Repository) RevokeCard(ctx context.Context, cardID int64) (models.Card,
 	if err := tx.QueryRowContext(ctx, "SELECT status FROM cards WHERE id=?", cardID).Scan(&status); err != nil {
 		return models.Card{}, err
 	}
-	if status == "revoked" || status == "expired" {
+	if status == "revoked" || status == "expired" || status == "consumed" {
 		return models.Card{}, ErrCardStateConflict
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE allocations
@@ -635,18 +635,34 @@ func (r *Repository) ExtendCardWithMonitor(ctx context.Context, cardID int64, da
 		return CardExtensionResult{}, err
 	}
 	defer tx.Rollback()
-	now := r.now().UTC()
+	result, err := extendCardWithTx(ctx, tx, cardID, days, monitorAvailable, r.now().UTC())
+	if err != nil {
+		return CardExtensionResult{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return CardExtensionResult{}, err
+	}
+	result.Card, err = r.CardByID(ctx, cardID)
+	if err == nil && result.Account != nil {
+		account, accountErr := r.Account(ctx, result.Account.ID)
+		result.Account, err = &account, accountErr
+	}
+	return result, err
+}
+
+// Used by both administrative extensions and paid renewals inside one transaction.
+func extendCardWithTx(ctx context.Context, tx *sql.Tx, cardID int64, days int, monitorAvailable bool, now time.Time) (CardExtensionResult, error) {
 	var status string
 	var durationDays int
 	var redeemedRaw, expiresRaw sql.NullString
 	if err := tx.QueryRowContext(ctx, "SELECT status,duration_days,redeemed_at,expires_at FROM cards WHERE id=?", cardID).Scan(&status, &durationDays, &redeemedRaw, &expiresRaw); err != nil {
 		return CardExtensionResult{}, err
 	}
-	if status == "revoked" {
+	if status == "revoked" || status == "consumed" {
 		return CardExtensionResult{}, ErrCardStateConflict
 	}
 	if status == "unused" {
-		if durationDays+days > 90 {
+		if _, err := cardTimeAfterDays(now, durationDays+days); err != nil || durationDays+days < durationDays {
 			return CardExtensionResult{}, ErrCardDurationLimit
 		}
 		updated, err := tx.ExecContext(ctx, `UPDATE cards SET duration_days=duration_days+?,updated_at=? WHERE id=? AND status='unused'`, days, formatTime(now), cardID)
@@ -656,11 +672,7 @@ func (r *Repository) ExtendCardWithMonitor(ctx context.Context, cardID int64, da
 		if affected, _ := updated.RowsAffected(); affected != 1 {
 			return CardExtensionResult{}, ErrCardStateConflict
 		}
-		if err := tx.Commit(); err != nil {
-			return CardExtensionResult{}, err
-		}
-		card, err := r.CardByID(ctx, cardID)
-		return CardExtensionResult{Card: card, Mode: "unused"}, err
+		return CardExtensionResult{Mode: "unused"}, nil
 	}
 	if status != "redeemed" && status != "expired" || !redeemedRaw.Valid || !expiresRaw.Valid {
 		return CardExtensionResult{}, ErrCardStateConflict
@@ -674,11 +686,11 @@ func (r *Repository) ExtendCardWithMonitor(ctx context.Context, cardID int64, da
 		return CardExtensionResult{}, err
 	}
 	if expiresAt.After(now) && status == "redeemed" {
-		extended := expiresAt.Add(time.Duration(days) * 24 * time.Hour)
-		if extended.After(redeemedAt.Add(90 * 24 * time.Hour)) {
-			return CardExtensionResult{}, ErrCardDurationLimit
+		extended, err := cardTimeAfterDays(expiresAt, days)
+		if err != nil {
+			return CardExtensionResult{}, err
 		}
-		newDurationDays := int(extended.Sub(redeemedAt) / (24 * time.Hour))
+		newDurationDays := int((extended.Unix() - redeemedAt.Unix()) / 86400)
 		updated, err := tx.ExecContext(ctx, `UPDATE cards SET duration_days=?,expires_at=?,updated_at=? WHERE id=? AND status='redeemed'`, newDurationDays, formatTime(extended), formatTime(now), cardID)
 		if err != nil {
 			return CardExtensionResult{}, err
@@ -686,14 +698,13 @@ func (r *Repository) ExtendCardWithMonitor(ctx context.Context, cardID int64, da
 		if affected, _ := updated.RowsAffected(); affected != 1 {
 			return CardExtensionResult{}, ErrCardStateConflict
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE allocations SET valid_until=?,updated_at=? WHERE card_id=? AND active=1 AND allocation_state IN ('primary','grace')`, formatTime(extended), formatTime(now), cardID); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE allocations SET valid_until=?,updated_at=? WHERE card_id=? AND active=1 AND allocation_state='primary'`, formatTime(extended), formatTime(now), cardID); err != nil {
 			return CardExtensionResult{}, err
 		}
-		if err := tx.Commit(); err != nil {
+		if err := ensureRenewedAccount(ctx, tx, cardID, extended, now, monitorAvailable); err != nil {
 			return CardExtensionResult{}, err
 		}
-		card, err := r.CardByID(ctx, cardID)
-		return CardExtensionResult{Card: card, Mode: "active"}, err
+		return CardExtensionResult{Mode: "active"}, nil
 	}
 
 	// The card is expired (or has passed its expiry before the periodic sweep).
@@ -727,8 +738,11 @@ func (r *Repository) ExtendCardWithMonitor(ctx context.Context, cardID int64, da
 		return CardExtensionResult{}, err
 	}
 
-	newExpiresAt := now.Add(time.Duration(days) * 24 * time.Hour)
-	newAccountID, err := selectCandidateAccount(ctx, tx, now, newExpiresAt, monitorAvailable)
+	newExpiresAt, err := cardTimeAfterDays(now, days)
+	if err != nil {
+		return CardExtensionResult{}, err
+	}
+	newAccountID, err := selectCardCandidate(ctx, tx, now, newExpiresAt, monitorAvailable, 0, cardID, true)
 	if err != nil {
 		return CardExtensionResult{}, err
 	}
@@ -750,21 +764,9 @@ func (r *Repository) ExtendCardWithMonitor(ctx context.Context, cardID int64, da
 	if affected, _ := updated.RowsAffected(); affected != 1 {
 		return CardExtensionResult{}, ErrCardStateConflict
 	}
-	if err := tx.Commit(); err != nil {
-		return CardExtensionResult{}, err
-	}
-	card, err := r.CardByID(ctx, cardID)
-	if err != nil {
-		return CardExtensionResult{}, err
-	}
-	account, err := r.Account(ctx, newAccountID)
-	if err != nil {
-		return CardExtensionResult{}, err
-	}
 	return CardExtensionResult{
-		Card:       card,
 		Allocation: &models.Allocation{ID: allocationID, CardID: cardID, AccountID: newAccountID, AllocatedAt: now, ValidUntil: newExpiresAt, AllocationState: "primary", Active: true},
-		Account:    &account,
+		Account:    &models.Account{ID: newAccountID},
 		Mode:       "reactivated",
 	}, nil
 }
@@ -1197,8 +1199,11 @@ func (r *Repository) redeemCard(ctx context.Context, where string, arg any, moni
 	if status != "unused" {
 		return RedeemResult{}, ErrCardStateConflict
 	}
-	cardExpiresAt := now.Add(time.Duration(durationDays) * 24 * time.Hour)
-	accountID, err := selectCandidateAccount(ctx, tx, now, cardExpiresAt, monitorAvailable)
+	cardExpiresAt, err := cardTimeAfterDays(now, durationDays)
+	if err != nil {
+		return RedeemResult{}, err
+	}
+	accountID, err := selectCardCandidate(ctx, tx, now, cardExpiresAt, monitorAvailable, 0, cardID, false)
 	if err != nil {
 		return RedeemResult{}, err
 	}
@@ -1721,7 +1726,7 @@ func (r *Repository) RetireAccount(ctx context.Context, accountID int64) (Retire
 			continue
 		}
 
-		newAccountID, err := selectCandidateAccountExcluding(ctx, tx, now, *item.cardExpiresAt, true, accountID)
+		newAccountID, err := selectCardCandidate(ctx, tx, now, *item.cardExpiresAt, true, accountID, item.cardID, false)
 		if errors.Is(err, ErrNoAccountCapacity) {
 			return RetireAccountResult{}, ErrAccountReplacementUnavailable
 		}
@@ -2422,7 +2427,7 @@ func replacementKeepsGrace(reason string) bool {
 }
 
 func replaceOneAllocation(ctx context.Context, tx *sql.Tx, now time.Time, item replacementDueAllocation) (ReplacementResult, error) {
-	newAccountID, err := selectCandidateAccountExcluding(ctx, tx, now, item.cardExpiresAt, true, item.oldAccountID)
+	newAccountID, err := selectCardCandidate(ctx, tx, now, item.cardExpiresAt, true, item.oldAccountID, item.cardID, false)
 	if err != nil {
 		return ReplacementResult{}, err
 	}

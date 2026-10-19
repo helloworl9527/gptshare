@@ -355,12 +355,12 @@ func validGeneratedDuration(days int) bool {
 }
 
 func validStoredDuration(days int) bool {
-	return validGeneratedDuration(days)
+	return days >= 1
 }
 
 func validStatus(status string) bool {
 	switch status {
-	case "unused", "redeemed", "expired", "revoked":
+	case "unused", "redeemed", "expired", "revoked", "consumed":
 		return true
 	default:
 		return false

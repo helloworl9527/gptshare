@@ -1,0 +1,17 @@
+# web/public is the Cloudflare frontend. Build the updated admin assets with
+# npm run build, then preserve-origin-ui.mjs before building this backend image.
+FROM golang:1.25-alpine AS backend
+WORKDIR /src
+ENV GOMAXPROCS=2
+COPY go.mod go.sum ./
+COPY allocation-service/go.mod allocation-service/go.sum ./allocation-service/
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/vitals ./cmd/vitals \
+    && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/vitals-migrate ./cmd/vitals-migrate
+
+# Retain the exact production entrypoint and runtime tools.
+# Both binaries must be upgraded together for allocation schema 18.
+FROM gptshare-vitals:public-nav-20261013
+COPY --from=backend /out/vitals /out/vitals-migrate /usr/local/bin/
+COPY migrations/ /app/migrations/

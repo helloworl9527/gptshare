@@ -46,6 +46,10 @@ body {
   gap: 16px;
 }
 .wordmark { font-size: 20px; font-weight: 700; letter-spacing: 0; }
+.topbar-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.purchase-link { color: var(--green-dark); font-size: 14px; font-weight: 650; text-decoration: none; white-space: nowrap; }
+.purchase-link:hover { text-decoration: underline; }
+.purchase-link:focus-visible { outline: 3px solid rgba(16, 163, 127, .35); outline-offset: 4px; }
 .status-pill {
   border: 1px solid var(--line);
   border-radius: 999px;
@@ -90,6 +94,12 @@ h1 {
   padding: 28px;
   margin-bottom: 20px;
 }
+[hidden] { display: none !important; }
+.action-tabs { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 20px; }
+.action-tabs button { font-size: 13px; }
+.action-tabs button[aria-pressed="true"] { background: var(--green-dark); color: white; border-color: var(--green-dark); }
+.action-preview { padding: 16px; margin-bottom: 18px; background: var(--canvas); line-height: 1.6; white-space: pre-line; }
+.saved-card-actions { flex-wrap: wrap; }
 label {
   display: block;
   font-weight: 650;
@@ -296,8 +306,35 @@ button:disabled { cursor: wait; opacity: .6; }
   line-height: 1.5;
 }
 
+.faq h2 { margin: 0 0 18px; font-size: 24px; }
+.faq-item { border-top: 1px solid var(--line); }
+.faq-item summary {
+  padding: 18px 0;
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1.6;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+.faq-item summary::marker { color: var(--green-dark); }
+.faq a:focus-visible,
+.faq-item summary:focus-visible { outline: 3px solid rgba(16, 163, 127, .35); outline-offset: 3px; }
+.faq-answer { font-size: 14px; line-height: 1.8; overflow-wrap: anywhere; }
+.faq-answer p { margin: 0 0 14px; }
+.faq-answer h3 { margin: 22px 0 12px; font-size: 16px; }
+.faq-answer a { color: var(--green-dark); text-underline-offset: 3px; }
+.faq-steps { margin: 0 0 20px; padding-left: 24px; }
+.faq-steps li + li { margin-top: 12px; }
+.faq-figure { margin: 20px 0; }
+.faq-figure a { display: block; }
+.faq-figure img { display: block; width: 100%; height: auto; border: 1px solid var(--line); border-radius: 3px; }
+.faq-figure figcaption { margin-top: 10px; color: var(--muted); font-size: 12px; }
+.faq-answer .faq-note { color: var(--muted); font-size: 13px; }
+.faq-answer > :last-child { margin-bottom: 0; }
+
 @media (max-width: 560px) {
-  .topbar { padding: 12px 16px; }
+  .topbar { padding: 12px 16px; flex-wrap: wrap; }
+  .topbar-actions { margin-left: auto; }
   main { padding: 32px 16px; }
   .panel { padding: 20px; }
   .info-item { grid-template-columns: 1fr; gap: 6px; }

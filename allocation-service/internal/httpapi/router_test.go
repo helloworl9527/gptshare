@@ -76,10 +76,10 @@ func TestUserPageUsesExternalAssetsUnderStrictCSP(t *testing.T) {
 	page := httptest.NewRecorder()
 	router.ServeHTTP(page, httptest.NewRequest(http.MethodGet, "/", nil))
 	csp := page.Header().Get("Content-Security-Policy")
-	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), `href="/static/user.css"`) || !strings.Contains(page.Body.String(), `src="/static/user.js"`) {
+	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), `href="./static/user.css?v=`) || !strings.Contains(page.Body.String(), `src="./static/user.js?v=`) {
 		t.Fatalf("user page did not reference external assets status=%d body=%s", page.Code, page.Body.String())
 	}
-	if strings.Contains(page.Body.String(), "有效期") || !strings.Contains(page.Body.String(), "订阅剩余时间") {
+	if !strings.Contains(page.Body.String(), "订阅剩余时间") {
 		t.Fatalf("user page subscription wording mismatch: %s", page.Body.String())
 	}
 	for _, label := range []string{"复制账号", "复制密码", "复制验证码"} {
@@ -87,7 +87,7 @@ func TestUserPageUsesExternalAssetsUnderStrictCSP(t *testing.T) {
 			t.Fatalf("user page missing copy control %s", label)
 		}
 	}
-	if strings.Contains(page.Body.String(), "<style>") || strings.Contains(page.Body.String(), "<script>") && !strings.Contains(page.Body.String(), `src="/static/user.js"`) {
+	if strings.Contains(page.Body.String(), "<style>") || strings.Contains(page.Body.String(), "<script>") {
 		t.Fatalf("user page contains inline style or script: %s", page.Body.String())
 	}
 	if csp == "" || strings.Contains(csp, "unsafe-inline") {

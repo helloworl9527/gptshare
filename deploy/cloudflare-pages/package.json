@@ -1,0 +1,15 @@
+{
+  "name": "sharegpt-pages-frontend",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node worker.test.mjs && node branding.test.mjs && node faq.test.mjs",
+    "smoke": "node smoke.mjs",
+    "smoke:actions": "node card-actions-smoke.mjs",
+    "smoke:faq": "node faq-smoke.mjs"
+  },
+  "dependencies": {
+    "blake3-wasm": "2.1.5"
+  }
+}

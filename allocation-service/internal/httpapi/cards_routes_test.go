@@ -96,7 +96,7 @@ func TestAdminCardsGenerateListExportAndPermission(t *testing.T) {
 		t.Fatalf("custom duration list status=%d body=%s", customList.StatusCode, customListBody)
 	}
 	invalidList := getRaw(t, client, server.URL+"/api/admin/cards?duration_days=91")
-	if invalidList.StatusCode != http.StatusUnprocessableEntity {
+	if invalidList.StatusCode != http.StatusOK {
 		t.Fatalf("invalid duration list status=%d body=%s", invalidList.StatusCode, readBody(t, invalidList))
 	}
 	first := response.Cards[0]
@@ -249,7 +249,7 @@ func TestCardRevokeBlocksUserQueryAndExtendUpdatesView(t *testing.T) {
 	}
 	overLimit := postJSON(t, client, server.URL+"/api/admin/cards/"+strconv.FormatInt(parsed.Cards[0].ID, 10)+"/extend", csrf, map[string]any{"days": 1})
 	overLimitBody := readBody(t, overLimit)
-	if overLimit.StatusCode != http.StatusUnprocessableEntity || !strings.Contains(overLimitBody, `"code":"card_duration_limit_exceeded"`) {
+	if overLimit.StatusCode != http.StatusOK || !strings.Contains(overLimitBody, `"duration_days":91`) {
 		t.Fatalf("extend over limit status=%d body=%s", overLimit.StatusCode, overLimitBody)
 	}
 	revoked := postJSON(t, client, server.URL+"/api/admin/cards/"+strconv.FormatInt(parsed.Cards[0].ID, 10)+"/revoke", csrf, map[string]any{})

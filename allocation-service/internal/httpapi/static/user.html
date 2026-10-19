@@ -5,13 +5,16 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
   <title>卡密查询</title>
-  <link rel="stylesheet" href="/static/user.css">
+  <link rel="stylesheet" href="./static/user.css?v=20261013-1">
 </head>
 <body>
   <a class="skip-link" href="#main">跳到查询表单</a>
   <header class="topbar">
     <div class="wordmark">ChatGPT 账号服务</div>
-    <div class="status-pill" id="clock" aria-live="polite">--:--:--</div>
+    <nav class="topbar-actions" aria-label="账号服务导航">
+      <a class="purchase-link" href="https://wzyp.cn/item/l2c6m1" target="_blank" rel="noopener noreferrer">自助购买</a>
+      <div class="status-pill" id="clock" aria-live="polite">--:--:--</div>
+    </nav>
   </header>
   <main id="main">
     <p class="eyebrow">Vitals Access</p>
@@ -37,6 +40,18 @@
       </form>
     </section>
 
+    <section id="saved-cards" class="panel saved-cards" aria-labelledby="saved-cards-title" hidden>
+      <div class="saved-cards-heading">
+        <div>
+          <p class="eyebrow">Saved on this device</p>
+          <h2 id="saved-cards-title">已兑换卡密</h2>
+        </div>
+        <button id="clear-saved-cards" type="button">清空记录</button>
+      </div>
+      <p class="storage-notice">兑换码仅保存在当前浏览器，清除浏览器数据后会丢失；请勿在公共设备上保留。</p>
+      <ul id="saved-cards-list" class="saved-cards-list"></ul>
+    </section>
+
     <section id="result" class="panel result" aria-labelledby="result-title">
       <h2 id="result-title">账号信息</h2>
       <ul class="info-list">
@@ -51,6 +66,6 @@
       <p id="replacement-notice" class="notice"></p>
     </section>
   </main>
-  <script src="/static/user.js" defer></script>
+  <script src="./static/user.js?v=20261012-1" defer></script>
 </body>
 </html>

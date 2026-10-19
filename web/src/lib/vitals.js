@@ -39,6 +39,7 @@ export function accountTone(account, now = Date.now()) {
 }
 
 export function cardTone(card) {
+  if (card.status === 'consumed') return 'retired'
   if (card.status === 'revoked') return 'red'
   if (card.status === 'expired') return 'retired'
   if (card.status === 'redeemed') return 'green'

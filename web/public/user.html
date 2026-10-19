@@ -5,20 +5,29 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
   <title>卡密查询</title>
-  <link rel="stylesheet" href="./static/user.css?v=20260727-2">
+  <link rel="stylesheet" href="./static/user.css?v=20261015-faq-1">
 </head>
 <body>
   <a class="skip-link" href="#main">跳到查询表单</a>
   <header class="topbar">
     <div class="wordmark">ChatGPT 账号服务</div>
-    <div class="status-pill" id="clock" aria-live="polite">--:--:--</div>
+    <nav class="topbar-actions" aria-label="账号服务导航">
+      <a class="purchase-link" href="https://wzyp.cn/item/l2c6m1" target="_blank" rel="noopener noreferrer">自助购买</a>
+      <div class="status-pill" id="clock" aria-live="polite">--:--:--</div>
+    </nav>
   </header>
   <main id="main">
     <p class="eyebrow">Vitals Access</p>
     <h1>卡密查询</h1>
     <p class="lead">输入卡密查看当前分配的账号、密码、取件地址和订阅信息。</p>
 
-    <section class="panel" aria-labelledby="query-title">
+    <nav class="action-tabs" aria-label="兑换操作">
+      <button type="button" data-mode="query" aria-pressed="true">查询 / 兑换</button>
+      <button type="button" data-mode="different" aria-pressed="false">兑换另一个不同账号</button>
+      <button type="button" data-mode="renew" aria-pressed="false">续费原兑换码</button>
+    </nav>
+
+    <section id="query-panel" class="panel" aria-labelledby="query-title">
       <h2 id="query-title" class="eyebrow">Query</h2>
       <form id="query-form" novalidate>
         <div class="field">
@@ -34,6 +43,33 @@
           <button class="primary" id="query-button" type="submit">查询或兑换卡密</button>
         </div>
         <div id="error" class="alert" role="alert"></div>
+      </form>
+    </section>
+
+    <section id="action-panel" class="panel" aria-labelledby="action-title" hidden>
+      <h2 id="action-title">续费原兑换码</h2>
+      <p id="action-help" class="storage-notice"></p>
+      <form id="card-action-form" novalidate>
+        <div class="field">
+          <label for="original-card-code">原兑换码</label>
+          <input id="original-card-code" autocomplete="off" spellcheck="false" placeholder="XXXX-XXXX-XXXX" maxlength="32" required>
+        </div>
+        <div class="field">
+          <label for="new-card-code">未使用的新兑换码</label>
+          <input id="new-card-code" autocomplete="off" spellcheck="false" placeholder="XXXX-XXXX-XXXX" maxlength="32" required>
+        </div>
+        <div id="action-captcha" class="captcha-box">
+          <p id="action-captcha-question" class="captcha-question"></p>
+          <label for="action-captcha-answer">验证码答案</label>
+          <input id="action-captcha-answer" autocomplete="off" inputmode="numeric" placeholder="输入计算结果">
+        </div>
+        <div id="action-preview" class="action-preview" role="status" hidden></div>
+        <div class="button-row">
+          <button id="action-preview-button" type="submit">预览并检查</button>
+          <button id="action-confirm-button" class="primary" type="button" disabled>确认操作</button>
+        </div>
+        <div id="action-error" class="alert" role="alert"></div>
+        <p id="action-success" class="copy-status" role="status"></p>
       </form>
     </section>
 
@@ -62,7 +98,30 @@
       <p id="copy-status" class="copy-status" aria-live="polite"></p>
       <p id="replacement-notice" class="notice"></p>
     </section>
+
+    <section id="faq" class="panel faq" aria-labelledby="faq-title">
+      <p class="eyebrow">Help &amp; tips</p>
+      <h2 id="faq-title">常见问题</h2>
+      <details class="faq-item" open>
+        <summary>出现「model not found」怎么办？</summary>
+        <div class="faq-answer">
+          <p>现在 OpenAI 增加了时区的检测，假如浏览器时区和梯子时区不一致会出现 model not found。</p>
+          <h3>浏览器时区设置教程</h3>
+          <ol class="faq-steps">
+            <li>下载并安装插件：<a href="https://chromewebstore.google.com/detail/change-timezone-for-googl/cejckpjfigehbeecbbfhangbknpidcnh?hl=zh-CN&amp;utm_source=ext_sidebar&amp;pli=1" target="_blank" rel="noopener noreferrer">更改 Google Chrome™ 的时区（Change Timezone）</a>。</li>
+            <li>打开插件设置，勾选「根据 IP 地址自动更新时区」（Automatically update timezone based on my IP address），然后点击「Save」保存。不要勾选「随机时区」（Pick a random time zone）。</li>
+            <li>刷新 ChatGPT 页面后重试；如果切换了代理 / VPN 节点，请重新检查并保存时区设置。</li>
+          </ol>
+          <figure class="faq-figure">
+            <a href="./static/change-timezone-ip-settings.jpg" target="_blank" rel="noopener noreferrer" aria-label="在新窗口查看时区设置示意图原图">
+              <img src="./static/change-timezone-ip-settings.jpg" width="1162" height="1076" loading="lazy" decoding="async" alt="Change Timezone 设置示意图：勾选 Automatically update timezone based on my IP address，再点击 Save 保存；红色箭头标出这两处操作。">
+            </a>
+            <figcaption>勾选根据 IP 地址自动更新时区，然后点击 Save。点击图片可查看原图。</figcaption>
+          </figure>
+        </div>
+      </details>
+    </section>
   </main>
-  <script src="./static/user.js?v=20261012-1" defer></script>
+  <script src="./static/user.js?v=20261014-1" defer></script>
 </body>
 </html>

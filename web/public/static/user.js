@@ -17,6 +17,119 @@ let captchaId = 0;
 let currentSecret = "";
 let validUntil = null;
 let generatedTOTPPeriod = null;
+let actionMode = "query";
+let actionCaptchaId = 0;
+let actionPreviewSignature = "";
+let actionBusy = false;
+const actionForm = document.querySelector("#card-action-form");
+const originalInput = document.querySelector("#original-card-code");
+const newInput = document.querySelector("#new-card-code");
+const actionPreview = document.querySelector("#action-preview");
+const actionError = document.querySelector("#action-error");
+const actionSuccess = document.querySelector("#action-success");
+const actionConfirm = document.querySelector("#action-confirm-button");
+
+document.querySelectorAll("button[data-mode]").forEach(button => {
+  button.addEventListener("click", () => setActionMode(button.dataset.mode));
+});
+function setActionMode(mode, originalCode) {
+  if (actionBusy || queryButton.disabled) return;
+  actionMode = mode;
+  document.querySelectorAll("button[data-mode]").forEach(button => button.setAttribute("aria-pressed", String(button.dataset.mode === mode)));
+  document.querySelector("#query-panel").hidden = mode !== "query";
+  document.querySelector("#action-panel").hidden = mode === "query";
+  if (originalCode) originalInput.value = originalCode;
+  document.querySelector("#action-title").textContent = mode === "different" ? "兑换另一个不同账号" : "续费原兑换码";
+  document.querySelector("#action-help").textContent = mode === "different"
+    ? "新码获得独立有效期，分配时避开关联卡密正在使用的账号。原码须已激活；已结束的历史账号不在排除范围内。"
+    : "将新码全部时长转入原码，成功后新码不能再次兑换。未过期从原到期日累加，已过期从现在起算，未激活只合并天数。原账号不可用时可能换号。";
+  resultPanel.classList.remove("visible");
+  currentSecret = ""; validUntil = null;
+  resetActionPreview();
+  actionCaptchaId = 0;
+  document.querySelector("#action-captcha").classList.remove("visible");
+  actionSuccess.textContent = "";
+  actionError.classList.remove("visible");
+}
+function resetActionPreview() {
+  actionPreviewSignature = ""; actionPreview.hidden = true; actionConfirm.disabled = true;
+}
+function actionPayload() {
+  const value = { action: actionMode, original_code: originalInput.value.trim(), new_code: newInput.value.trim() };
+  if (actionCaptchaId) Object.assign(value, { captcha_id: actionCaptchaId, captcha_answer: document.querySelector("#action-captcha-answer").value.trim() });
+  return value;
+}
+function actionSignature() { return JSON.stringify([actionMode, originalInput.value.trim(), newInput.value.trim()]); }
+[originalInput, newInput].forEach(input => input.addEventListener("input", () => { input.value = normalizeCardCode(input.value); resetActionPreview(); actionSuccess.textContent = ""; }));
+async function requestCardAction(path, payload) {
+  const response = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+  return { ...await response.json(), ok: response.ok };
+}
+function displayActionError(body) {
+  const error = errorBody(body);
+  if (error.code === "captcha_required" && error.captcha) {
+    actionCaptchaId = error.captcha.id;
+    document.querySelector("#action-captcha-question").textContent = error.captcha.question;
+    document.querySelector("#action-captcha").classList.add("visible");
+    document.querySelector("#action-captcha-answer").focus();
+  }
+  actionError.textContent = error.message || "操作未完成，请使用相同兑换码重试。";
+  actionError.classList.add("visible");
+}
+function setActionBusy(value) {
+  actionBusy = value;
+  originalInput.disabled = value; newInput.disabled = value;
+  document.querySelector("#action-preview-button").disabled = value;
+  document.querySelectorAll("button[data-mode]").forEach(button => { button.disabled = value; });
+  actionConfirm.disabled = value || !actionPreviewSignature;
+}
+function describeOperation(operation) {
+  const date = operation.expires_at ? new Intl.DateTimeFormat("zh-CN", { dateStyle: "medium", timeStyle: "short" }).format(new Date(operation.expires_at)) : "激活后开始计时";
+  const name = operation.action === "different" ? "兑换不同账号" : "续费原码";
+  const previous = operation.before_expires_at ? new Intl.DateTimeFormat("zh-CN", { dateStyle: "medium", timeStyle: "short" }).format(new Date(operation.before_expires_at)) : "尚未激活";
+  const status = ({ unused: "未激活", redeemed: "使用中", expired: "已过期" })[operation.original_status] || "已检查";
+  return `原码状态：${status}；原有效至：${previous}。\n${name}：${operation.added_days} 天。\n操作后有效至：${date}。${operation.status === "unused" ? `合并后共 ${operation.duration_days} 天，仍未激活。` : ""}\n${operation.action === "renew" ? "确认成功后，新码将用于续费，之后继续使用原码。" : "确认成功后，使用新码查询新账号。"}${operation.account_changed ? " 原账号已不可用，本次会重新分配账号。" : ""}`;
+}
+actionForm.addEventListener("submit", async event => {
+  event.preventDefault();
+  if (actionBusy) return;
+  resetActionPreview(); actionError.classList.remove("visible"); actionSuccess.textContent = "";
+  if (originalInput.value.length !== 14 || newInput.value.length !== 14 || originalInput.value === newInput.value) {
+    displayActionError({ message: "请输入两个不同的完整兑换码。" }); return;
+  }
+  setActionBusy(true);
+  try {
+    const response = await requestCardAction("/api/cards/action-preview", actionPayload());
+    if (!response.ok) { displayActionError(response); return; }
+    actionPreview.textContent = describeOperation(response.operation) + (response.operation.replayed ? "\n该操作已完成，可确认刷新查询结果，不会再次消耗新码。" : "");
+    actionPreview.hidden = false; actionPreviewSignature = actionSignature();
+  } catch { displayActionError({ message: "预览未完成，请稍后重试。" }); }
+  finally { setActionBusy(false); }
+});
+actionConfirm.addEventListener("click", async () => {
+  if (actionBusy || !actionPreviewSignature || actionPreviewSignature !== actionSignature()) return;
+  actionError.classList.remove("visible"); setActionBusy(true);
+  let completed = false;
+  try {
+    const response = await requestCardAction(actionMode === "renew" ? "/api/cards/renew" : "/api/redeem-different", actionPayload());
+    if (!response.ok) { resetActionPreview(); displayActionError(response); return; }
+    completed = true;
+    const code = actionMode === "renew" ? originalInput.value.trim() : newInput.value.trim();
+    resetActionPreview();
+    actionSuccess.textContent = (actionMode === "renew" ? "续费成功，新码已用于续费。请继续使用原码。" : "兑换成功，请使用新码查询账号。") + (response.operation.account_changed ? " 本次已重新分配账号。" : "");
+    if (response.operation.status === "unused") {
+      actionSuccess.textContent += ` 合并后共 ${response.operation.duration_days} 天，尚未开始计时。`; return;
+    }
+    saveRedeemedCard(code, response.operation.expires_at);
+    codeInput.value = code;
+    const query = await queryCard({ code });
+    if (query.ok) await renderResult(query.result);
+    else actionSuccess.textContent += " 账号信息请切换到查询 / 兑换后查询。";
+  } catch {
+    if (completed) actionSuccess.textContent += " 账号信息暂未加载，请使用有效兑换码查询。";
+    else displayActionError({ message: "未能确认结果，请保留这两个兑换码并重试；相同操作不会重复续费。" });
+  } finally { setActionBusy(false); }
+});
 
 renderSavedCards();
 
@@ -89,6 +202,8 @@ form.addEventListener("submit", async (event) => {
 savedCardsList.addEventListener("click", (event) => {
   const button = event.target.closest("button[data-saved-code]");
   if (!button) return;
+  if (actionBusy || queryButton.disabled) return;
+  setActionMode("query");
   codeInput.value = button.dataset.savedCode;
   form.requestSubmit();
 });
@@ -103,6 +218,10 @@ savedCardsList.addEventListener("click", (event) => {
 clearSavedCardsButton.addEventListener("click", () => {
   writeSavedCards([]);
   renderSavedCards();
+});
+savedCardsList.addEventListener("click", event => {
+  const button = event.target.closest("button[data-card-action]");
+  if (button) { setActionMode(button.dataset.cardAction, button.dataset.originalCode); document.querySelector("#action-panel").scrollIntoView({ block: "start" }); }
 });
 
 function errorBody(body) {
@@ -297,7 +416,11 @@ function renderSavedCards() {
     remove.type = "button";
     remove.dataset.removeCode = item.code;
     remove.textContent = "移除";
-    actions.append(query, remove);
+    const renew = document.createElement("button");
+    renew.type = "button"; renew.textContent = "续费"; renew.dataset.cardAction = "renew"; renew.dataset.originalCode = item.code;
+    const different = document.createElement("button");
+    different.type = "button"; different.textContent = "兑换不同账号"; different.dataset.cardAction = "different"; different.dataset.originalCode = item.code;
+    actions.append(query, renew, different, remove);
     row.append(details, actions);
     savedCardsList.append(row);
   }

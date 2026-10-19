@@ -46,6 +46,10 @@ body {
   gap: 16px;
 }
 .wordmark { font-size: 20px; font-weight: 700; letter-spacing: 0; }
+.topbar-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.purchase-link { color: var(--green-dark); font-size: 14px; font-weight: 650; text-decoration: none; white-space: nowrap; }
+.purchase-link:hover { text-decoration: underline; }
+.purchase-link:focus-visible { outline: 3px solid rgba(16, 163, 127, .35); outline-offset: 4px; }
 .status-pill {
   border: 1px solid var(--line);
   border-radius: 999px;
@@ -162,6 +166,56 @@ button:disabled { cursor: wait; opacity: .6; }
   line-height: 1.5;
 }
 .alert.visible { display: block; }
+.saved-cards[hidden] { display: none; }
+.saved-cards-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+.saved-cards-heading h2 {
+  margin: 0;
+  font-size: 24px;
+}
+.storage-notice {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+  margin: 14px 0;
+}
+.saved-cards-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.saved-card-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border-top: 1px solid var(--line);
+  padding: 14px 0;
+}
+.saved-card-item > div:first-child {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+.saved-card-item code {
+  overflow-wrap: anywhere;
+  font: 700 15px var(--mono);
+}
+.saved-card-item small { color: var(--muted); }
+.saved-card-actions {
+  display: flex;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+.saved-card-actions button {
+  min-height: 36px;
+  padding: 7px 10px;
+  font-size: 12px;
+}
 .result { display: none; border-left: 4px solid var(--green); }
 .result.visible { display: block; }
 .result h2 {
@@ -247,13 +301,17 @@ button:disabled { cursor: wait; opacity: .6; }
 }
 
 @media (max-width: 560px) {
-  .topbar { padding: 12px 16px; }
+  .topbar { padding: 12px 16px; flex-wrap: wrap; }
+  .topbar-actions { margin-left: auto; }
   main { padding: 32px 16px; }
   .panel { padding: 20px; }
   .info-item { grid-template-columns: 1fr; gap: 6px; }
   .copy-row,
   .totp-row { align-items: flex-start; }
   .button-row button { width: 100%; }
+  .saved-cards-heading,
+  .saved-card-item { align-items: stretch; flex-direction: column; }
+  .saved-card-actions button { flex: 1; }
 }
 @media (prefers-reduced-motion: reduce) {
   button { transition: none; }

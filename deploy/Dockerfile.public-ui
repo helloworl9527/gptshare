@@ -1,0 +1,14 @@
+# Frontend-only embedded-resource update. Keep the current production runtime,
+# migrations and entrypoint unchanged; replace only the Go application binary.
+FROM golang:1.25-alpine AS backend
+WORKDIR /src
+ENV GOMAXPROCS=2
+COPY go.mod go.sum ./
+COPY allocation-service/go.mod allocation-service/go.sum ./allocation-service/
+RUN go mod download
+COPY . .
+RUN go test ./internal/unifiedui \
+    && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/vitals ./cmd/vitals
+
+FROM gptshare-vitals:password-panel-20261013
+COPY --from=backend /out/vitals /usr/local/bin/vitals

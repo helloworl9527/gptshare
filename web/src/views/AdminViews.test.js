@@ -291,7 +291,7 @@ describe('P2 admin views', () => {
     wrapper.unmount()
   })
 
-  it('accepts custom duration and caps extension at ninety days from redemption', async () => {
+  it('accepts custom duration and limits each admin extension without a cumulative cap', async () => {
     const extendable = [{
       id: 8,
       code_suffix: 'EXT5',
@@ -317,7 +317,7 @@ describe('P2 admin views', () => {
     expect(JSON.parse(generateCall[1].body)).toMatchObject({ duration_days: 31 })
 
     await wrapper.findAll('button').find((button) => button.text() === '延期').trigger('click')
-    expect(wrapper.find('#extend-days').attributes('max')).toBe('85')
+    expect(wrapper.find('#extend-days').attributes('max')).toBe('90')
     await wrapper.find('#extend-days').setValue(85)
     await wrapper.find('.modal-form').trigger('submit')
     await flushPromises()

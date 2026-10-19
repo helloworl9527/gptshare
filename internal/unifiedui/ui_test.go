@@ -46,3 +46,15 @@ func TestBuiltHTMLContainsNoInlineScriptOrStyle(t *testing.T) {
 		t.Fatalf("admin HTML contains inline execution or style: %s", html)
 	}
 }
+
+func TestPublicPurchaseNavigation(t *testing.T) {
+	page, err := assets.ReadFile("static/user.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(page)
+	link := `<a class="purchase-link" href="https://wzyp.cn/item/l2c6m1" target="_blank" rel="noopener noreferrer">自助购买</a>`
+	if !strings.Contains(html, link) || !strings.Contains(html, `aria-label="账号服务导航"`) {
+		t.Fatal("public page is missing safe self-service purchase navigation")
+	}
+}

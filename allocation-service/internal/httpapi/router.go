@@ -142,6 +142,9 @@ func RegisterPublicRoutes(router *gin.Engine, cfg Config) {
 func RegisterPublicAPIRoutes(router *gin.Engine, cfg Config) {
 	if cfg.Cards != nil {
 		router.GET("/api/cards/:code/status", userCardStatusHandler(cfg.Cards))
+		router.POST("/api/cards/action-preview", cardActionHandler(cfg.Cards, "", true, cfg.Origin))
+		router.POST("/api/cards/renew", cardActionHandler(cfg.Cards, "renew", false, cfg.Origin))
+		router.POST("/api/redeem-different", cardActionHandler(cfg.Cards, "different", false, cfg.Origin))
 	}
 	if cfg.Allocator != nil {
 		router.POST("/api/redeem", redeemCardHandler(cfg.Allocator))
@@ -321,7 +324,7 @@ func writeCardError(c *gin.Context, err error) {
 	case errors.Is(err, cardsvc.ErrValidation):
 		writeError(c, http.StatusUnprocessableEntity, "validation_failed", "request validation failed")
 	case errors.Is(err, cardsvc.ErrDurationLimit):
-		writeError(c, http.StatusUnprocessableEntity, "card_duration_limit_exceeded", "card validity cannot exceed 90 days")
+		writeError(c, http.StatusUnprocessableEntity, "card_duration_limit_exceeded", "卡密时长超出可表示范围")
 	case errors.Is(err, cardsvc.ErrNoCapacity), errors.Is(err, repository.ErrNoAccountCapacity):
 		writeError(c, http.StatusConflict, "no_account_capacity", "no account capacity; card was not changed")
 	case errors.Is(err, cardsvc.ErrNotFound):
@@ -703,6 +706,12 @@ func lookupCardHandler(service *cardsvc.Service) gin.HandlerFunc {
 			}
 			body["allocation"] = serializeAllocation(*result.Allocation)
 		}
+		history, err := service.OperationHistory(c.Request.Context(), result.Card.ID)
+		if err != nil {
+			writeCardError(c, err)
+			return
+		}
+		body["operations"] = history
 		c.JSON(http.StatusOK, body)
 	}
 }

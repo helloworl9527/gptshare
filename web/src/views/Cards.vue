@@ -24,11 +24,11 @@ const visible = computed(() => cards.value)
 const maxExtendDays = computed(() => remainingExtensionDays(form.selected))
 
 function cardStatusLabel(card) {
-  return ({ unused: '未使用', redeemed: '已兑换', revoked: '已作废', expired: '已过期' })[card?.status] || card?.status || '未知'
+  return ({ unused: '未使用', redeemed: '已兑换', revoked: '已作废', expired: '已过期', consumed: '已用于续费' })[card?.status] || card?.status || '未知'
 }
 
 function canRevoke(card) {
-  return Boolean(card && card.status !== 'revoked' && card.status !== 'expired')
+  return Boolean(card && ['unused', 'redeemed'].includes(card.status))
 }
 
 function validDurationDays(value) {
@@ -37,15 +37,7 @@ function validDurationDays(value) {
 }
 
 function remainingExtensionDays(card) {
-  if (!card || card.status === 'revoked') return 0
-  if (card.status === 'unused') return Math.max(0, 90 - Number(card.duration_days || 0))
-  if (card.status === 'expired') return 90
-  if (card.status !== 'redeemed' || !card.redeemed_at || !card.expires_at) return 0
-  const redeemedAt = new Date(card.redeemed_at).getTime()
-  const expiresAt = new Date(card.expires_at).getTime()
-  if (!Number.isFinite(redeemedAt) || !Number.isFinite(expiresAt)) return 0
-  if (expiresAt <= nowMs.value) return 90
-  return Math.max(0, 90 - Number(card.duration_days || 0))
+  return card && ['unused', 'redeemed', 'expired'].includes(card.status) ? 90 : 0
 }
 
 function remainingDays(card) {
@@ -60,6 +52,7 @@ function remainingDays(card) {
 function remainingLabel(card) {
   if (!card) return '—'
   if (card.status === 'revoked') return '不可用（已作废）'
+  if (card.status === 'consumed') return '已用于续费，不能独立兑换'
   if (card.status === 'unused') return `激活后 ${Number(card.duration_days || 0)} 天`
   const days = remainingDays(card)
   return days > 0 ? `${days} 天` : '0 天（已过期）'
@@ -332,7 +325,7 @@ onUnmounted(() => window.clearInterval(clockTimer))
         <footer class="lookup-management">
           <div>
             <strong>卡密管理</strong>
-            <p>延期后总有效期不超过激活后的 90 天；作废后用户将立即无法查询，且释放当前账号分配。</p>
+            <p>每次管理员延期可增加 1–90 天，累计时长不限；作废后用户无法继续查询，且释放当前账号分配。</p>
           </div>
           <div class="lookup-action-buttons">
             <button type="button" :disabled="!canLookupExtend(lookup.result.card)" @click="openExtend(lookup.result.card)">
@@ -343,6 +336,17 @@ onUnmounted(() => window.clearInterval(clockTimer))
             </button>
           </div>
         </footer>
+      </div>
+      <div v-if="lookup.result?.operations?.length" class="table-wrap">
+        <h3>续费与不同账号兑换记录</h3>
+        <table>
+          <thead><tr><th>操作</th><th>原码尾号</th><th>新码尾号</th><th>天数</th><th>有效至</th><th>时间</th></tr></thead>
+          <tbody>
+            <tr v-for="(operation, index) in lookup.result.operations" :key="index">
+              <td>{{ operation.action === 'renew' ? '续费 / 合并' : '兑换不同账号' }}</td><td>{{ operation.target_suffix }}</td><td>{{ operation.source_suffix }}</td><td>{{ operation.added_days }}</td><td>{{ operation.after_expires_at ? formatDateTime(operation.after_expires_at) : '激活后计时' }}</td><td>{{ formatDateTime(operation.created_at) }}</td>
+            </tr>
+          </tbody>
+        </table>
       </div>
     </section>
     <section class="panel table-panel" aria-labelledby="cards-title">
@@ -369,6 +373,9 @@ onUnmounted(() => window.clearInterval(clockTimer))
             </option>
             <option value="revoked">
               已作废
+            </option>
+            <option value="consumed">
+              已用于续费
             </option>
             <option value="expired">
               已过期
@@ -449,8 +456,8 @@ onUnmounted(() => window.clearInterval(clockTimer))
         <label for="extend-days">延期天数</label>
         <input id="extend-days" v-model.number="form.extend_days" type="number" min="1" :max="maxExtendDays" step="1" required>
         <small v-if="cardNeedsReactivation(form.selected)" class="field-hint">该卡已过期；延期成功后将从现在开启新周期并立即分配账号，最多 90 天。</small>
-        <small v-else-if="form.selected?.status === 'unused'" class="field-hint">该卡尚未激活；延期只增加激活后的可用时长，最多 90 天。</small>
-        <small v-else class="field-hint">当前周期最多还可延期 {{ maxExtendDays }} 天，最终有效期不超过 90 天。</small>
+        <small v-else-if="form.selected?.status === 'unused'" class="field-hint">该卡尚未激活；延期只增加激活后的可用时长，单次最多 90 天，累计不限。</small>
+        <small v-else class="field-hint">单次最多可延期 {{ maxExtendDays }} 天，累计有效期不限。</small>
         <button class="primary-action" type="submit" :disabled="busy || maxExtendDays < 1">
           确认延期
         </button>

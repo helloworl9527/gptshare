@@ -928,8 +928,8 @@ func TestCardStateTransitionsRevokeReleaseAndExtend(t *testing.T) {
 	if err != nil || extended.ExpiresAt == nil || !extended.ExpiresAt.Equal(now.Add(90*24*time.Hour)) {
 		t.Fatalf("extend to maximum card=%+v err=%v", extended, err)
 	}
-	if _, err := repo.ExtendCard(context.Background(), cardID, 1); !errors.Is(err, ErrCardDurationLimit) {
-		t.Fatalf("extend beyond maximum err=%v want=%v", err, ErrCardDurationLimit)
+	if _, err := repo.ExtendCard(context.Background(), cardID, 1); err != nil {
+		t.Fatalf("extend beyond former cumulative limit: %v", err)
 	}
 	var cardUntilAfterLimit string
 	if err := db.DB().QueryRow("SELECT expires_at FROM cards WHERE id=?", cardID).Scan(&cardUntilAfterLimit); err != nil {
@@ -938,7 +938,7 @@ func TestCardStateTransitionsRevokeReleaseAndExtend(t *testing.T) {
 	if err := db.DB().QueryRow("SELECT valid_until FROM allocations WHERE id=?", allocation.ID).Scan(&allocationUntil); err != nil {
 		t.Fatal(err)
 	}
-	if want := formatTime(now.Add(90 * 24 * time.Hour)); cardUntilAfterLimit != want || allocationUntil != want {
+	if want := formatTime(now.Add(91 * 24 * time.Hour)); cardUntilAfterLimit != want || allocationUntil != want {
 		t.Fatalf("over-limit extension partially updated card=%s allocation=%s want=%s", cardUntilAfterLimit, allocationUntil, want)
 	}
 	revoked, err := repo.RevokeCard(context.Background(), cardID)
@@ -1022,8 +1022,8 @@ func TestCardStateTransitionsRevokeReleaseAndExtend(t *testing.T) {
 	if _, err := repo.RedeemCard(context.Background(), ninetyID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := repo.ExtendCard(context.Background(), ninetyID, 1); !errors.Is(err, ErrCardDurationLimit) {
-		t.Fatalf("90-day card extension err=%v want=%v", err, ErrCardDurationLimit)
+	if card, err := repo.ExtendCard(context.Background(), ninetyID, 1); err != nil || card.DurationDays != 91 {
+		t.Fatalf("90-day card extension card=%+v err=%v", card, err)
 	}
 }
 

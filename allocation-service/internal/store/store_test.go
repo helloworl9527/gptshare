@@ -205,13 +205,13 @@ func TestCardDuration90DayMigrationPreservesCardsAndForeignKeys(t *testing.T) {
 	if err := upgraded.DB().QueryRow("PRAGMA foreign_keys").Scan(&foreignKeysEnabled); err != nil || foreignKeysEnabled != 1 {
 		t.Fatalf("foreign keys enabled=%d err=%v", foreignKeysEnabled, err)
 	}
-	for _, days := range []int{1, 31, 45, 89, 90} {
+	for _, days := range []int{1, 31, 45, 89, 90, 91, 180} {
 		if _, err := upgraded.DB().Exec(`INSERT INTO cards(code_hash,code_suffix,duration_days,status,created_at,updated_at)
 			VALUES (randomblob(32),? ,?,'unused',?,?)`, fmt.Sprintf("%04d", days), days, now, now); err != nil {
 			t.Fatalf("duration %d rejected: %v", days, err)
 		}
 	}
-	for _, days := range []int{-1, 0, 91} {
+	for _, days := range []int{-1, 0} {
 		if _, err := upgraded.DB().Exec(`INSERT INTO cards(code_hash,code_suffix,duration_days,status,created_at,updated_at)
 			VALUES (randomblob(32),? ,?,'unused',?,?)`, fmt.Sprintf("%04d", days), days, now, now); err == nil {
 			t.Fatalf("out-of-range duration %d unexpectedly accepted", days)
