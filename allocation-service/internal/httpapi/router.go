@@ -916,7 +916,7 @@ func userQueryHandler(service *userquerysvc.Service) gin.HandlerFunc {
 		}
 		result, err := service.Query(c.Request.Context(), userquerysvc.QueryInput{
 			Code:          request.Code,
-			ClientIP:      clientIP(c.Request),
+			ClientIP:      cardActionClientIP(c.Request), // 经本机反代（导航站、baochai.cc）时取真实访客 IP，人机验证按访客计
 			CaptchaID:     request.CaptchaID,
 			CaptchaAnswer: request.CaptchaAnswer,
 		})

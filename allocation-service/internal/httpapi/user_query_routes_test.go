@@ -305,3 +305,35 @@ func errorMessage(t *testing.T, body string) string {
 	}
 	return parsed.Message
 }
+
+// 经本机反代（导航站 Worker → nginx、baochai.cc → nginx）进来的查询，连接来源都是 127.0.0.1：
+// 人机验证要按反代传来的真实访客 IP 计，不能所有访客共用一个计数。
+func TestUserQueryCaptchaCountsPerProxiedVisitor(t *testing.T) {
+	server := testAccountsTLSServer(t, "http://127.0.0.1:1")
+	defer server.Close()
+	query := func(realIP string) (int, string) {
+		req, err := http.NewRequest(http.MethodPost, server.URL+"/api/cards/query", strings.NewReader(`{"code":"BAD-CARD"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Origin", "https://127.0.0.1")
+		req.Header.Set("X-Real-IP", realIP)
+		resp, err := server.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp.StatusCode, readBody(t, resp)
+	}
+	for i := 0; i < 2; i++ {
+		if status, body := query("198.51.100.7"); status != http.StatusNotFound {
+			t.Fatalf("visitor A query %d status=%d body=%s", i+1, status, body)
+		}
+	}
+	if status, body := query("198.51.100.7"); status != http.StatusForbidden || !strings.Contains(body, "captcha_required") {
+		t.Fatalf("visitor A should need captcha: status=%d body=%s", status, body)
+	}
+	if status, body := query("203.0.113.9"); status != http.StatusNotFound {
+		t.Fatalf("visitor B must not inherit A's failures: status=%d body=%s", status, body)
+	}
+}
