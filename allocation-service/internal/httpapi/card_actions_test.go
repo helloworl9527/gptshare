@@ -130,3 +130,44 @@ func TestCardActionClientIPTrustsOnlyLocalProxy(t *testing.T) {
 		}
 	}
 }
+
+func TestPublicCardActionsRejectBindTicketWithoutConsuming(t *testing.T) {
+	server := testAccountsTLSServer(t, "http://127.0.0.1:1")
+	defer server.Close()
+	value, _ := testRepositories.Load(server.URL)
+	repo := value.(*repository.Repository)
+	codes := []string{"TKAA-BBCC-DDEE", "TKFF-GGHH-JJKK"}
+	ids := []int64{}
+	for _, code := range codes {
+		id, err := repo.CreateCard(context.Background(), repository.CardSeed{CodeHash: cardsvc.HashCode(code), CodeSuffix: code[len(code)-4:], DurationDays: 30})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+	}
+	payload := map[string]any{"action": "renew", "original_code": codes[0], "new_code": codes[1]}
+	encoded, _ := json.Marshal(payload)
+	for _, path := range []string{"/api/cards/action-preview", "/api/cards/renew", "/api/redeem-different"} {
+		req, err := http.NewRequest(http.MethodPost, server.URL+path, strings.NewReader(string(encoded)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Origin", "https://127.0.0.1")
+		req.Header.Set("X-Bind-Ticket", "anything.here")
+		response, err := server.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body := readBody(t, response)
+		if response.StatusCode != http.StatusBadRequest || !strings.Contains(body, `"ticket_unsupported"`) {
+			t.Fatalf("path=%s status=%d body=%s", path, response.StatusCode, body)
+		}
+	}
+	for _, id := range ids {
+		card, err := repo.CardByID(context.Background(), id)
+		if err != nil || card.Status != "unused" || card.DurationDays != 30 {
+			t.Fatalf("card %d changed: %+v err=%v", id, card, err)
+		}
+	}
+}

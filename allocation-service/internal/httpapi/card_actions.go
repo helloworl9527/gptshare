@@ -8,6 +8,7 @@ import (
 
 	cardsvc "allocation-service/internal/card"
 	"allocation-service/internal/repository"
+	"allocation-service/internal/usercenter"
 	"github.com/gin-gonic/gin"
 )
 
@@ -22,6 +23,12 @@ type cardActionRequest struct {
 func cardActionHandler(service *cardsvc.Service, action string, preview bool, allowedOrigin string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Header("Cache-Control", "no-store")
+		// 续期 / 不同账号兑换还没接入统一用户中心的绑定：带了绑定票据就拒绝、不扣码，
+		// 不能悄悄按匿名处理（那样码扣了，登录用户却拿不到这份权益，事后也补绑不了）。
+		if len(c.Request.Header.Values(usercenter.TicketHeader)) > 0 {
+			writeError(c, http.StatusBadRequest, "ticket_unsupported", "这个操作暂不支持登录账号绑定，请在共享账号兑换页操作")
+			return
+		}
 		if os.Getenv("PUBLIC_CARD_ACTIONS_ENABLED") == "false" {
 			writeError(c, http.StatusServiceUnavailable, "card_actions_unavailable", "续费与不同账号兑换暂时关闭，普通查询不受影响")
 			return
