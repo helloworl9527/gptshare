@@ -893,7 +893,7 @@ func redeemCardHandler(service *allocatorsvc.Service, userCenter *usercenter.Ser
 			writeAllocatorError(c, err)
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{
+		body := gin.H{
 			"allocation": serializeAllocation(result.Allocation),
 			"card":       serializeUserCard(result.Card),
 			"account": gin.H{
@@ -904,7 +904,12 @@ func redeemCardHandler(service *allocatorsvc.Service, userCenter *usercenter.Ser
 			"warnings":    result.Warnings,
 			"duration_ms": result.Elapsed.Milliseconds(),
 			"request_id":  c.GetString("request_id"),
-		})
+		}
+		if result.Bind != "" {
+			// 只有枚举，不透露归属的是谁
+			body["user_center"] = gin.H{"bind": result.Bind}
+		}
+		c.JSON(http.StatusOK, body)
 	}
 }
 

@@ -309,3 +309,72 @@ func TestBoundRedeemBackfillsLegacyCardCode(t *testing.T) {
 		t.Fatalf("anonymous legacy card must stay unarchived, stored=%d err=%v", stored, err)
 	}
 }
+
+// 老卡补挂：匿名兑换过、仍有效、没有归属事件的卡，登录用户再输入时归到他名下（claimed、不计返利），
+// 别人再输入是 already_bound；不写第二条事件、不消耗票据。老批次卡顺手补存加密卡密。
+func TestClaimOldAnonymousCardOnce(t *testing.T) {
+	f := newUserCenterFixture(t)
+	cardID := f.card(t, "UCMM-NNPP-QQRR")
+	if _, err := f.db.Exec(`UPDATE cards SET encrypted_code_key_id=NULL, encrypted_code=NULL WHERE id=?`, cardID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.repo.RedeemCode(context.Background(), cardHashForCode("UCMM-NNPP-QQRR"), true); err != nil {
+		t.Fatal(err)
+	}
+	alice := testBinding("nonce-claim-alice-0001")
+	alice.CodePlaintext = "UCMM-NNPP-QQRR"
+	got, err := f.repo.RedeemCodeWithBinding(context.Background(), cardHashForCode("UCMM-NNPP-QQRR"), true, alice)
+	if err != nil || got.Bind != "claimed" || got.Card.ID != cardID {
+		t.Fatalf("claim result=%+v err=%v", got.Bind, err)
+	}
+	events, err := f.repo.ListRedemptionEvents(context.Background(), 0, 10)
+	if err != nil || len(events) != 1 {
+		t.Fatalf("events=%v err=%v", events, err)
+	}
+	if events[0].Kind != "new" || !strings.Contains(events[0].Detail, `"claimed":true`) || !strings.Contains(events[0].Detail, `"rebate_eligible":false`) {
+		t.Fatalf("claim event=%+v", events[0])
+	}
+	if code, err := f.repo.BoundCardCode(context.Background(), cardID); err != nil || code != "UCMM-NNPP-QQRR" {
+		t.Fatalf("bound card code=%q err=%v", code, err)
+	}
+	bob := testBinding("nonce-claim-bob-000001")
+	bob.UserUID = "u_bob00001"
+	again, err := f.repo.RedeemCodeWithBinding(context.Background(), cardHashForCode("UCMM-NNPP-QQRR"), true, bob)
+	if err != nil || again.Bind != "already_bound" {
+		t.Fatalf("second claim=%q err=%v", again.Bind, err)
+	}
+	var nonces int
+	if err := f.db.QueryRow(`SELECT count(*) FROM used_bind_nonces WHERE nonce=?`, bob.Nonce).Scan(&nonces); err != nil || nonces != 0 {
+		t.Fatalf("already_bound must not consume nonce: %d %v", nonces, err)
+	}
+	if events, _ := f.repo.ListRedemptionEvents(context.Background(), 0, 10); len(events) != 1 {
+		t.Fatalf("already_bound must not write events: %d", len(events))
+	}
+}
+
+func TestClaimRejectsExpiredCardAndReplayedNonce(t *testing.T) {
+	f := newUserCenterFixture(t)
+	expiredID := f.card(t, "UCSS-TTUU-VVWW")
+	f.card(t, "UCXX-YYZZ-2345")
+	for _, code := range []string{"UCSS-TTUU-VVWW", "UCXX-YYZZ-2345"} {
+		if _, err := f.repo.RedeemCode(context.Background(), cardHashForCode(code), true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := f.db.Exec(`UPDATE cards SET expires_at=? WHERE id=?`, "2020-01-01T00:00:00Z", expiredID); err != nil {
+		t.Fatal(err)
+	}
+	got, err := f.repo.RedeemCodeWithBinding(context.Background(), cardHashForCode("UCSS-TTUU-VVWW"), true, testBinding("nonce-claim-expired-01"))
+	if err != nil || got.Bind != "not_claimable" {
+		t.Fatalf("expired claim=%q err=%v", got.Bind, err)
+	}
+	if _, err := f.db.Exec(`INSERT INTO used_bind_nonces(nonce,exp) VALUES ('nonce-claim-replay-001', 9999999999)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.repo.RedeemCodeWithBinding(context.Background(), cardHashForCode("UCXX-YYZZ-2345"), true, testBinding("nonce-claim-replay-001")); !errors.Is(err, ErrBindNonceReused) {
+		t.Fatalf("replayed nonce err=%v", err)
+	}
+	if events, _ := f.repo.ListRedemptionEvents(context.Background(), 0, 10); len(events) != 0 {
+		t.Fatalf("no events expected, got %d", len(events))
+	}
+}

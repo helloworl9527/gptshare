@@ -100,6 +100,12 @@ func consumeBindNonce(ctx context.Context, tx *sql.Tx, binding *RedemptionBindin
 }
 
 func insertRedemptionEvent(ctx context.Context, tx *sql.Tx, binding *RedemptionBinding, kind string, cardID int64, durationDays int, expiresAt, now time.Time) error {
+	return insertEvent(ctx, tx, binding, kind, cardID, durationDays, expiresAt, now, false)
+}
+
+// insertEvent 写一条兑换事件。claimed=true 是老卡补挂：detail 里一律带 claimed=true、rebate_eligible=false，
+// 用户中心照常按 new 事件授予归属，但永远不计邀请返利、不算新下单。
+func insertEvent(ctx context.Context, tx *sql.Tx, binding *RedemptionBinding, kind string, cardID int64, durationDays int, expiresAt, now time.Time, claimed bool) error {
 	if binding == nil {
 		return nil
 	}
@@ -107,10 +113,18 @@ func insertRedemptionEvent(ctx context.Context, tx *sql.Tx, binding *RedemptionB
 	if err != nil {
 		return err
 	}
-	detail, err := json.Marshal(struct {
-		Plan     string `json:"plan"`
-		ExpireAt string `json:"expire_at"`
-	}{Plan: strconv.Itoa(durationDays) + "天", ExpireAt: expiresAt.In(displayZone).Format(time.DateOnly)})
+	type eventDetail struct {
+		Plan           string `json:"plan"`
+		ExpireAt       string `json:"expire_at"`
+		Claimed        *bool  `json:"claimed,omitempty"`
+		RebateEligible *bool  `json:"rebate_eligible,omitempty"`
+	}
+	d := eventDetail{Plan: strconv.Itoa(durationDays) + "天", ExpireAt: expiresAt.In(displayZone).Format(time.DateOnly)}
+	if claimed {
+		yes, no := true, false
+		d.Claimed, d.RebateEligible = &yes, &no
+	}
+	detail, err := json.Marshal(d)
 	if err != nil {
 		return err
 	}
@@ -142,6 +156,54 @@ func (r *Repository) backfillCardCode(ctx context.Context, tx *sql.Tx, binding *
 	_, err = tx.ExecContext(ctx, `UPDATE cards SET encrypted_code_key_id=?, encrypted_code=?, updated_at=? WHERE id=? AND `+missing,
 		sealed.KeyID, sealed.Ciphertext, formatTime(now), cardID)
 	return err
+}
+
+// claimCard 老卡补挂：已兑换、仍在有效期、还没有归属事件的卡，在同一个写事务里
+// 占 nonce + 写 claimed 事件 + 补存加密卡密（老批次卡没有存档时）。返回 claimed / already_bound / not_claimable。
+// 数据库只有一个连接，事务天然串行；仍在事务内先查后写。
+func (r *Repository) claimCard(ctx context.Context, codeHash []byte, binding *RedemptionBinding) (string, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+	now := r.now().UTC()
+	var cardID int64
+	var status string
+	var durationDays int
+	var expiresAt sql.NullString
+	if err := tx.QueryRowContext(ctx, "SELECT id,status,duration_days,expires_at FROM cards WHERE code_hash=?", codeHash).
+		Scan(&cardID, &status, &durationDays, &expiresAt); err != nil {
+		return "", err
+	}
+	if status != "redeemed" || !expiresAt.Valid {
+		return "not_claimable", nil
+	}
+	expires, err := parseTime(expiresAt.String)
+	if err != nil || !expires.After(now) {
+		return "not_claimable", nil
+	}
+	var bound int
+	if err := tx.QueryRowContext(ctx, "SELECT count(*) FROM redemption_events WHERE entitlement_ref=? AND kind='new'",
+		CardEntitlementRef(cardID)).Scan(&bound); err != nil {
+		return "", err
+	}
+	if bound > 0 {
+		return "already_bound", nil
+	}
+	if err := consumeBindNonce(ctx, tx, binding); err != nil {
+		return "", err
+	}
+	if err := insertEvent(ctx, tx, binding, RedemptionKindNew, cardID, durationDays, expires, now, true); err != nil {
+		return "", err
+	}
+	if err := r.backfillCardCode(ctx, tx, binding, cardID, now); err != nil {
+		return "", err
+	}
+	if err := tx.Commit(); err != nil {
+		return "", err
+	}
+	return "claimed", nil
 }
 
 // ListRedemptionEvents 按 id 升序返回 id > after 的事件。

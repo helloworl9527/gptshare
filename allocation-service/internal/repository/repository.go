@@ -106,6 +106,8 @@ type RedeemResult struct {
 	Allocation models.Allocation
 	Card       models.Card
 	Account    models.Account
+	// Bind 只在带绑定票据时有值：new（这次兑换并归属）/ claimed（老卡补挂）/ already_bound / not_claimable。
+	Bind string
 }
 
 type ReplacementResult struct {
@@ -958,7 +960,19 @@ func (r *Repository) RedeemCode(ctx context.Context, codeHash []byte, monitorAva
 func (r *Repository) RedeemCodeWithBinding(ctx context.Context, codeHash []byte, monitorAvailable bool, binding *RedemptionBinding) (RedeemResult, error) {
 	result, err := r.redeemCard(ctx, "code_hash=?", codeHash, monitorAvailable, binding)
 	if errors.Is(err, ErrCardStateConflict) {
-		return r.existingRedeemByCodeHash(ctx, codeHash)
+		bind := ""
+		if binding != nil {
+			// 卡已兑换过：登录用户再输入时做补挂判断（docs/claim-old-codes.md），在自己的写事务里完成
+			if bind, err = r.claimCard(ctx, codeHash, binding); err != nil {
+				return RedeemResult{}, err
+			}
+		}
+		existing, err := r.existingRedeemByCodeHash(ctx, codeHash)
+		existing.Bind = bind
+		return existing, err
+	}
+	if err == nil && binding != nil {
+		result.Bind = "new"
 	}
 	return result, err
 }

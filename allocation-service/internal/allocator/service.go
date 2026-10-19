@@ -45,6 +45,7 @@ type RedeemResult struct {
 	Account    models.Account
 	Warnings   []string
 	Elapsed    time.Duration
+	Bind       string // 带绑定票据时：new / claimed / already_bound / not_claimable
 }
 
 type AdminAllocation struct {
@@ -90,9 +91,9 @@ func (s *Service) RedeemWithBinding(ctx context.Context, code string, binding *B
 	if binding != nil {
 		sum := sha256.Sum256([]byte(code))
 		redemptionBinding = &repository.RedemptionBinding{
-			UserUID:     binding.UserUID,
-			Nonce:       binding.Nonce,
-			NonceExp:    binding.Exp,
+			UserUID:       binding.UserUID,
+			Nonce:         binding.Nonce,
+			NonceExp:      binding.Exp,
 			CodeHashHex:   hex.EncodeToString(sum[:]),
 			CodePlaintext: code,
 		}
@@ -111,7 +112,7 @@ func (s *Service) RedeemWithBinding(ctx context.Context, code string, binding *B
 		return RedeemResult{}, err
 	}
 	_ = s.repo.Audit(ctx, "cards.redeem", "card", result.Card.ID, map[string]any{"account_id": result.Account.ID, "monitor_available": monitorAvailable})
-	return RedeemResult{Allocation: result.Allocation, Card: result.Card, Account: result.Account, Warnings: warnings, Elapsed: s.now().Sub(started)}, nil
+	return RedeemResult{Allocation: result.Allocation, Card: result.Card, Account: result.Account, Warnings: warnings, Elapsed: s.now().Sub(started), Bind: result.Bind}, nil
 }
 
 func (s *Service) ListActive(ctx context.Context) ([]AdminAllocation, error) {
